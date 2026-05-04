@@ -1,0 +1,982 @@
+"""
+ETF AI预测策略 - 回测模块
+"""
+
+import pandas as pd
+import numpy as np
+import json
+import joblib
+import torch
+import multiprocessing as mp
+import os
+import tempfile
+from typing import Dict, Any, Optional, List
+from dataclasses import dataclass, field
+from datetime import datetime
+
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+
+plt.rcParams["font.sans-serif"] = ["SimHei", "DejaVu Sans"]
+plt.rcParams["axes.unicode_minus"] = False
+
+
+@dataclass
+class BacktestResult:
+    """回测结果数据类"""
+
+    start_date: str
+    end_date: str
+    strategy_return: float
+    hs300_return: float
+    excess_return: float
+    max_drawdown: float
+    drawdown_days: int
+    recovered: bool
+    recovery_days: Optional[int]
+    log_file: Optional[str] = None
+    equity_curve: pd.DataFrame = field(default_factory=pd.DataFrame)
+    hs300_data: pd.DataFrame = field(default_factory=pd.DataFrame)
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = {
+            "回测期间": f"{self.start_date} ~ {self.end_date}",
+            "策略累计收益": f"{self.strategy_return:.2f}%",
+            "HS300累计收益": f"{self.hs300_return:.2f}%",
+            "超额收益": f"{self.excess_return:.2f}%",
+            "最大回撤": f"{self.max_drawdown:.2f}%",
+            "回撤持续天数": self.drawdown_days,
+            "是否恢复": self.recovered,
+            "恢复天数": self.recovery_days,
+        }
+        if self.log_file:
+            result["日志文件"] = self.log_file
+        return result
+
+    def print_summary(self):
+        print("=" * 50)
+        print("回测结果汇总")
+        print("=" * 50)
+        for k, v in self.to_dict().items():
+            print(f"{k}: {v}")
+        print("=" * 50)
+
+    def plot(self, save_path: str = None):
+        """绘制回测结果图表"""
+        if self.equity_curve.empty:
+            print("没有回测数据可绘制")
+            return
+
+        equity = self.equity_curve.copy()
+        equity["date"] = pd.to_datetime(equity["date"])
+        initial_capital = equity["total_value"].iloc[0]
+        equity["策略收益率"] = (equity["total_value"] / initial_capital - 1) * 100
+
+        if not self.hs300_data.empty:
+            hs300 = self.hs300_data.copy()
+            hs300["date"] = pd.to_datetime(hs300["date"])
+            initial_hs300 = hs300["close"].iloc[0]
+            hs300["基准收益率"] = (hs300["close"] / initial_hs300 - 1) * 100
+
+            merged = pd.merge(
+                equity[["date", "策略收益率"]],
+                hs300[["date", "基准收益率"]],
+                on="date",
+                how="inner",
+            )
+        else:
+            merged = equity[["date", "策略收益率"]].copy()
+            merged["基准收益率"] = 0.0
+
+        fig, ax = plt.subplots(figsize=(14, 8))
+        ax.set_facecolor("#f5f5f5")
+        fig.patch.set_facecolor("white")
+
+        ax.plot(
+            merged["date"],
+            merged["策略收益率"],
+            label="策略收益率",
+            color="#2ecc71",
+            linewidth=2.5,
+            alpha=0.9,
+        )
+
+        if not self.hs300_data.empty:
+            ax.plot(
+                merged["date"],
+                merged["基准收益率"],
+                label="沪深300收益率",
+                color="#e74c3c",
+                linewidth=2,
+                alpha=0.8,
+                linestyle="--",
+            )
+
+        ax.fill_between(
+            merged["date"],
+            0,
+            merged["策略收益率"],
+            where=merged["策略收益率"] >= 0,
+            color="#2ecc71",
+            alpha=0.15,
+            interpolate=True,
+        )
+        ax.fill_between(
+            merged["date"],
+            0,
+            merged["策略收益率"],
+            where=merged["策略收益率"] < 0,
+            color="#e74c3c",
+            alpha=0.15,
+            interpolate=True,
+        )
+
+        ax.axhline(y=0, color="black", linestyle="-", linewidth=0.8, alpha=0.5)
+        ax.set_title(
+            "策略 vs 沪深300 累计收益率", fontsize=16, fontweight="bold", pad=20
+        )
+        ax.set_xlabel("日期", fontsize=12)
+        ax.set_ylabel("累计收益率 (%)", fontsize=12)
+
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+        ax.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
+        plt.xticks(rotation=45, ha="right")
+        ax.grid(True, alpha=0.3, linestyle="--", linewidth=0.8)
+        ax.legend(loc="upper left", fontsize=11, framealpha=0.9, edgecolor="gray")
+
+        color = "#2ecc71" if self.excess_return >= 0 else "#e74c3c"
+        ax.text(
+            0.02,
+            0.75,
+            f"最终策略收益: {self.strategy_return:.2f}%",
+            transform=ax.transAxes,
+            fontsize=11,
+            verticalalignment="top",
+            bbox=dict(boxstyle="round", facecolor="#2ecc71", alpha=0.3),
+        )
+        ax.text(
+            0.02,
+            0.68,
+            f"最终基准收益: {self.hs300_return:.2f}%",
+            transform=ax.transAxes,
+            fontsize=11,
+            verticalalignment="top",
+            bbox=dict(boxstyle="round", facecolor="#e74c3c", alpha=0.3),
+        )
+        ax.text(
+            0.02,
+            0.61,
+            f"超额收益: {self.excess_return:+.2f}%",
+            transform=ax.transAxes,
+            fontsize=11,
+            verticalalignment="top",
+            bbox=dict(boxstyle="round", facecolor=color, alpha=0.3),
+        )
+
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=150, bbox_inches="tight")
+            print(f"图表已保存到: {save_path}")
+        else:
+            plt.show()
+
+        plt.close()
+
+
+class BacktestEngine:
+    """回测引擎"""
+
+    def __init__(
+        self,
+        initial_capital=1000000,
+        commission=0.0003,
+        top_k=5,
+        position_pct=0.95,
+        log=False,
+        log_file=None,
+    ):
+        self.initial_capital = initial_capital
+        self.commission = commission
+        self.top_k = top_k
+        self.position_pct = position_pct
+        self.log = log
+        self.log_file = log_file
+
+        self.cash = initial_capital
+        self.positions = {}
+        self.positions_prev = {}
+        self.equity_curve = []
+        self.trades = []
+        self._prev_total_value = initial_capital
+
+        self._log_fh = None
+        if self.log_file:
+            self._log_fh = open(self.log_file, "w", encoding="utf-8")
+
+    def _write_log(self, msg: str):
+        print(msg)
+        if self._log_fh:
+            self._log_fh.write(msg + "\n")
+            self._log_fh.flush()
+
+    def close_log(self):
+        if self._log_fh:
+            self._log_fh.close()
+            self._log_fh = None
+
+    def buy(self, stock, price, value, date):
+        shares = int(value / price / 100) * 100
+        if shares == 0:
+            return
+        cost = shares * price * (1 + self.commission)
+        if cost > self.cash:
+            shares = int(self.cash / price / (1 + self.commission) / 100) * 100
+            if shares == 0:
+                return
+            cost = shares * price * (1 + self.commission)
+        self.cash -= cost
+
+        if stock not in self.positions:
+            self.positions[stock] = {"shares": 0, "cost": 0}
+
+        old_shares = self.positions[stock]["shares"]
+        old_cost = self.positions[stock]["cost"]
+        new_shares = old_shares + shares
+        new_cost = old_cost + cost
+
+        self.positions[stock] = {"shares": new_shares, "cost": new_cost}
+
+        self.trades.append(
+            {
+                "date": date,
+                "action": "买入",
+                "stock": stock,
+                "price": price,
+                "shares": shares,
+                "amount": cost,
+            }
+        )
+
+    def sell(self, stock, price, percent=1.0, date=None):
+        if stock not in self.positions:
+            return
+        shares = int(self.positions[stock]["shares"] * percent / 100) * 100
+        if shares == 0:
+            return
+        revenue = shares * price * (1 - self.commission)
+        self.cash += revenue
+
+        self.trades.append(
+            {
+                "date": date,
+                "action": "卖出",
+                "stock": stock,
+                "price": price,
+                "shares": shares,
+                "amount": revenue,
+            }
+        )
+
+        self.positions[stock]["shares"] -= shares
+        self.positions[stock]["cost"] -= self.positions[stock]["cost"] * (
+            shares / (self.positions[stock]["shares"] + shares)
+        )
+
+        if self.positions[stock]["shares"] == 0:
+            del self.positions[stock]
+
+    def get_total_value(self, price_dict):
+        pos_value = sum(
+            self.positions.get(st, {}).get("shares", 0) * price_dict.get(st, 0)
+            for st in self.positions
+        )
+        return self.cash + pos_value
+
+    def run(
+        self,
+        dates: List,
+        price_data: pd.DataFrame,
+        predictions_func,
+        rebalance_days: int = 5,
+        first_rebalance_date=None,
+    ) -> List[Dict]:
+        """运行回测"""
+        if first_rebalance_date is None:
+            first_rebalance_date = dates[0]
+
+        start_idx = 0
+        for i, d in enumerate(dates):
+            if d >= first_rebalance_date:
+                start_idx = i
+                break
+
+        if self.log:
+            self._write_log(f"\n{'=' * 50}")
+            self._write_log(
+                f"回测开始，第一个调仓日: {first_rebalance_date.strftime('%Y-%m-%d')}"
+            )
+            self._write_log(f"{'=' * 50}\n")
+
+        for i in range(start_idx, len(dates)):
+            current_date = dates[i]
+            date_data = price_data[price_data["日期"] == current_date]
+            price_dict = dict(zip(date_data["股票代码"], date_data["收盘"]))
+            total_value = self.get_total_value(price_dict)
+            self.equity_curve.append({"date": current_date, "total_value": total_value})
+
+            if self.log:
+                position_pct = (
+                    (total_value - self.cash) / total_value * 100
+                    if total_value > 0
+                    else 0
+                )
+                daily_return = (total_value / self._prev_total_value - 1) * 100
+                total_return = (total_value / self.initial_capital - 1) * 100
+
+                self._write_log(f"\n{'=' * 50}")
+                self._write_log(f"{current_date.strftime('%Y-%m-%d')}")
+                self._write_log(
+                    f"账户总资产: {total_value:.2f} ({(total_value - self._prev_total_value):+.2f}, {daily_return:+.2f}%)"
+                )
+                self._write_log(f"持有现金: {self.cash:.2f}")
+                self._write_log(f"仓位比例: {position_pct:.2f}%")
+                self._write_log(f"累计收益率: {total_return:+.2f}%")
+
+                self._write_log("持仓:")
+                winning = 0
+                total = 0
+                for stock, pos_info in self.positions.items():
+                    shares = pos_info["shares"]
+                    cost = pos_info["cost"]
+                    price = price_dict.get(stock, 0)
+                    pos_value = shares * price
+                    profit = pos_value - cost
+                    profit_pct = (profit / cost * 100) if cost > 0 else 0
+                    profit_str = (
+                        f"盈{profit:+.2f}({profit_pct:+.2f}%)"
+                        if profit >= 0
+                        else f"亏{profit:+.2f}({profit_pct:+.2f}%)"
+                    )
+
+                    prev_shares = self.positions_prev.get(stock, {}).get("shares", 0)
+                    prev_value = prev_shares * price_dict.get(stock, 0)
+                    change = pos_value - prev_value
+                    change_str = f" ({change:+.2f})" if change != 0 else ""
+
+                    self._write_log(
+                        f"  {stock}: {shares}股 @ {price:.4f} | {profit_str} | 市值:{pos_value:.2f}{change_str}"
+                    )
+
+                    if profit > 0:
+                        winning += 1
+                    total += 1
+
+                if total > 0:
+                    win_rate = winning / total * 100
+                    self._write_log(f"持仓胜率: {winning}/{total} ({win_rate:.1f}%)")
+
+                self._write_log(f"{'=' * 50}\n")
+
+            self._prev_total_value = total_value
+            self.positions_prev = {
+                s: {"shares": p["shares"], "cost": p["cost"]}
+                for s, p in self.positions.items()
+            }
+
+            if (i - start_idx) % rebalance_days == 0:
+                if self.log:
+                    self._write_log(f"\n{'=' * 50}")
+                    self._write_log(f"调仓日: {current_date.strftime('%Y-%m-%d')}")
+
+                predictions = predictions_func(current_date)
+                if predictions is None:
+                    if self.log:
+                        self._write_log("预测失败，跳过调仓")
+                    continue
+
+                if self.log:
+                    self._write_log(f"目标持仓 (Top {self.top_k}):")
+                    for p in predictions[: self.top_k]:
+                        self._write_log(
+                            f"  {p['rank']}. {p['stock_id']} (score: {p['score']:.4f})"
+                        )
+
+                if self.log:
+                    prev_holdings = set(self.positions.keys())
+                    target_holdings = set(
+                        [p["stock_id"] for p in predictions[: self.top_k]]
+                    )
+                    kept = prev_holdings & target_holdings
+                    new_added = target_holdings - prev_holdings
+                    exited = prev_holdings - target_holdings
+                    self._write_log(
+                        f"调仓变化: 新增{len(new_added)}只, 保留{len(kept)}只, 剔除{len(exited)}只"
+                    )
+                    if kept:
+                        self._write_log(f"  保留: {list(kept)}")
+                    if new_added:
+                        self._write_log(f"  新增: {list(new_added)}")
+                    if exited:
+                        self._write_log(f"  剔除: {list(exited)}")
+
+                for stock in list(self.positions.keys()):
+                    if stock not in [p["stock_id"] for p in predictions[: self.top_k]]:
+                        self.sell(stock, price_dict.get(stock, 0), 1.0, current_date)
+                        if self.log:
+                            self._write_log(f"卖出: {stock}")
+
+                buy_value = total_value * self.position_pct / self.top_k
+                if self.log:
+                    total_pct = self.position_pct * 100
+                    self._write_log(
+                        f"总仓位: {total_pct:.2f}%, 每只股票目标市值: {buy_value:.2f} ({buy_value / total_value * 100:.2f}%)"
+                    )
+
+                for pred in predictions[: self.top_k]:
+                    stock = pred["stock_id"]
+                    price = price_dict.get(stock, 0)
+                    if price > 0 and stock not in self.positions:
+                        self.buy(stock, price, buy_value, current_date)
+                        if self.log:
+                            shares = self.positions[stock]["shares"]
+                            actual_value = shares * price
+                            pct = actual_value / total_value * 100
+                            self._write_log(
+                                f"买入 {stock}: {shares}股 @ {price:.4f} (市值: {actual_value:.2f}, 占比: {pct:.2f}%)"
+                            )
+                    elif price > 0 and stock in self.positions:
+                        if self.log:
+                            shares = self.positions[stock]["shares"]
+                            cost = self.positions[stock]["cost"]
+                            actual_value = shares * price
+                            pct = actual_value / total_value * 100
+                            self._write_log(
+                                f"持有 {stock}: {shares}股 @ {price:.4f} (市值: {actual_value:.2f}, 占比: {pct:.2f}%)"
+                            )
+
+                if self.log:
+                    self._write_log(f"调仓完成, 组合价值: {total_value:.2f}")
+                    self._write_log(f"{'=' * 50}\n")
+
+        return self.equity_curve
+
+
+class ETFBacktester:
+    """ETF回测主类"""
+
+    # 类变量用于缓存数据
+    _cached_data = {}
+    _cached_features = {}
+
+    def __init__(
+        self,
+        model_dir: str,
+        data_path: str,
+        device: str = "cuda",
+        model_file: str = "best_model_sliding.pth",
+        verbose: bool = False,
+    ):
+        """
+        初始化回测器
+
+        Args:
+            model_dir: 模型目录路径
+            data_path: ETF数据文件路径
+            device: 设备 (cuda/cpu)
+            model_file: 模型权重文件 (best_model.pth 或 best_model_sliding.pth)
+            verbose: 是否打印初始化信息
+        """
+        self.model_dir = model_dir
+        self.data_path = data_path
+        self.device = torch.device(device if torch.cuda.is_available() else "cpu")
+        self.model_file = model_file
+        self.verbose = verbose
+        self.processed = None  # 初始化为None
+
+        self._load_model()
+        self._load_data()
+        self._prepare_features()
+
+    @classmethod
+    def load_data_once(
+        cls, data_path: str, scaler_path: str, feature_num: str, verbose: bool = False
+    ):
+        """
+        预加载并缓存数据，供多次回测使用
+
+        Args:
+            data_path: 数据文件路径
+            scaler_path: scaler文件路径
+            feature_num: 特征编号
+            verbose: 是否打印日志
+        """
+        cache_key = f"{data_path}_{scaler_path}"
+
+        if cache_key in cls._cached_data:
+            if verbose:
+                print(f"使用缓存数据: {data_path}")
+            return cls._cached_data[cache_key], cls._cached_features[cache_key]
+
+        if verbose:
+            print(f"加载并缓存数据: {data_path}")
+
+        # 加载数据
+        df = pd.read_csv(data_path)
+        df["日期"] = pd.to_datetime(df["日期"])
+        df["股票代码"] = df["股票代码"].astype(str).str.zfill(6)
+        df = df.sort_values(["股票代码", "日期"]).reset_index(drop=True)
+
+        # 加载scaler
+        scaler = joblib.load(scaler_path)
+
+        # 特征工程
+        from train import feature_cloums_map, feature_engineer_func_map
+        from tqdm import tqdm
+        import multiprocessing as mp
+
+        feature_engineer = feature_engineer_func_map[feature_num]
+        features = feature_cloums_map[feature_num]
+
+        groups = [group for _, group in df.groupby("股票代码", sort=False)]
+        num_processes = 1  # Use single process to avoid OOM
+
+        with mp.Pool(processes=num_processes) as pool:
+            processed_list = list(
+                tqdm(
+                    pool.imap(feature_engineer, groups),
+                    total=len(groups),
+                    desc="特征工程",
+                    disable=not verbose,
+                )
+            )
+
+        processed = pd.concat(processed_list).reset_index(drop=True)
+
+        stock_ids = sorted(processed["股票代码"].unique())
+        stockid2idx = {sid: idx for idx, sid in enumerate(stock_ids)}
+        processed["instrument"] = processed["股票代码"].map(stockid2idx)
+        processed = processed.dropna(subset=["instrument"]).copy()
+        processed["instrument"] = processed["instrument"].astype(np.int64)
+
+        processed[features] = (
+            processed[features].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        )
+        processed[features] = scaler.transform(processed[features])
+
+        # 缓存
+        cls._cached_data[cache_key] = {
+            "df": df,
+            "processed": processed,  # 添加处理后的数据
+            "scaler": scaler,
+            "stock_ids": stock_ids,
+            "stockid2idx": stockid2idx,
+        }
+        cls._cached_features[cache_key] = {
+            "features": features,
+            "feature_engineer": feature_engineer,
+        }
+
+        if verbose:
+            print(f"数据缓存完成: {len(df)} 条记录, {len(stock_ids)} 只股票")
+
+        return cls._cached_data[cache_key], cls._cached_features[cache_key]
+
+    @classmethod
+    def from_cached_data(
+        cls,
+        model_dir: str,
+        cached_data: dict,
+        cached_features: dict,
+        device: str = "cuda",
+        model_file: str = "best_model_sliding.pth",
+        verbose: bool = False,
+    ):
+        """
+        使用缓存数据创建回测器
+
+        Args:
+            model_dir: 模型目录路径
+            cached_data: 缓存的数据字典
+            cached_features: 缓存的特征信息
+            device: 设备
+            model_file: 模型文件
+            verbose: 是否打印日志
+        """
+        instance = cls.__new__(cls)
+        instance.model_dir = model_dir
+        instance.data_path = None
+        instance.device = torch.device(device if torch.cuda.is_available() else "cpu")
+        instance.model_file = model_file
+        instance.verbose = verbose
+
+        # 使用缓存数据
+        instance.df = cached_data["df"]
+        instance.processed = cached_data["processed"]  # 直接使用已处理的特征数据
+        instance.scaler = cached_data["scaler"]
+        instance.stock_ids = cached_data["stock_ids"]
+        instance.stockid2idx = cached_data["stockid2idx"]
+        instance.features = cached_features["features"]
+        instance.feature_engineer = cached_features["feature_engineer"]
+
+        instance._load_model()
+        return instance
+
+    def _load_model(self):
+        """加载模型和配置"""
+        config_path = f"{self.model_dir}/config.json"
+        model_path = f"{self.model_dir}/{self.model_file}"
+        scaler_path = f"{self.model_dir}/scaler.pkl"
+
+        with open(config_path, "r") as f:
+            self.config = json.load(f)
+
+        # 动态获取股票数量
+        if self.df is not None:
+            num_stocks = self.df["股票代码"].nunique()
+        else:
+            num_stocks = len(self.stock_ids)
+        input_dim = len(self.features)
+
+        from model import create_model
+
+        self.model = create_model(
+            self.config["model_type"], input_dim, self.config, num_stocks
+        )
+        self.model.load_state_dict(torch.load(model_path, map_location=self.device))
+        self.model = self.model.to(self.device)
+        self.model.eval()
+
+        self.num_stocks = num_stocks
+        self.seq_length = self.config["sequence_length"]
+
+        if self.verbose:
+            print(f"模型加载完成: {self.model_dir}/{self.model_file}")
+            print(f"股票数量: {num_stocks}, 特征数量: {input_dim}")
+
+    def _load_data(self):
+        """加载数据 - 已弃用，使用缓存机制"""
+        pass
+
+    def _prepare_features(self):
+        """准备特征数据 - 已弃用，直接使用缓存的processed数据"""
+        if self.verbose:
+            print(f"特征准备完成 (使用缓存): {self.processed.shape}")
+
+    def _get_predictions(self, target_date) -> Optional[List[Dict]]:
+        """获取模型预测"""
+        all_dates_sorted = sorted(self.processed["日期"].unique())
+        try:
+            target_idx = all_dates_sorted.index(target_date)
+        except:
+            return None
+        if target_idx < self.seq_length:
+            return None
+
+        sequences = []
+        valid_stock_ids = []
+
+        for stock_id in self.stock_ids:
+            stock_history = (
+                self.processed[
+                    (self.processed["股票代码"] == stock_id)
+                    & (self.processed["日期"] <= target_date)
+                ]
+                .sort_values("日期")
+                .tail(self.seq_length)
+            )
+            if len(stock_history) == self.seq_length:
+                sequences.append(stock_history[self.features].values.astype(np.float32))
+                valid_stock_ids.append(stock_id)
+
+        if len(sequences) == 0:
+            return None
+
+        sequences_np = np.asarray(sequences, dtype=np.float32)
+
+        with torch.no_grad():
+            x = torch.from_numpy(sequences_np).unsqueeze(0).to(self.device)
+            scores = self.model(x).squeeze(0).detach().cpu().numpy()
+
+        order = np.argsort(scores)[::-1]
+        predictions = []
+        for rank, i in enumerate(order):
+            predictions.append(
+                {"rank": rank + 1, "stock_id": valid_stock_ids[i], "score": scores[i]}
+            )
+
+        return predictions
+
+    def run(
+        self,
+        start_date: str,
+        end_date: str,
+        top_k: int = 5,
+        rebalance_days: int = 5,
+        position_pct: float = 0.95,
+        initial_capital: float = 1000000,
+        commission: float = 0.0003,
+        first_rebalance_date: str = None,
+        log: bool = False,
+    ) -> BacktestResult:
+        """
+        运行回测
+
+        Args:
+            start_date: 回测开始日期 (YYYY-MM-DD)
+            end_date: 回测结束日期 (YYYY-MM-DD)
+            top_k: 持仓股票数量
+            rebalance_days: 调仓频率(天)
+            position_pct: 仓位比例
+            initial_capital: 初始资金
+            commission: 手续费率
+            first_rebalance_date: 首次调仓日期
+            log: 是否打印交易过程日志
+
+        Returns:
+            BacktestResult: 回测结果
+        """
+        start_ts = pd.Timestamp(start_date)
+        end_ts = pd.Timestamp(end_date)
+
+        all_dates = sorted(self.df["日期"].unique())
+        backtest_dates = [d for d in all_dates if start_ts <= d < end_ts]
+
+        if first_rebalance_date:
+            first_reb_ts = pd.Timestamp(first_rebalance_date)
+        else:
+            first_reb_ts = backtest_dates[0] if len(backtest_dates) > 0 else None
+
+        # 获取HS300数据 (使用510300华夏沪深300ETF作为代理)
+        hs300_code = "510300.XSHG"
+        hs300_data = self.df[self.df["股票代码"] == hs300_code][["日期", "收盘"]].copy()
+        hs300_data = hs300_data.rename(columns={"日期": "date", "收盘": "close"})
+        hs300_data["date"] = pd.to_datetime(hs300_data["date"])
+        hs300_data = hs300_data[
+            (hs300_data["date"] >= start_ts) & (hs300_data["date"] < end_ts)
+        ].copy()
+
+        def predictions_func(date):
+            return self._get_predictions(date)
+
+        log_file = None
+        if log:
+            log_file = "/home/linuxyl/THU-BDC2026/temp/backtest.log"
+
+        engine = BacktestEngine(
+            initial_capital=initial_capital,
+            commission=commission,
+            top_k=top_k,
+            position_pct=position_pct,
+            log=log,
+            log_file=log_file,
+        )
+
+        results = engine.run(
+            dates=backtest_dates,
+            price_data=self.df,
+            predictions_func=predictions_func,
+            rebalance_days=rebalance_days,
+            first_rebalance_date=first_reb_ts,
+        )
+
+        # 计算策略收益
+        equity_df = pd.DataFrame(results)
+        equity_df["date"] = pd.to_datetime(equity_df["date"])
+        strategy_return = (
+            equity_df["total_value"].iloc[-1] / initial_capital - 1
+        ) * 100
+
+        # 计算HS300收益
+        if len(hs300_data) > 0:
+            hs300_data = hs300_data.sort_values("date").reset_index(drop=True)
+            hs300_return = (
+                hs300_data["close"].iloc[-1] / hs300_data["close"].iloc[0] - 1
+            ) * 100
+        else:
+            hs300_return = 0.0
+
+        excess_return = strategy_return - hs300_return
+
+        # 计算最大回撤
+        cumulative = (equity_df["total_value"] / initial_capital).values
+        running_max = np.maximum.accumulate(cumulative)
+        drawdown = (cumulative - running_max) / running_max * 100
+        max_drawdown = abs(drawdown.min())
+
+        if max_drawdown > 0:
+            end_idx = int(np.argmin(drawdown))
+
+            # 找到回撤开始的索引
+            max_idx = int(np.argmax(running_max[: end_idx + 1]))
+            drawdown_days = end_idx - max_idx
+
+            # 计算恢复天数
+            recovery_idx = None
+            for idx in range(end_idx + 1, len(cumulative)):
+                if cumulative[idx] >= cumulative[max_idx]:
+                    recovery_idx = idx
+                    break
+
+            recovery_days = None
+            if recovery_idx is not None:
+                recovery_days = int(recovery_idx - end_idx)
+
+            recovered = recovery_idx is not None
+        else:
+            drawdown_days = 0
+            recovery_days = None
+            recovered = True
+
+        result = BacktestResult(
+            start_date=start_date,
+            end_date=end_date,
+            strategy_return=strategy_return,
+            hs300_return=hs300_return,
+            excess_return=excess_return,
+            max_drawdown=max_drawdown,
+            drawdown_days=int(drawdown_days),
+            recovered=recovered,
+            recovery_days=recovery_days,
+            log_file=log_file,
+            equity_curve=equity_df,
+            hs300_data=hs300_data,
+        )
+
+        if engine._log_fh:
+            engine.close_log()
+
+        return result
+
+
+def run_etf_backtest(
+    model_dir: str,
+    data_path: str,
+    start_date: str,
+    end_date: str,
+    top_k: int = 5,
+    rebalance_days: int = 5,
+    position_pct: float = 0.95,
+    initial_capital: float = 1000000,
+    commission: float = 0.0003,
+    first_rebalance_date: str = None,
+    device: str = "cuda",
+    model_file: str = "best_model_sliding.pth",
+    log: bool = False,
+    verbose: bool = False,
+) -> BacktestResult:
+    """
+    运行ETF回测的便捷函数
+
+    Args:
+        model_dir: 模型目录路径
+        data_path: ETF数据文件路径
+        start_date: 回测开始日期 (YYYY-MM-DD)
+        end_date: 回测结束日期 (YYYY-MM-DD)
+        top_k: 持仓股票数量
+        rebalance_days: 调仓频率(天)
+        position_pct: 仓位比例
+        initial_capital: 初始资金
+        commission: 手续费率
+        first_rebalance_date: 首次调仓日期
+        device: 设备 (cuda/cpu)
+        model_file: 模型权重文件 (best_model.pth 或 best_model_sliding.pth)
+        log: 是否打印交易过程日志
+
+    Returns:
+        BacktestResult: 回测结果
+
+    Example:
+        >>> result = run_etf_backtest(
+        ...     model_dir="./etf_model/search_itransformer_60_39/exp_40",
+        ...     data_path="./etf_data/etf_41.csv",
+        ...     start_date="2025-01-02",
+        ...     end_date="2025-12-31",
+        ...     first_rebalance_date="2025-01-02",
+        ...     model_file="best_model.pth",
+        ...     verbose=True
+        ... )
+        >>> result.print_summary()
+    """
+    # 首先预加载数据
+    scaler_path = f"{model_dir}/scaler.pkl"
+    import json
+
+    with open(f"{model_dir}/config.json") as f:
+        config = json.load(f)
+
+    cached_data, cached_features = ETFBacktester.load_data_once(
+        data_path=data_path,
+        scaler_path=scaler_path,
+        feature_num=config["feature_num"],
+        verbose=verbose,
+    )
+
+    # 多次回测不同模型
+    backtester = ETFBacktester.from_cached_data(
+        model_dir=model_dir,
+        cached_data=cached_data,
+        cached_features=cached_features,
+        device=device,
+        model_file=model_file,
+        verbose=False,
+    )
+
+    # 保存结果
+    result = backtester.run(
+        start_date=start_date,
+        end_date=end_date,
+        top_k=top_k,
+        rebalance_days=rebalance_days,
+        position_pct=position_pct,
+        initial_capital=initial_capital,
+        commission=commission,
+        first_rebalance_date=first_rebalance_date,
+        log=log,
+    )
+
+    # 显式清理GPU内存
+    del backtester.model
+    del backtester
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    import gc
+    gc.collect()
+
+    return result
+
+
+if __name__ == "__main__":
+    import sys
+
+    # 默认参数
+    model_dir = "etf_model/search_itransformer_74/exp_53"
+    model_file = "best_model_sliding.pth"
+    data_path = "etf_data/etf_74.csv"
+    topk = 5
+    start_date = "2025-01-02"
+    end_date = "2025-12-31"
+    first_rebalance_date = "2025-01-02"
+
+    # 从命令行参数读取
+    if len(sys.argv) >= 4:
+        model_dir = sys.argv[1]
+        data_path = sys.argv[2]
+        start_date = sys.argv[3]
+        end_date = sys.argv[4]
+        if len(sys.argv) >= 6:
+            first_rebalance_date = sys.argv[5]
+
+    result = run_etf_backtest(
+        model_dir=model_dir,
+        data_path=data_path,
+        start_date=start_date,
+        end_date=end_date,
+        top_k=topk,
+        first_rebalance_date=first_rebalance_date,
+        log=True,
+        model_file=model_file,
+        verbose=True,
+    )
+    result.print_summary()
+    result.plot()

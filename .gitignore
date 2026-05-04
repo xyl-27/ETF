@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# 日志
+logs/
+*.log
+
+# 临时文件
+temp/
+tmp/
+*.tmp
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 编译文件
+*.so
+*.dll
+ta-lib/
+*.tar.gz
+
+# 代码缓存
+code/__pycache__/
+
+# 训练模型
+model/
+etf_model/
+
+# 笔记本
+notebooks/
+
+# 注意：以下文件会提交到仓库
+# *.csv - CSV数据文件
+# *.pt, *.pth, *.h5 - 模型参数文件
+# data/raw/ - 原始数据
+# models/ - 训练好的模型
+data/stock_data_with_jqfactors.csv
+data/hs300_D_jq.csv
+data/*.csv
+*.csv
+code/src/config.py
+data/stock_data.csv
+data/hs300_stock_list.csv
+pyproject.toml
+*Zone.Identifier
+notebooks/ETF_results.ipynb
+data/stock_data.csv
+data/hs300_stock_list.csv
