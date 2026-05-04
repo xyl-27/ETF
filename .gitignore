@@ -35,14 +35,13 @@ code/__pycache__/
 
 # 训练模型
 model/
-etf_model/
 
 # 数据文件
 data/
-etf_data/
 
 # 输出
 output/
 
 # 笔记本
 notebooks/
+etf_data/

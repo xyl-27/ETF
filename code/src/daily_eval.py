@@ -257,9 +257,9 @@ def daily_eval(
     try:
         config_module = __import__(config_name, fromlist=["config"])
         config = config_module.config.copy()
-        output_dir = config.get("output_dir", "./etf_model/default")
-        data_path = config.get("data_path", "./etf_data")
-        data_file = os.path.join(data_path, config.get("data_file", "etf_74.csv"))
+        output_dir = config.get("output_dir", "./model/default")
+        data_path = config.get("data_path", "./data")
+        data_file = os.path.join(data_path, config.get("data_file", "data_74.csv"))
 
         # 1. 查找最佳模型
         if verbose:

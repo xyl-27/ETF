@@ -515,7 +515,7 @@ def main(args):
     topk = config.get("top_k", 5)
     search_dir = config.get(
         "output_dir",
-        f"./etf_model/search_{config['model_type']}_{data_file.split('_')[1].split('.')[0]}_{topk}",
+        f"./model/search_{config['model_type']}_{data_file.split('_')[1].split('.')[0]}_{topk}",
     )
     os.makedirs(search_dir, exist_ok=True)
 

@@ -20,7 +20,7 @@ $CONFIG_NAME = "config"
 $SEQUENCE_LENGTH = 60
 $FEATURE_NUM = "39"
 $TOPK = 3
-$DATA_FILE = "etf_74.csv"
+$DATA_FILE = "data_74.csv"
 
 foreach ($MODEL_TYPE in $SEARCH_MODEL_TYPES) {
     Write-Host "========================================"
@@ -29,7 +29,7 @@ foreach ($MODEL_TYPE in $SEARCH_MODEL_TYPES) {
 
     # 计算搜索目录
     $N = 74
-    $SEARCH_DIR = "./etf_model/search_${MODEL_TYPE}_${N}_${TOPK}"
+    $SEARCH_DIR = "./model/search_${MODEL_TYPE}_${N}_${TOPK}"
     New-Item -ItemType Directory -Force -Path $SEARCH_DIR | Out-Null
 
     Write-Host "Config: $CONFIG_NAME"

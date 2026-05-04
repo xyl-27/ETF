@@ -19,10 +19,10 @@ config = {
     "top_k": topk,
     "top5_weight": 2.0,
     "val_months": val_months,
-    "output_dir": f"./etf_model/search_{model_type}_{N}_{topk}",
-    "output_base": "./etf_model",
-    "data_path": "./etf_data",
-    "data_file": "etf_74.csv",
+    "output_dir": f"./model/search_{model_type}_{N}_{topk}",
+    "output_base": "./model",
+    "data_path": "./data",
+    "data_file": "data_74.csv",
 }
 
 MODEL_CONFIGS = {

@@ -888,8 +888,8 @@ def run_etf_backtest(
 
     Example:
         >>> result = run_etf_backtest(
-        ...     model_dir="./etf_model/search_itransformer_60_39/exp_40",
-        ...     data_path="./etf_data/etf_41.csv",
+        ...     model_dir="./model/search_itransformer_60_39/exp_40",
+        ...     data_path="./data/data_41.csv",
         ...     start_date="2025-01-02",
         ...     end_date="2025-12-31",
         ...     first_rebalance_date="2025-01-02",
@@ -950,9 +950,9 @@ if __name__ == "__main__":
     import sys
 
     # 默认参数
-    model_dir = "etf_model/search_itransformer_74/exp_53"
+    model_dir = "model/search_itransformer_74/exp_53"
     model_file = "best_model_sliding.pth"
-    data_path = "etf_data/etf_74.csv"
+    data_path = "data/data_74.csv"
     topk = 5
     start_date = "2025-01-02"
     end_date = "2025-12-31"

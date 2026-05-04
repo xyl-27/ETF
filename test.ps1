@@ -18,7 +18,7 @@ import sys
 sys.path.insert(0, 'code/src')
 import importlib
 m = importlib.import_module('$CONFIG_NAME')
-print(m.config.get('output_dir', './etf_model/default'))
+print(m.config.get('output_dir', './model/default'))
 "
 
 Write-Host "Using config: $CONFIG_NAME"
