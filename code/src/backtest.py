@@ -849,7 +849,7 @@ class ETFBacktester:
         return result
 
 
-def run_etf_backtest(
+def run_backtest(
     model_dir: str,
     data_path: str,
     start_date: str,
@@ -887,7 +887,7 @@ def run_etf_backtest(
         BacktestResult: 回测结果
 
     Example:
-        >>> result = run_etf_backtest(
+        >>> result = run_backtest(
         ...     model_dir="./model/search_itransformer_60_39/exp_40",
         ...     data_path="./data/data_41.csv",
         ...     start_date="2025-01-02",
@@ -967,7 +967,7 @@ if __name__ == "__main__":
         if len(sys.argv) >= 6:
             first_rebalance_date = sys.argv[5]
 
-    result = run_etf_backtest(
+    result = run_backtest(
         model_dir=model_dir,
         data_path=data_path,
         start_date=start_date,

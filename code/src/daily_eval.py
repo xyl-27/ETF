@@ -23,7 +23,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "code" / "src"))
 
 import torch
 
-from backtest import run_etf_backtest
+from backtest import run_backtest
 from predict import (
     preprocess_predict_data,
     build_inference_sequences,
@@ -183,7 +183,7 @@ def run_recent_backtest(
         print(f"\n[回测] 区间: {start_date} ~ {end_date}")
 
     try:
-        result = run_etf_backtest(
+        result = run_backtest(
             model_dir=exp_dir,
             data_path=data_path,
             start_date=start_date,
