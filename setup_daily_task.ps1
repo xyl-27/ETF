@@ -88,7 +88,7 @@ Register-ScheduledTask `
     -Trigger $trigger `
     -Action $action `
     -Settings $settings `
-    -Description "ETF每日测评: 更新数据, 运行预测和回测" `
+    -Description "ETF每日测评: 运行预测和回测" `
     | Out-Null
 
 Write-Host "`n========================================" -ForegroundColor Green

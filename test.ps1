@@ -1,4 +1,4 @@
-﻿# 测试脚本 - 预测HS300股票排序
+﻿# 测试脚本 - 预测ETF排序
 
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
@@ -18,17 +18,11 @@ import sys
 sys.path.insert(0, 'code/src')
 import importlib
 m = importlib.import_module('$CONFIG_NAME')
-print(m.config.get('output_dir', './model/default'))
+print(m.config.get('output_dir', './etf_model/default'))
 "
 
 Write-Host "Using config: $CONFIG_NAME"
 Write-Host "Output directory: $OUTPUT_DIR"
 Write-Host ""
 
-# 支持 --exp 参数
-$EXP_ARG = ""
-if ($args.Count -gt 0) {
-    $EXP_ARG = "--exp=$($args[0])"
-}
-
-python code/src/predict.py --config=$CONFIG_NAME $EXP_ARG
+python code/src/predict.py --config $CONFIG_NAME

@@ -1,7 +1,5 @@
 """
-每日定时测评脚本
-- 更新股票数据
-- 合并JQ因子
+每日定时测评脚本 - ETF
 - 运行预测（Top-K推荐）
 - 运行近期回测（滚动评估）
 - 记录结果到历史日志
@@ -10,11 +8,8 @@
 import os
 import sys
 import json
-import glob
-import shutil
 import traceback
 from datetime import datetime, timedelta
-from dataclasses import dataclass, field, asdict
 from typing import Optional
 from pathlib import Path
 
@@ -26,7 +21,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 os.chdir(PROJECT_ROOT)
 sys.path.insert(0, str(PROJECT_ROOT / "code" / "src"))
 
-import baostock as bs
 import torch
 
 from backtest import run_etf_backtest
@@ -39,170 +33,6 @@ from predict import (
 from models import create_model
 import joblib
 import multiprocessing as mp
-
-
-# ============================================================
-# 数据更新
-# ============================================================
-
-def update_stock_data(start_date: str = "2024-01-01", verbose: bool = True) -> bool:
-    """增量更新股票数据，返回是否成功"""
-    try:
-        lg = bs.login()
-        if lg.error_code != "0":
-            print(f"[数据更新] baostock登录失败: {lg.error_msg}")
-            return False
-
-        end_date = datetime.now().strftime("%Y-%m-%d")
-        output_path = str(PROJECT_ROOT / "data" / "stock_data.csv")
-
-        # 获取沪深300成分股
-        rs = bs.query_hs300_stocks()
-        if rs.error_code != "0":
-            print(f"[数据更新] 获取成分股失败: {rs.error_msg}")
-            bs.logout()
-            return False
-
-        hs300_stocks = []
-        while (rs.error_code == "0") & rs.next():
-            hs300_stocks.append(rs.get_row_data())
-        hs300_df = pd.DataFrame(hs300_stocks, columns=rs.fields)
-
-        # 保存成分股列表
-        hs300_list_path = str(PROJECT_ROOT / "data" / "hs300_stock_list.csv")
-        hs300_df.to_csv(hs300_list_path, index=False, encoding="utf-8-sig")
-
-        # 读取现有数据
-        existing_df = None
-        existing_stocks = set()
-        if os.path.exists(output_path):
-            try:
-                existing_df = pd.read_csv(output_path)
-                existing_df["股票代码"] = existing_df["股票代码"].astype(str).str.zfill(6)
-                existing_stocks = set(existing_df["股票代码"].unique())
-            except Exception:
-                existing_df = None
-
-        hs300_df["纯代码"] = hs300_df["code"].str.replace("sh.", "").str.replace("sz.", "").str.zfill(6)
-        success_count = 0
-        total = len(hs300_df)
-
-        for idx, row in hs300_df.iterrows():
-            bs_code = row["code"]
-            pure_code = row["纯代码"]
-
-            # 检查是否需要增量
-            if existing_df is not None and pure_code in existing_stocks:
-                stock_df = existing_df[existing_df["股票代码"] == pure_code].copy()
-                stock_df["日期_dt"] = pd.to_datetime(stock_df["日期"], format="%Y/%m/%d", errors="coerce")
-                stock_df = stock_df.dropna(subset=["日期_dt"])
-                if not stock_df.empty:
-                    existing_max = stock_df["日期_dt"].max()
-                    target_start = pd.to_datetime(start_date)
-                    if existing_max >= target_start:
-                        fetch_start = (existing_max + timedelta(days=1)).strftime("%Y-%m-%d")
-                        fetch_end = end_date
-                        if fetch_start > fetch_end:
-                            if idx % 30 == 0 and verbose:
-                                print(f"  [{idx+1}/{total}] {bs_code} 数据已完整，跳过")
-                            continue
-                    else:
-                        fetch_start = start_date
-                        fetch_end = end_date
-                else:
-                    fetch_start = start_date
-                    fetch_end = end_date
-            else:
-                fetch_start = start_date
-                fetch_end = end_date
-
-            rs = bs.query_history_k_data_plus(
-                bs_code,
-                "date,code,open,high,low,close,preclose,volume,amount,turn,pctChg",
-                start_date=fetch_start,
-                end_date=fetch_end,
-                frequency="d",
-                adjustflag="1",
-            )
-            if rs.error_code != "0" or not rs.next():
-                if idx % 30 == 0 and verbose:
-                    print(f"  [{idx+1}/{total}] {bs_code} 无新数据")
-                continue
-
-            data_list = [rs.get_row_data()]
-            while (rs.error_code == "0") & rs.next():
-                data_list.append(rs.get_row_data())
-
-            new_df = pd.DataFrame(data_list, columns=rs.fields)
-            for col in ["open", "high", "low", "close", "preclose", "volume", "amount", "turn", "pctChg"]:
-                new_df[col] = pd.to_numeric(new_df[col], errors="coerce")
-
-            new_df["振幅"] = ((new_df["high"] - new_df["low"]) / new_df["preclose"] * 100).round(2)
-            new_df["涨跌额"] = (new_df["close"] - new_df["preclose"]).round(2)
-            new_df["日期"] = pd.to_datetime(new_df["date"]).dt.strftime("%Y/%m/%d")
-            new_df["股票代码"] = new_df["code"].str.replace("sh.", "").str.replace("sz.", "").str.zfill(6)
-            new_df = new_df.rename(columns={
-                "code": "股票代码", "date": "日期", "open": "开盘", "close": "收盘",
-                "high": "最高", "low": "最低", "volume": "成交量", "amount": "成交额",
-                "turn": "换手率", "pctChg": "涨跌幅",
-            })
-            new_df = new_df[["股票代码", "日期", "开盘", "收盘", "最高", "最低",
-                             "成交量", "成交额", "振幅", "涨跌额", "换手率", "涨跌幅"]]
-
-            if existing_df is not None and not existing_df.empty:
-                new_df["日期_dt"] = pd.to_datetime(new_df["日期"], format="%Y/%m/%d")
-                combined = pd.concat([existing_df[existing_df["股票代码"] != pure_code], new_df], ignore_index=True)
-                combined = combined.drop(columns=["日期_dt"], errors="ignore")
-                existing_df = combined
-            else:
-                existing_df = new_df
-
-            success_count += 1
-            if verbose and (idx % 30 == 0 or success_count <= 3):
-                print(f"  [{idx+1}/{total}] {bs_code} 更新成功 +{len(new_df)}条")
-
-        if existing_df is not None:
-            existing_df.to_csv(output_path, index=False, encoding="utf-8-sig")
-
-        bs.logout()
-
-        if verbose:
-            print(f"[数据更新] 完成: {success_count}只股票更新, 共{len(existing_df) if existing_df is not None else 0}条记录")
-        return True
-
-    except Exception as e:
-        print(f"[数据更新] 失败: {e}")
-        traceback.print_exc()
-        try:
-            bs.logout()
-        except Exception:
-            pass
-        return False
-
-
-def merge_jq_factors(verbose: bool = True) -> bool:
-    """合并JQ因子到股票数据"""
-    try:
-        data_dir = str(PROJECT_ROOT / "data")
-        stock_data = pd.read_csv(os.path.join(data_dir, "stock_data.csv"))
-        hs300_jq = pd.read_csv(os.path.join(data_dir, "hs300_jq.csv"))
-
-        stock_data["股票代码"] = stock_data["股票代码"].astype(str).str.strip()
-        hs300_jq["股票代码"] = hs300_jq["股票代码"].str.replace(".XSHG", "").str.replace(".XSHE", "").str.strip()
-        stock_data["日期"] = pd.to_datetime(stock_data["日期"]).dt.strftime("%Y-%m-%d")
-        hs300_jq["日期"] = pd.to_datetime(hs300_jq["日期"]).dt.strftime("%Y-%m-%d")
-
-        jq_cols = hs300_jq.columns.tolist()[2:]
-        merged = stock_data.merge(hs300_jq[["股票代码", "日期"] + jq_cols], on=["股票代码", "日期"], how="left")
-        merged.to_csv(os.path.join(data_dir, "stock_data_with_jqfactors.csv"), index=False)
-
-        if verbose:
-            print(f"[JQ因子] 合并完成: {len(merged)}行, {len(merged.columns)}列")
-        return True
-    except Exception as e:
-        print(f"[JQ因子] 失败: {e}")
-        traceback.print_exc()
-        return False
 
 
 # ============================================================
@@ -319,7 +149,8 @@ def run_prediction(
         print(f"[预测] 结果已保存: {output_path}")
 
     del model
-    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     return result
 
@@ -415,7 +246,6 @@ def save_history(history: list, history_path: str):
 
 def daily_eval(
     config_name: str = "config",
-    update_data: bool = True,
     backtest_months: int = 6,
     top_k: int = 5,
     verbose: bool = True,
@@ -427,33 +257,17 @@ def daily_eval(
     try:
         config_module = __import__(config_name, fromlist=["config"])
         config = config_module.config.copy()
-        output_dir = config.get("output_dir", "./model/default")
-        data_file = os.path.join(config["data_path"], config.get("data_file", "train.csv"))
-        data_path = config.get("data_path", "./data")
+        output_dir = config.get("output_dir", "./etf_model/default")
+        data_path = config.get("data_path", "./etf_data")
+        data_file = os.path.join(data_path, config.get("data_file", "etf_74.csv"))
 
-        # 1. 更新数据
-        if update_data:
-            if verbose:
-                print(f"\n{'='*60}")
-                print(f"[{timestamp}] 每日测评开始")
-                print(f"{'='*60}")
-                print("\n[1/4] 更新股票数据...")
-            success = update_stock_data(verbose=verbose)
-            log_entry["data_update"] = success
-            if not success:
-                print("[数据更新] 失败，使用现有数据继续")
-
-        # 2. 合并JQ因子
+        # 1. 查找最佳模型
         if verbose:
-            print("\n[2/4] 合并JQ因子...")
-        jq_success = merge_jq_factors(verbose=verbose)
-        log_entry["jq_factors"] = jq_success
-        if not jq_success:
-            print("[JQ因子] 合并失败，使用现有合并数据")
+            print(f"\n{'='*60}")
+            print(f"[{timestamp}] 每日测评开始")
+            print(f"{'='*60}")
+            print("\n[1/2] 查找最佳模型并预测...")
 
-        # 3. 查找最佳模型
-        if verbose:
-            print("\n[3/4] 查找最佳模型并预测...")
         model_info = find_best_model(output_dir)
         if model_info is None:
             print(f"[模型] 未在 {output_dir} 找到有效模型")
@@ -481,9 +295,9 @@ def daily_eval(
         )
         log_entry["prediction"] = pred_result
 
-        # 4. 运行近期回测
+        # 2. 运行近期回测
         if verbose:
-            print(f"\n[4/4] 运行近期回测 ({backtest_months}个月)...")
+            print(f"\n[2/2] 运行近期回测 ({backtest_months}个月)...")
         bt_result = run_recent_backtest(
             exp_dir=exp_dir,
             model_file=model_file,
@@ -528,7 +342,6 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="每日定时测评")
     parser.add_argument("--config", type=str, default="config", help="配置模块名")
-    parser.add_argument("--no-update", action="store_true", help="跳过数据更新")
     parser.add_argument("--backtest-months", type=int, default=6, help="回测月数")
     parser.add_argument("--topk", type=int, default=5, help="Top-K推荐数量")
     parser.add_argument("--quiet", action="store_true", help="静默模式")
@@ -538,7 +351,6 @@ if __name__ == "__main__":
 
     daily_eval(
         config_name=args.config,
-        update_data=not args.no_update,
         backtest_months=args.backtest_months,
         top_k=args.topk,
         verbose=not args.quiet,

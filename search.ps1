@@ -1,22 +1,22 @@
-﻿# Hyperparameter search script - ETF
+﻿# 超参搜索脚本 - ETF
 
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
 $START_TIME = Get-Date
 
-# Activate virtual environment
+# 激活虚拟环境
 if (Test-Path ".venv") {
     & ".venv\Scripts\Activate.ps1"
 } elseif (Test-Path "venv") {
     & "venv\Scripts\Activate.ps1"
 }
 
-# Models to search
+# 要搜索的模型类型 (空格分隔)
 $SEARCH_MODEL_TYPES = @("tcn", "itransformer")
 
-# Common config
-$CONFIG_NAME = "config_etf"
+# 通用配置
+$CONFIG_NAME = "config"
 $SEQUENCE_LENGTH = 60
 $FEATURE_NUM = "39"
 $TOPK = 3
@@ -27,7 +27,8 @@ foreach ($MODEL_TYPE in $SEARCH_MODEL_TYPES) {
     Write-Host "Running search for model type: $MODEL_TYPE"
     Write-Host "========================================"
 
-    # Compute search dir from config values
+    # 计算搜索目录
+    $N = 74
     $SEARCH_DIR = "./etf_model/search_${MODEL_TYPE}_${N}_${TOPK}"
     New-Item -ItemType Directory -Force -Path $SEARCH_DIR | Out-Null
 
@@ -38,7 +39,7 @@ foreach ($MODEL_TYPE in $SEARCH_MODEL_TYPES) {
     Write-Host "FEATURE_NUM: $FEATURE_NUM"
     Write-Host ""
 
-    # Check for preprocessed data
+    # 检查是否已有预处理数据
     if (Test-Path "$SEARCH_DIR/preprocessed_data.pkl") {
         Write-Host "Found preprocessed data, using --resume"
         $RESUME = "--resume"
@@ -46,10 +47,10 @@ foreach ($MODEL_TYPE in $SEARCH_MODEL_TYPES) {
         $RESUME = ""
     }
 
-    # Set CUDA memory allocation strategy
+    # 设置CUDA内存分配策略
     $env:PYTORCH_CUDA_ALLOC_CONF = "max_split_size_mb:128"
 
-    # Run search with CLI args (no config file modification needed)
+    # 运行搜索 (通过CLI参数传递配置, 不修改config文件)
     python code/src/train_search_v2.py `
         --config $CONFIG_NAME `
         $RESUME `
@@ -84,7 +85,7 @@ for i, r in enumerate(sorted_results[:5]):
     Write-Host ""
 }
 
-# Calculate total elapsed time
+# 计算总用时
 $END_TIME = Get-Date
 $ELAPSED = ($END_TIME - $START_TIME).TotalSeconds
 $HOURS = [math]::Floor($ELAPSED / 3600)
@@ -94,4 +95,4 @@ $SECONDS = [math]::Floor($ELAPSED % 60)
 Write-Host "========================================"
 Write-Host "All searches completed!"
 Write-Host "========================================"
-Write-Host "Total time: ${HOURS}h ${MINUTES}m ${SECONDS}s ($([math]::Floor($ELAPSED)) seconds)"
+Write-Host "总用时: ${HOURS}h ${MINUTES}m ${SECONDS}s ($([math]::Floor($ELAPSED))秒)"

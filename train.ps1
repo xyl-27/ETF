@@ -1,4 +1,4 @@
-﻿# 训练脚本 - HS300
+﻿# 训练脚本 - ETF
 
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
@@ -18,14 +18,11 @@ import sys
 sys.path.insert(0, 'code/src')
 import importlib
 m = importlib.import_module('$CONFIG_NAME')
-print(m.config.get('output_dir', './model/default'))
+print(m.config.get('output_dir', './etf_model/default'))
 "
 
 Write-Host "Using config: $CONFIG_NAME"
 Write-Host "Output directory: $OUTPUT_DIR"
 Write-Host ""
-
-# 设置CUDA内存分配策略
-$env:PYTORCH_CUDA_ALLOC_CONF = "max_split_size_mb:128"
 
 python code/src/train.py --config $CONFIG_NAME

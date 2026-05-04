@@ -1,9 +1,4 @@
-﻿# 每日测评脚本
-# 用法:
-#   .\daily_eval.ps1                          # 默认测评
-#   .\daily_eval.ps1 --no-update              # 跳过数据更新
-#   .\daily_eval.ps1 --backtest-months 3      # 回测3个月
-#   .\daily_eval.ps1 --topk 3                 # Top-3推荐
+﻿# 每日测评脚本 - ETF
 
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
@@ -25,7 +20,7 @@ if ($args.Count -gt 0) {
 }
 
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "  每日测评 $(Get-Date -Format 'yyyy-MM-dd HH:mm')" -ForegroundColor Cyan
+Write-Host "  ETF每日测评 $(Get-Date -Format 'yyyy-MM-dd HH:mm')" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 

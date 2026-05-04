@@ -22,6 +22,7 @@ tmp/
 # 系统文件
 .DS_Store
 Thumbs.db
+*Zone.Identifier
 
 # 编译文件
 *.so
@@ -36,23 +37,12 @@ code/__pycache__/
 model/
 etf_model/
 
+# 数据文件
+data/
+etf_data/
+
+# 输出
+output/
+
 # 笔记本
 notebooks/
-
-# 注意：以下文件会提交到仓库
-# *.csv - CSV数据文件
-# *.pt, *.pth, *.h5 - 模型参数文件
-# data/raw/ - 原始数据
-# models/ - 训练好的模型
-data/stock_data_with_jqfactors.csv
-data/hs300_D_jq.csv
-data/*.csv
-*.csv
-code/src/config.py
-data/stock_data.csv
-data/hs300_stock_list.csv
-pyproject.toml
-*Zone.Identifier
-notebooks/ETF_results.ipynb
-data/stock_data.csv
-data/hs300_stock_list.csv
