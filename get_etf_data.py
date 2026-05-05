@@ -1,6 +1,11 @@
 from pathlib import Path  # 添加这一行
 import shutil  # 添加这一行
 from datetime import datetime
+import sys
+import io
+
+# 修复 Windows GBK 编码问题
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
 from playwright.sync_api import sync_playwright
 import time

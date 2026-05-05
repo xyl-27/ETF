@@ -846,6 +846,8 @@ class ETFBacktester:
         if engine._log_fh:
             engine.close_log()
 
+        self._last_engine = engine
+
         return result
 
 
