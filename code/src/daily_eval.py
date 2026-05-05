@@ -560,7 +560,7 @@ def daily_eval(
         # 发送邮件报告
         try:
             from send_report import send_report
-            email_key = "fusion" if "fusion" in sequences else list(sequences.keys())[0]
+            email_key = list(sequences.keys())[0]
             if "holdings" not in sequences[email_key]:
                 sequences[email_key]["holdings"] = holdings
             if verbose:
