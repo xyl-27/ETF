@@ -362,9 +362,11 @@ def predict_single(model, sequences_np, device):
     return scores
 
 
-def predict_fusion(models_info, sequences_np, device, config, num_stocks, features, input_dim):
-    """多模型融合预测 (分数平均)"""
+def predict_fusion(models_info, sequences_np, device, config, num_stocks, features, input_dim, stock_ids, top_k):
+    """多模型融合预测 (分数平均)，同时输出各模型单独预测结果"""
     all_scores = []
+    individual_preds = []
+
     for m in models_info:
         # 每个模型加载自己的config
         model_config = config.copy()
@@ -390,13 +392,29 @@ def predict_fusion(models_info, sequences_np, device, config, num_stocks, featur
             scores = model(x).squeeze(0).detach().cpu().numpy()
         all_scores.append(scores)
 
+        # 单模型排序
+        order = np.argsort(scores)[::-1]
+        top_stocks = [stock_ids[order[i]] for i in range(min(top_k, len(stock_ids)))]
+        top_scores = [float(scores[order[i]]) for i in range(min(top_k, len(stock_ids)))]
+        model_name = os.path.basename(m["exp_dir"])
+        individual_preds.append({
+            "model": model_name,
+            "score": m["score"],
+            "top_stocks": top_stocks,
+            "top_scores": top_scores,
+        })
+
+        print(f"\n  [{model_name}] (search_score={m['score']:.4f})")
+        for i, (stock, sc) in enumerate(zip(top_stocks, top_scores)):
+            print(f"    {i+1}. {stock} (score: {sc:.4f})")
+
         del model
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
     # 平均分数
     fused_scores = np.mean(all_scores, axis=0)
-    return fused_scores
+    return fused_scores, individual_preds
 
 
 def main(args):
@@ -481,9 +499,31 @@ def main(args):
     else:
         device = torch.device("cpu")
 
+    top_k = config.get("top_k", 5)
+
     if mode == "fusion" and len(models_info) > 1:
         # 融合模式
-        scores = predict_fusion(models_info, sequences_np, device, config, len(stock_ids), features, len(features))
+        print(f"\n各模型单独预测结果:")
+        print(f"{'='*50}")
+        scores, individual_preds = predict_fusion(
+            models_info, sequences_np, device, config, len(stock_ids), features, len(features),
+            sequence_stock_ids, top_k,
+        )
+        # 保存汇总
+        summary_path = os.path.join("./output/", "pred_summary.csv")
+        summary_rows = []
+        for pred in individual_preds:
+            for rank, (stock, sc) in enumerate(zip(pred["top_stocks"], pred["top_scores"])):
+                summary_rows.append({
+                    "model": pred["model"],
+                    "search_score": pred["score"],
+                    "rank": rank + 1,
+                    "stock_id": stock,
+                    "model_score": sc,
+                })
+        summary_df = pd.DataFrame(summary_rows)
+        summary_df.to_csv(summary_path, index=False)
+        print(f"\n各模型预测汇总已保存: {summary_path}")
     else:
         # 单模型模式
         first = models_info[0]
@@ -502,8 +542,6 @@ def main(args):
 
     order = np.argsort(scores)[::-1]
     ranked_stock_ids = [sequence_stock_ids[i] for i in order]
-
-    top_k = config.get("top_k", 5)
 
     if len(ranked_stock_ids) < top_k:
         raise ValueError(
