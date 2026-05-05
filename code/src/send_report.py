@@ -85,7 +85,7 @@ def send_report(model_key=None):
     holdings_rows = ""
     for h in holdings:
         code = h["stock_id"]
-        name = etf_names.get(code.replace(".XSHG", "").replace(".XSHE", ""), code)
+        name = etf_names.get(code, code)
         shares = h["shares"]
         cost = h["cost"]
         weight = (cost / total_value * 100) if total_value > 0 else 0
@@ -128,7 +128,7 @@ def send_report(model_key=None):
     else:
         trades_rows = "<tr><td colspan='5' style='color: #999; text-align: center;'>无调仓操作</td></tr>"
 
-    model_display = model_key.replace("_", " ")
+    model_display = model_key.replace("_", " ").title()
     
     html_body = f"""
     <html>
