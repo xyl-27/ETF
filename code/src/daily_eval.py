@@ -1,14 +1,17 @@
 """
-每日定时测评脚本 - ETF
+每日定时测评脚本 - ETF (实盘模拟)
+- 获取最新ETF数据
 - 运行预测（Top-K推荐）
+- 维护持仓组合：对比新旧持仓，生成买卖指令
 - 运行近期回测（滚动评估）
-- 记录结果到历史日志
+- 记录交易历史和当前持仓
 """
 
 import os
 import sys
 import json
 import traceback
+import subprocess
 from datetime import datetime, timedelta
 from typing import Optional
 from pathlib import Path
@@ -27,13 +30,14 @@ from backtest import run_backtest
 from predict import (
     preprocess_predict_data,
     build_inference_sequences,
-    feature_cloums_map,
-    feature_engineer_func_map,
 )
 from models import create_model
 import joblib
 import multiprocessing as mp
-import subprocess
+
+
+PORTFOLIO_PATH = str(PROJECT_ROOT / "output" / "portfolio.json")
+HISTORY_PATH = str(PROJECT_ROOT / "output" / "daily_eval_history.json")
 
 
 # ============================================================
@@ -164,36 +168,150 @@ def run_prediction(
     ranked = [sequence_stock_ids[i] for i in order]
     top_k = min(top_k, len(ranked))
     top_stocks = ranked[:top_k]
-
-    # 保存结果
-    output_path = str(PROJECT_ROOT / "output" / "result.csv")
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    output_df = pd.DataFrame({
-        "stock_id": top_stocks,
-        "weight": [1.0 / top_k] * len(top_stocks),
-    })
-    output_df.to_csv(output_path, index=False)
+    top_scores = [float(scores[order[i]]) for i in range(top_k)]
 
     result = {
         "predict_date": str(latest_date.date()),
         "total_stocks": len(ranked),
         "top_k": top_k,
         "top_stocks": top_stocks,
-        "top_scores": [float(scores[order[i]]) for i in range(top_k)],
+        "top_scores": top_scores,
     }
 
     if verbose:
         print(f"\n[预测] 日期: {latest_date.date()}, 排序股票: {len(ranked)}只")
         print(f"[预测] Top-{top_k} 推荐:")
         for i, stock in enumerate(top_stocks):
-            print(f"  {i+1}. {stock} (score: {result['top_scores'][i]:.4f})")
-        print(f"[预测] 结果已保存: {output_path}")
+            print(f"  {i+1}. {stock} (score: {top_scores[i]:.4f})")
 
     del model
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
     return result
+
+
+# ============================================================
+# 持仓管理
+# ============================================================
+
+def load_portfolio() -> Optional[dict]:
+    """加载当前持仓"""
+    if os.path.exists(PORTFOLIO_PATH):
+        with open(PORTFOLIO_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return None
+
+
+def save_portfolio(portfolio: dict):
+    """保存当前持仓"""
+    os.makedirs(os.path.dirname(PORTFOLIO_PATH), exist_ok=True)
+    with open(PORTFOLIO_PATH, "w", encoding="utf-8") as f:
+        json.dump(portfolio, f, ensure_ascii=False, indent=2)
+
+
+def generate_trades(current_portfolio: Optional[dict], new_prediction: dict, data_file: str, verbose: bool = True) -> list:
+    """
+    对比当前持仓和新预测，生成买卖指令
+    返回交易列表
+    """
+    trades = []
+    date_str = new_prediction["predict_date"]
+    new_top = set(new_prediction["top_stocks"])
+
+    if current_portfolio is None:
+        # 首次建仓
+        for stock in new_prediction["top_stocks"]:
+            trades.append({
+                "action": "买入",
+                "stock_id": stock,
+                "reason": "首次建仓",
+                "date": date_str,
+            })
+        if verbose:
+            print(f"\n[交易] 首次建仓，买入 {len(new_prediction['top_stocks'])} 只:")
+            for t in trades:
+                print(f"  {t['action']} {t['stock_id']} ({t['reason']})")
+        return trades
+
+    # 现有持仓
+    current_holdings = set()
+    for h in current_portfolio.get("holdings", []):
+        current_holdings.add(h["stock_id"])
+
+    # 卖出：不在新Top-K中的持仓
+    to_sell = current_holdings - new_top
+    for stock in to_sell:
+        # 找到卖出原因
+        reason = "不在新Top-K中"
+        if new_prediction["total_stocks"] == 0:
+            reason = "无预测数据，清仓"
+        trades.append({
+            "action": "卖出",
+            "stock_id": stock,
+            "reason": reason,
+            "date": date_str,
+        })
+
+    # 买入：新Top-K中不在当前持仓的
+    to_buy = new_top - current_holdings
+    for stock in new_prediction["top_stocks"]:
+        if stock in to_buy:
+            idx = new_prediction["top_stocks"].index(stock)
+            score = new_prediction["top_scores"][idx]
+            trades.append({
+                "action": "买入",
+                "stock_id": stock,
+                "reason": f"新入选Top-K (score={score:.4f})",
+                "date": date_str,
+            })
+
+    if verbose and trades:
+        print(f"\n[交易] {len(trades)} 笔操作:")
+        for t in trades:
+            action_color = "买入" if t["action"] == "买入" else "卖出"
+            print(f"  {t['action']} {t['stock_id']} ({t['reason']})")
+    elif verbose:
+        print(f"\n[交易] 无变化，维持持仓")
+
+    return trades
+
+
+def update_portfolio(current_portfolio: Optional[dict], trades: list, new_prediction: dict) -> dict:
+    """根据交易更新持仓"""
+    if current_portfolio is None:
+        holdings = []
+    else:
+        holdings = list(current_portfolio.get("holdings", []))
+
+    # 执行卖出
+    sold_ids = set()
+    for t in trades:
+        if t["action"] == "卖出":
+            sold_ids.add(t["stock_id"])
+
+    holdings = [h for h in holdings if h["stock_id"] not in sold_ids]
+
+    # 执行买入
+    for t in trades:
+        if t["action"] == "买入":
+            if t["stock_id"] not in [h["stock_id"] for h in holdings]:
+                idx = new_prediction["top_stocks"].index(t["stock_id"])
+                score = new_prediction["top_scores"][idx]
+                holdings.append({
+                    "stock_id": t["stock_id"],
+                    "buy_date": t["date"],
+                    "buy_score": score,
+                })
+
+    new_portfolio = {
+        "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "predict_date": new_prediction["predict_date"],
+        "holdings": holdings,
+        "model_used": new_prediction.get("model", ""),
+        "total_value_pct": 1.0,  # 等权分配
+    }
+    return new_portfolio
 
 
 # ============================================================
@@ -267,7 +385,6 @@ def run_recent_backtest(
 # ============================================================
 
 def load_history(history_path: str) -> list:
-    """加载历史记录"""
     if os.path.exists(history_path):
         with open(history_path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -275,7 +392,6 @@ def load_history(history_path: str) -> list:
 
 
 def save_history(history: list, history_path: str):
-    """保存历史记录"""
     os.makedirs(os.path.dirname(history_path), exist_ok=True)
     with open(history_path, "w", encoding="utf-8") as f:
         json.dump(history, f, ensure_ascii=False, indent=2)
@@ -309,14 +425,14 @@ def daily_eval(
                 print(f"\n{'='*60}")
                 print(f"[{timestamp}] 每日测评开始")
                 print(f"{'='*60}")
-                print("\n[1/3] 获取最新ETF数据...")
+                print("\n[1/4] 获取最新ETF数据...")
             data_success = update_etf_data(verbose=verbose)
             log_entry["data_update"] = data_success
             if not data_success:
                 print("[数据更新] 失败，使用现有数据继续")
 
         step_num = 2 if update_data else 1
-        total_steps = 3 if update_data else 2
+        total_steps = 4 if update_data else 3
 
         # 2. 查找最佳模型
         if verbose:
@@ -349,9 +465,30 @@ def daily_eval(
         )
         log_entry["prediction"] = pred_result
 
-        # 3. 运行近期回测
+        # 3. 维护持仓（对比新旧，生成交易）
         if verbose:
-            print(f"\n[{step_num+1}/{total_steps}] 运行近期回测 ({backtest_months}个月)...")
+            print(f"\n[{step_num+1}/{total_steps}] 维护持仓...")
+
+        current_portfolio = load_portfolio()
+        has_previous = current_portfolio is not None
+
+        trades = generate_trades(current_portfolio, pred_result, data_file, verbose)
+        new_portfolio = update_portfolio(current_portfolio, trades, pred_result)
+
+        save_portfolio(new_portfolio)
+
+        log_entry["trades"] = trades
+        log_entry["portfolio"] = new_portfolio
+        log_entry["has_previous_portfolio"] = has_previous
+
+        if verbose:
+            print(f"\n[持仓] 当前持有 {len(new_portfolio['holdings'])} 只:")
+            for h in new_portfolio["holdings"]:
+                print(f"  {h['stock_id']} (买入日期: {h['buy_date']})")
+
+        # 4. 运行近期回测
+        if verbose:
+            print(f"\n[{step_num+2}/{total_steps}] 运行近期回测 ({backtest_months}个月)...")
         bt_result = run_recent_backtest(
             exp_dir=exp_dir,
             model_file=model_file,
@@ -363,15 +500,15 @@ def daily_eval(
         log_entry["backtest"] = bt_result
 
         # 保存日志
-        history_path = str(PROJECT_ROOT / "output" / "daily_eval_history.json")
-        history = load_history(history_path)
+        history = load_history(HISTORY_PATH)
         history.append(log_entry)
-        save_history(history, history_path)
+        save_history(history, HISTORY_PATH)
 
         if verbose:
             print(f"\n{'='*60}")
             print(f"[{timestamp}] 每日测评完成")
-            print(f"日志已保存: {history_path}")
+            print(f"日志已保存: {HISTORY_PATH}")
+            print(f"持仓已保存: {PORTFOLIO_PATH}")
             print(f"{'='*60}")
 
         return log_entry
@@ -381,10 +518,9 @@ def daily_eval(
         log_entry["error"] = str(e)
         log_entry["traceback"] = traceback.format_exc()
 
-        history_path = str(PROJECT_ROOT / "output" / "daily_eval_history.json")
-        history = load_history(history_path)
+        history = load_history(HISTORY_PATH)
         history.append(log_entry)
-        save_history(history, history_path)
+        save_history(history, HISTORY_PATH)
 
         print(f"\n[错误] 每日测评失败: {e}")
         traceback.print_exc()
