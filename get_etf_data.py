@@ -177,8 +177,9 @@ def run_notebook_and_download(page, notebook_url, timeout=180):
         print(f"❌ 下载异常: {e}")
         return None
 if __name__ == "__main__":
-    USERNAME = "18163269336"
-    PASSWORD = "Xylqwer123JQ"
+    import os
+    USERNAME = os.environ.get("JQ_USERNAME", "your_phone")
+    PASSWORD = os.environ.get("JQ_PASSWORD", "your_password")
     NOTEBOOK_URL = "https://www.joinquant.com/research?target=research&url=/user/73090038144/notebooks/ETF/get_etf_data.ipynb"
     
     page, playwright, browser = login_with_cache(USERNAME, PASSWORD)
