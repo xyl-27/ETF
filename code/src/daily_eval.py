@@ -69,9 +69,11 @@ def plot_equity_curves(sequences: Dict[str, Any], data_file: str, initial_capita
         hs300_plot_df = hs300_df[hs300_df["日期"] >= first_trade_date].copy()
         hs300_plot_df["value_wan"] = (hs300_plot_df["收盘"] / start_val) * (initial_capital / 10000)
 
+        hs300_return_pct = (hs300_plot_df["收盘"].iloc[-1] / hs300_plot_df["收盘"].iloc[0] - 1) * 100
+
         ax.plot(
             hs300_plot_df["日期"], hs300_plot_df["value_wan"],
-            label="沪深300 (基准)",
+            label=f"沪深 300 ({hs300_return_pct:+.2f}%)",
             color="#7f8c8d", linewidth=2, linestyle=":",
         )
 
