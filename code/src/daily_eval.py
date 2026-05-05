@@ -343,7 +343,7 @@ def daily_eval(
     start_date: str = "2026-04-02",
     rebalance_days: int = 5,
     position_pct: float = 0.95,
-    initial_capital: float = 1000000,
+    initial_capital: float = 100000,
 ):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -593,7 +593,7 @@ if __name__ == "__main__":
     parser.add_argument("--start-date", type=str, default="2026-04-01", help="测评起始日期")
     parser.add_argument("--config", type=str, default="config", help="配置模块名")
     parser.add_argument("--no-update", action="store_true", help="跳过数据更新")
-    parser.add_argument("--topk", type=int, default=5, help="Top-K推荐数量")
+    parser.add_argument("--topk", type=int, default=3, help="Top-K推荐数量")
     parser.add_argument("--rebalance-days", type=int, default=5, help="调仓频率(天)")
     parser.add_argument("--position-pct", type=float, default=0.95, help="仓位比例")
     parser.add_argument("--quiet", action="store_true", help="静默模式")

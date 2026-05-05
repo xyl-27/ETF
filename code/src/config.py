@@ -22,7 +22,7 @@ config = {
     "output_dir": f"./model/search_{model_type}_{N}_{topk}",
     "output_base": "./model",
     "data_path": "./etf_data",
-    "data_file": "etf_74.csv",
+    "data_file": "etf_74_train.csv",
 }
 
 MODEL_CONFIGS = {
