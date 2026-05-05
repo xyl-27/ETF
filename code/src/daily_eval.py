@@ -125,7 +125,7 @@ STATE_PATH = OUTPUT_DIR / "backtest_state.json"
 REPORT_PATH = OUTPUT_DIR / "latest_report.json"
 PORTFOLIO_PATH = OUTPUT_DIR / "portfolio.json"
 MODEL_SELECTION_PATH = OUTPUT_DIR / "model_selection.txt"
-DATA_FILE = PROJECT_ROOT / "etf_data" / "etf_data_74_new.csv"
+DATA_FILE = PROJECT_ROOT / "etf_data" / "etf_74.csv"
 
 
 # ============================================================
