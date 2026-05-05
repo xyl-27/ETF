@@ -191,7 +191,6 @@ if __name__ == "__main__":
         else:
             print("下载失败")
         
-        input("按回车关闭浏览器...")
     finally:
         browser.close()
         playwright.stop()

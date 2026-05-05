@@ -1,4 +1,9 @@
-﻿# 每日测评脚本 - ETF
+﻿param(
+    [switch]$NoUpdate,
+    [int]$BacktestMonths = 6,
+    [int]$TopK = 5,
+    [switch]$Quiet
+)
 
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
@@ -9,14 +14,6 @@ if (Test-Path ".venv") {
 } elseif (Test-Path "venv") {
     & "venv\Scripts\Activate.ps1"
 }
-
-# 解析参数
-param(
-    [switch]$NoUpdate,
-    [int]$BacktestMonths = 6,
-    [int]$TopK = 5,
-    [switch]$Quiet
-)
 
 # 构建参数
 $PYTHON_ARGS = @("code/src/daily_eval.py", "--config=config")
