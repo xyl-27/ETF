@@ -6,6 +6,7 @@
 import os
 import sys
 import json
+import re
 import traceback
 import subprocess
 from datetime import datetime
@@ -346,6 +347,7 @@ def _make_model_key(m):
     parent = os.path.basename(os.path.dirname(exp_dir))
     if parent.startswith("search_"):
         parent = parent[7:]
+    parent = re.sub(r'_\d+_\d+', '', parent)
     name = os.path.basename(exp_dir)
     return f"{parent}_{name}"
 
