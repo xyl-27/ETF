@@ -21,6 +21,8 @@ CHART_PATH = PROJECT_ROOT / "output" / "equity_curves.png"
 ETF_LIST_PATH = PROJECT_ROOT / "etf_data" / "etf_list_before_2022_74.csv"
 
 # 邮件配置 (从环境变量读取)
+os.environ['SMTP_USER'] = '3759608757@qq.com'
+os.environ['SMTP_PASSWORD'] = 'gsiqpfqjjkvwcdfg'
 SMTP_SERVER = os.environ.get("SMTP_SERVER", "smtp.qq.com")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
 SMTP_USER = os.environ.get("SMTP_USER")
@@ -113,7 +115,7 @@ def send_report(model_key=None):
     trades_rows = ""
     if trades:
         for t in trades:
-            action_color = "#2ecc71" if t["action"] == "买入" else "#e74c3c"
+            action_color = "#cc0000" if t["action"] == "买入" else "#009900"
             trades_rows += f"""
             <tr>
                 <td><span style="color: {action_color}; font-weight: bold;">{t['action']}</span></td>
@@ -141,8 +143,8 @@ def send_report(model_key=None):
             .metric-box {{ flex: 1; min-width: 100px; padding: 10px; background: #fff; border: 1px solid #ddd; border-radius: 5px; text-align: center; }}
             .metric-box .label {{ font-size: 0.85em; color: #666; }}
             .metric-box .value {{ font-size: 1.1em; font-weight: bold; color: #333; }}
-            .value.pos {{ color: #2ecc71; }}
-            .value.neg {{ color: #e74c3c; }}
+            .value.pos {{ color: #cc0000; }}
+            .value.neg {{ color: #009900; }}
             table {{ width: 100%; border-collapse: collapse; margin-bottom: 20px; }}
             th, td {{ padding: 8px 10px; border-bottom: 1px solid #eee; text-align: left; }}
             th {{ background-color: #f8f9fa; font-weight: 600; }}
