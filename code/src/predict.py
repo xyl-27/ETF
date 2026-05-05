@@ -425,6 +425,8 @@ def main(args):
     config = config_module.config.copy()
 
     data_file = os.path.join(config["data_path"], config.get("data_file", "train.csv"))
+    if args.data_file:
+        data_file = args.data_file
 
     # 优先级: --selection > --exp > 默认
     use_selection = False
@@ -574,6 +576,7 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, default="config", help="Config module name")
     parser.add_argument("--exp", type=str, default=None, help="Experiment directory, e.g. exp_57")
     parser.add_argument("--selection", type=str, default=None, help="Model selection file path")
+    parser.add_argument("--data-file", type=str, default=None, help="Override data file path")
     parser.add_argument("--topk", type=int, default=5)
     args = parser.parse_args()
 

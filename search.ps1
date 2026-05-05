@@ -20,7 +20,7 @@ $CONFIG_NAME = "config"
 $SEQUENCE_LENGTH = 60
 $FEATURE_NUM = "39"
 $TOPK = 3
-$DATA_FILE = "etf_data_74_new.csv"
+$DATA_FILE = "etf_74.csv"
 
 foreach ($MODEL_TYPE in $SEARCH_MODEL_TYPES) {
     Write-Host "========================================"

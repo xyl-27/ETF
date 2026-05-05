@@ -25,7 +25,7 @@ if (Test-Path ".venv") {
 }
 
 $CONFIG_NAME = "config"
-$PYTHON_ARGS = @("code/src/predict.py", "--config", $CONFIG_NAME)
+$PYTHON_ARGS = @("code/src/predict.py", "--config", $CONFIG_NAME, "--data-file", "etf_data/etf_data_74_new.csv")
 
 # 如果指定了 -Select, 先运行模型选择
 if ($Select) {
