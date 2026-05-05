@@ -1,6 +1,5 @@
 ﻿param(
     [switch]$NoUpdate,
-    [int]$BacktestMonths = 6,
     [int]$TopK = 5,
     [switch]$Quiet
 )
@@ -20,8 +19,6 @@ $PYTHON_ARGS = @("code/src/daily_eval.py", "--config=config")
 
 if ($NoUpdate) { $PYTHON_ARGS += "--no-update" }
 if ($Quiet) { $PYTHON_ARGS += "--quiet" }
-$PYTHON_ARGS += "--backtest-months"
-$PYTHON_ARGS += $BacktestMonths.ToString()
 $PYTHON_ARGS += "--topk"
 $PYTHON_ARGS += $TopK.ToString()
 

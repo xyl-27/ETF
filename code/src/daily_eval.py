@@ -12,7 +12,7 @@ import sys
 import json
 import traceback
 import subprocess
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional
 from pathlib import Path
 
@@ -26,7 +26,6 @@ sys.path.insert(0, str(PROJECT_ROOT / "code" / "src"))
 
 import torch
 
-from backtest import run_backtest
 from predict import (
     preprocess_predict_data,
     build_inference_sequences,
@@ -318,68 +317,6 @@ def update_portfolio(current_portfolio: Optional[dict], trades: list, new_predic
 # 回测
 # ============================================================
 
-def run_recent_backtest(
-    exp_dir: str,
-    model_file: str,
-    data_path: str,
-    config_module,
-    months: int = 6,
-    verbose: bool = True,
-) -> Optional[dict]:
-    """运行近期回测评估"""
-    config = config_module.config.copy()
-    with open(os.path.join(exp_dir, "config.json"), "r") as f:
-        exp_config = json.load(f)
-    config.update(exp_config)
-
-    df = pd.read_csv(data_path)
-    df["日期"] = pd.to_datetime(df["日期"])
-    all_dates = sorted(df["日期"].unique())
-    end_date = all_dates[-1]
-    start_date = (end_date - timedelta(days=months * 30)).strftime("%Y-%m-%d")
-
-    if verbose:
-        print(f"\n[回测] 区间: {start_date} ~ {end_date}")
-
-    try:
-        result = run_backtest(
-            model_dir=exp_dir,
-            data_path=data_path,
-            start_date=start_date,
-            end_date=end_date.strftime("%Y-%m-%d"),
-            top_k=config.get("top_k", 5),
-            rebalance_days=5,
-            position_pct=0.95,
-            model_file=model_file,
-            verbose=verbose,
-        )
-
-        bt_result = {
-            "start_date": start_date,
-            "end_date": str(end_date.date()),
-            "strategy_return": round(result.strategy_return, 2),
-            "hs300_return": round(result.hs300_return, 2),
-            "excess_return": round(result.excess_return, 2),
-            "max_drawdown": round(result.max_drawdown, 2),
-            "drawdown_days": result.drawdown_days,
-            "recovered": result.recovered,
-            "recovery_days": result.recovery_days,
-        }
-
-        if verbose:
-            print(f"\n[回测] 策略收益: {bt_result['strategy_return']:+.2f}%")
-            print(f"[回测] 基准收益: {bt_result['hs300_return']:+.2f}%")
-            print(f"[回测] 超额收益: {bt_result['excess_return']:+.2f}%")
-            print(f"[回测] 最大回撤: {bt_result['max_drawdown']:.2f}%")
-
-        return bt_result
-
-    except Exception as e:
-        print(f"[回测] 失败: {e}")
-        traceback.print_exc()
-        return None
-
-
 # ============================================================
 # 日志管理
 # ============================================================
@@ -404,7 +341,6 @@ def save_history(history: list, history_path: str):
 def daily_eval(
     config_name: str = "config",
     update_data: bool = True,
-    backtest_months: int = 6,
     top_k: int = 5,
     verbose: bool = True,
 ):
@@ -425,14 +361,14 @@ def daily_eval(
                 print(f"\n{'='*60}")
                 print(f"[{timestamp}] 每日测评开始")
                 print(f"{'='*60}")
-                print("\n[1/4] 获取最新ETF数据...")
+                print("\n[1/3] 获取最新ETF数据...")
             data_success = update_etf_data(verbose=verbose)
             log_entry["data_update"] = data_success
             if not data_success:
                 print("[数据更新] 失败，使用现有数据继续")
 
         step_num = 2 if update_data else 1
-        total_steps = 4 if update_data else 3
+        total_steps = 3 if update_data else 2
 
         # 2. 查找最佳模型
         if verbose:
@@ -486,19 +422,6 @@ def daily_eval(
             for h in new_portfolio["holdings"]:
                 print(f"  {h['stock_id']} (买入日期: {h['buy_date']})")
 
-        # 4. 运行近期回测
-        if verbose:
-            print(f"\n[{step_num+2}/{total_steps}] 运行近期回测 ({backtest_months}个月)...")
-        bt_result = run_recent_backtest(
-            exp_dir=exp_dir,
-            model_file=model_file,
-            data_path=data_file,
-            config_module=config_module,
-            months=backtest_months,
-            verbose=verbose,
-        )
-        log_entry["backtest"] = bt_result
-
         # 保存日志
         history = load_history(HISTORY_PATH)
         history.append(log_entry)
@@ -533,7 +456,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="每日定时测评")
     parser.add_argument("--config", type=str, default="config", help="配置模块名")
     parser.add_argument("--no-update", action="store_true", help="跳过数据更新")
-    parser.add_argument("--backtest-months", type=int, default=6, help="回测月数")
     parser.add_argument("--topk", type=int, default=5, help="Top-K推荐数量")
     parser.add_argument("--quiet", action="store_true", help="静默模式")
     args = parser.parse_args()
@@ -543,7 +465,6 @@ if __name__ == "__main__":
     daily_eval(
         config_name=args.config,
         update_data=not args.no_update,
-        backtest_months=args.backtest_months,
         top_k=args.topk,
         verbose=not args.quiet,
     )
