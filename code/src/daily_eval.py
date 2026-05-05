@@ -335,6 +335,19 @@ def run_backtest_sequence(
 # 主流程
 # ============================================================
 
+def _make_model_key(m):
+    """生成 model_type_exp_X 格式的模型标识"""
+    if isinstance(m, dict):
+        exp_dir = m["exp_dir"]
+    elif isinstance(m, (list, tuple)):
+        exp_dir = m[0]
+    else:
+        exp_dir = m
+    parent = os.path.basename(os.path.dirname(exp_dir))
+    name = os.path.basename(exp_dir)
+    return f"{parent}_{name}"
+
+
 def daily_eval(
     config_name: str = "config",
     update_data: bool = True,
@@ -377,7 +390,7 @@ def daily_eval(
             if verbose:
                 print(f"  模式: {mode}, 单模型数: {len(single_models)}")
                 for m in single_models:
-                    print(f"    {os.path.basename(m['exp_dir'])} ({m['model_file']}, score={m['score']:.4f})")
+                    print(f"    {_make_model_key(m)} ({m['model_file']}, score={m['score']:.4f})")
         else:
             config_module = __import__(config_name, fromlist=["config"])
             config = config_module.config.copy()
@@ -390,7 +403,7 @@ def daily_eval(
             single_models = [{"exp_dir": exp_dir, "model_file": model_file, "score": score}]
             mode = "single"
             if verbose:
-                print(f"  单模型: {os.path.basename(exp_dir)} (score={score:.4f})")
+                print(f"  单模型: {_make_model_key((exp_dir,))} (score={score:.4f})")
 
         if not single_models:
             print("错误: 无可用模型")
@@ -430,7 +443,7 @@ def daily_eval(
         sequences = {}
 
         for m, bt in single_backtesters:
-            model_key = os.path.basename(m["exp_dir"])
+            model_key = _make_model_key(m)
             if verbose:
                 print(f"  回测单模型: {model_key}...")
             pred_func = lambda date, _bt=bt: _bt._get_predictions(date)
