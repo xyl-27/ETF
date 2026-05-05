@@ -6,6 +6,14 @@
 #   .\test.ps1 -Select -Mode single         # 只选最好的1个模型
 #   .\test.ps1 -Exp exp_12                  # 指定单个实验(覆盖自动选择)
 
+param(
+    [switch]$Select,
+    [int]$TopN = 10,
+    [string]$Mode = "fusion",
+    [string]$Exp = "",
+    [string[]]$Manual = @()
+)
+
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
@@ -18,15 +26,6 @@ if (Test-Path ".venv") {
 
 $CONFIG_NAME = "config"
 $PYTHON_ARGS = @("code/src/predict.py", "--config", $CONFIG_NAME)
-
-# 解析参数
-param(
-    [switch]$Select,
-    [int]$TopN = 10,
-    [string]$Mode = "fusion",
-    [string]$Exp = "",
-    [string[]]$Manual = @()
-)
 
 # 如果指定了 -Select, 先运行模型选择
 if ($Select) {

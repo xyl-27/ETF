@@ -397,14 +397,16 @@ def predict_fusion(models_info, sequences_np, device, config, num_stocks, featur
         top_stocks = [stock_ids[order[i]] for i in range(min(top_k, len(stock_ids)))]
         top_scores = [float(scores[order[i]]) for i in range(min(top_k, len(stock_ids)))]
         model_name = os.path.basename(m["exp_dir"])
+        model_type = model_config.get("model_type", "unknown")
         individual_preds.append({
             "model": model_name,
+            "model_type": model_type,
             "score": m["score"],
             "top_stocks": top_stocks,
             "top_scores": top_scores,
         })
 
-        print(f"\n  [{model_name}] (search_score={m['score']:.4f})")
+        print(f"\n  [{model_name}] ({model_type}, search_score={m['score']:.4f})")
         for i, (stock, sc) in enumerate(zip(top_stocks, top_scores)):
             print(f"    {i+1}. {stock} (score: {sc:.4f})")
 
@@ -516,6 +518,7 @@ def main(args):
             for rank, (stock, sc) in enumerate(zip(pred["top_stocks"], pred["top_scores"])):
                 summary_rows.append({
                     "model": pred["model"],
+                    "model_type": pred["model_type"],
                     "search_score": pred["score"],
                     "rank": rank + 1,
                     "stock_id": stock,
