@@ -344,6 +344,8 @@ def _make_model_key(m):
     else:
         exp_dir = m
     parent = os.path.basename(os.path.dirname(exp_dir))
+    if parent.startswith("search_"):
+        parent = parent[7:]
     name = os.path.basename(exp_dir)
     return f"{parent}_{name}"
 
