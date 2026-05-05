@@ -557,6 +557,19 @@ def daily_eval(
         with open(PORTFOLIO_PATH, "w", encoding="utf-8") as f:
             json.dump(portfolio, f, ensure_ascii=False, indent=2)
 
+        # 发送邮件报告
+        try:
+            from send_report import send_report
+            email_key = "fusion" if "fusion" in sequences else list(sequences.keys())[0]
+            if "holdings" not in sequences[email_key]:
+                sequences[email_key]["holdings"] = holdings
+            if verbose:
+                print(f"\n[邮件] 正在发送报告: {email_key}...")
+            send_report(model_key=email_key)
+        except Exception as e:
+            if verbose:
+                print(f"\n[邮件] 发送失败: {e}")
+
         for fn in ["equity_curve.csv", "daily_metrics.json", "trades_log.csv"]:
             fp = OUTPUT_DIR / fn
             if fp.exists():

@@ -69,8 +69,8 @@ def send_report(model_key=None):
         seq_data = sequences[model_key]
 
     metrics = seq_data["metrics"]
-    holdings = seq_data.get("holdings", [])
-    cash = seq_data.get("cash", 0)
+    holdings = seq_data.get("holdings", report.get("holdings", []))
+    cash = seq_data.get("cash", report.get("cash", 0))
     total_value = metrics.get("latest_value", 0)
     
     trades = [t for t in report.get("today_trades", []) if t.get("model_key") == model_key or not report.get("today_trades")]
