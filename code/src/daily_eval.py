@@ -417,7 +417,7 @@ def daily_eval(
         config = config_module.config.copy()
         output_dir = config.get("output_dir", "./model/default")
         data_path = config.get("data_path", "./etf_data")
-        data_file = os.path.join(data_path, config.get("data_file", "etf_74.csv"))
+        data_file = os.path.join(data_path, config.get("data_file", "etf_data_74_new.csv"))
 
         # 1. 更新数据
         if update_data:
