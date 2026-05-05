@@ -46,7 +46,7 @@ if ($Mode -eq "Init") {
 
     # 初始化默认起始日 (通常设为数据可用的起始点)
     if (-not $PSBoundParameters.ContainsKey('StartDate')) {
-        $StartDate = "2026-04-01"
+        $StartDate = "2026-04-02"
     }
 
     # 初始化通常强制获取最新数据 (除非显式指定 -NoUpdate)
@@ -70,7 +70,7 @@ if ($Mode -eq "Init") {
 
     # 更新模式默认起始日
     if (-not $PSBoundParameters.ContainsKey('StartDate')) {
-        $StartDate = "2026-04-01"
+        $StartDate = "2026-04-02"
     }
 }
 

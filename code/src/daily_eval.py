@@ -338,9 +338,9 @@ def run_backtest_sequence(
 def daily_eval(
     config_name: str = "config",
     update_data: bool = True,
-    top_k: int = 5,
+    top_k: int = 3,
     verbose: bool = True,
-    start_date: str = "2026-04-01",
+    start_date: str = "2026-04-02",
     rebalance_days: int = 5,
     position_pct: float = 0.95,
     initial_capital: float = 1000000,
