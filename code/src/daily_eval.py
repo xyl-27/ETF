@@ -507,6 +507,16 @@ def daily_eval(
                 "cost": pos["cost"],
             })
 
+        # 收集所有序列的信息
+        sequences_summary = {}
+        for key, seq in sequences.items():
+            sequences_summary[key] = {
+                "metrics": seq["metrics"],
+                "cash": seq["cash"],
+                "positions_count": len(seq["positions"]),
+                "trades_count": len(seq["trades"]),
+            }
+
         report = {
             "date": latest_date_str,
             "is_rebalance_day": is_rebalance_day,
@@ -515,6 +525,7 @@ def daily_eval(
             "holdings": holdings,
             "cash": report_data["cash"],
             "total_value": report_data["metrics"]["latest_value"],
+            "sequences": sequences_summary,
         }
         with open(REPORT_PATH, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
