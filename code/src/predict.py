@@ -330,40 +330,130 @@ def build_inference_sequences(data, features, sequence_length, stock_ids, latest
     return np.asarray(sequences, dtype=np.float32), sequence_stock_ids
 
 
+def load_model_selection(selection_path: str) -> tuple:
+    """加载模型选择文件, 返回 (mode, models_list)"""
+    models = []
+    mode = "single"
+    with open(selection_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("mode:"):
+                mode = line.split(":", 1)[1].strip()
+            elif line.startswith("models:"):
+                continue
+            else:
+                parts = line.split(",")
+                if len(parts) == 3:
+                    models.append({
+                        "exp_dir": parts[0],
+                        "model_file": parts[1],
+                        "score": float(parts[2]),
+                    })
+    return mode, models
+
+
+def predict_single(model, sequences_np, device):
+    """单模型预测"""
+    with torch.no_grad():
+        x = torch.from_numpy(sequences_np).unsqueeze(0).to(device)
+        scores = model(x).squeeze(0).detach().cpu().numpy()
+    return scores
+
+
+def predict_fusion(models_info, sequences_np, device, config, num_stocks, features, input_dim):
+    """多模型融合预测 (分数平均)"""
+    all_scores = []
+    for m in models_info:
+        # 每个模型加载自己的config
+        model_config = config.copy()
+        config_json_path = os.path.join(m["exp_dir"], "config.json")
+        if os.path.exists(config_json_path):
+            with open(config_json_path, "r") as f:
+                exp_config = json.load(f)
+            model_config.update(exp_config)
+
+        model = create_model(
+            model_config["model_type"],
+            input_dim=input_dim,
+            config=model_config,
+            num_stocks=num_stocks,
+        )
+        model_path = os.path.join(m["exp_dir"], m["model_file"])
+        model.load_state_dict(torch.load(model_path, map_location=device))
+        model.to(device)
+        model.eval()
+
+        with torch.no_grad():
+            x = torch.from_numpy(sequences_np).unsqueeze(0).to(device)
+            scores = model(x).squeeze(0).detach().cpu().numpy()
+        all_scores.append(scores)
+
+        del model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    # 平均分数
+    fused_scores = np.mean(all_scores, axis=0)
+    return fused_scores
+
+
 def main(args):
     config_name = args.config
     config_module = __import__(config_name, fromlist=["config"])
     config = config_module.config.copy()
 
     data_file = os.path.join(config["data_path"], config.get("data_file", "train.csv"))
-    
-    # 支持指定实验目录
-    if args.exp:
+
+    # 优先级: --selection > --exp > 默认
+    use_selection = False
+    selection_path = os.path.join("./output/", "model_selection.txt")
+
+    if args.selection:
+        selection_path = args.selection
+        use_selection = os.path.exists(selection_path)
+    elif os.path.exists(selection_path):
+        use_selection = True
+
+    if use_selection:
+        mode, models_info = load_model_selection(selection_path)
+        print(f"使用模型选择文件: {selection_path}")
+        print(f"模式: {mode}, 模型数: {len(models_info)}")
+        for m in models_info:
+            print(f"  - {m['exp_dir']} ({m['model_file']}) score={m['score']:.4f}")
+
+        # 加载第一个模型的scaler和config
+        first_model = models_info[0]
+        scaler_path = os.path.join(first_model["exp_dir"], "scaler.pkl")
+        config_json_path = os.path.join(first_model["exp_dir"], "config.json")
+        if os.path.exists(config_json_path):
+            with open(config_json_path, "r") as f:
+                exp_config = json.load(f)
+            config.update(exp_config)
+    elif args.exp:
         exp_dir = os.path.join(config["output_dir"], args.exp)
         model_path = os.path.join(exp_dir, "best_model.pth")
         scaler_path = os.path.join(exp_dir, "scaler.pkl")
-        # 从实验目录加载config.json
         config_json_path = os.path.join(exp_dir, "config.json")
         if os.path.exists(config_json_path):
-            with open(config_json_path, 'r') as f:
+            with open(config_json_path, "r") as f:
                 exp_config = json.load(f)
             config.update(exp_config)
+        models_info = [{"exp_dir": exp_dir, "model_file": "best_model.pth", "score": 0}]
+        mode = "single"
     else:
         model_path = os.path.join(config["output_dir"], "best_model.pth")
         scaler_path = os.path.join(config["output_dir"], "scaler.pkl")
-    
-    output_path = os.path.join("./output/", "result.csv")
+        models_info = [{"exp_dir": config["output_dir"], "model_file": "best_model.pth", "score": 0}]
+        mode = "single"
 
-    if not os.path.exists(model_path):
-        raise FileNotFoundError(f"未找到模型文件: {model_path}")
-    if not os.path.exists(scaler_path):
-        raise FileNotFoundError(f"未找到Scaler文件: {scaler_path}")
+    output_path = os.path.join("./output/", "result.csv")
 
     raw_df = pd.read_csv(data_file, dtype={"股票代码": str})
     raw_df["股票代码"] = raw_df["股票代码"].astype(str).str.zfill(6)
     raw_df["日期"] = pd.to_datetime(raw_df["日期"])
     latest_date = raw_df["日期"].max()
-
     stock_ids = sorted(raw_df["股票代码"].unique())
     stockid2idx = {sid: idx for idx, sid in enumerate(stock_ids)}
 
@@ -391,26 +481,30 @@ def main(args):
     else:
         device = torch.device("cpu")
 
-    model = create_model(
-        config["model_type"],
-        input_dim=len(features),
-        config=config,
-        num_stocks=len(stock_ids),
-    )
-    model.load_state_dict(torch.load(model_path, map_location=device))
-    model.to(device)
-    model.eval()
-
-    with torch.no_grad():
-        x = torch.from_numpy(sequences_np).unsqueeze(0).to(device)  # [1, N, L, F]
-        scores = model(x).squeeze(0).detach().cpu().numpy()  # [N]
+    if mode == "fusion" and len(models_info) > 1:
+        # 融合模式
+        scores = predict_fusion(models_info, sequences_np, device, config, len(stock_ids), features, len(features))
+    else:
+        # 单模型模式
+        first = models_info[0]
+        model = create_model(
+            config["model_type"],
+            input_dim=len(features),
+            config=config,
+            num_stocks=len(stock_ids),
+        )
+        model_path = os.path.join(first["exp_dir"], first["model_file"])
+        model.load_state_dict(torch.load(model_path, map_location=device))
+        model.to(device)
+        model.eval()
+        scores = predict_single(model, sequences_np, device)
+        del model
 
     order = np.argsort(scores)[::-1]
     ranked_stock_ids = [sequence_stock_ids[i] for i in order]
 
     top_k = config.get("top_k", 5)
 
-    # 仅输出前top_k，权重固定 1/top_k
     if len(ranked_stock_ids) < top_k:
         raise ValueError(
             f"可预测股票不足{top_k}只，当前仅有 {len(ranked_stock_ids)} 只"
@@ -426,6 +520,7 @@ def main(args):
 
     print(f"预测日期: {latest_date.date()}")
     print(f"参与排序股票数: {len(ranked_stock_ids)}")
+    print(f"模式: {mode} ({len(models_info)}个模型)")
     print(f"结果已写入: {output_path}")
 
 
@@ -437,6 +532,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="config", help="Config module name")
     parser.add_argument("--exp", type=str, default=None, help="Experiment directory, e.g. exp_57")
+    parser.add_argument("--selection", type=str, default=None, help="Model selection file path")
     parser.add_argument("--topk", type=int, default=5)
     args = parser.parse_args()
 

@@ -471,19 +471,6 @@ def run_experiment(
 
 
 def main(args):
-    import argparse
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="config")
-    parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--model-type", type=str, default=None)
-    parser.add_argument("--feature-num", type=str, default=None)
-    parser.add_argument("--data-file", type=str, default=None)
-    parser.add_argument("--topk", type=int, default=None)
-    parser.add_argument("--sequence-length", type=int, default=None)
-    parser.add_argument("--N", type=int, default=None)
-    args = parser.parse_args()
-
     total_start_time = time.time()
 
     config_name = args.config
@@ -675,5 +662,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="config")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--model-type", type=str, default=None)
+    parser.add_argument("--feature-num", type=str, default=None)
+    parser.add_argument("--data-file", type=str, default=None)
+    parser.add_argument("--topk", type=int, default=None)
+    parser.add_argument("--sequence-length", type=int, default=None)
+    parser.add_argument("--N", type=int, default=None)
     args = parser.parse_args()
     main(args)
