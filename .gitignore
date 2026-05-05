@@ -38,10 +38,17 @@ model/
 
 # 数据文件
 data/
+etf_data/
 
 # 输出
 output/
 
 # 笔记本
 notebooks/
+
+# 聚宽登录状态
+joinquant_state.json
+
+# 其他
+test.py
 etf_data/

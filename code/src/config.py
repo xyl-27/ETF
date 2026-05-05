@@ -21,8 +21,8 @@ config = {
     "val_months": val_months,
     "output_dir": f"./model/search_{model_type}_{N}_{topk}",
     "output_base": "./model",
-    "data_path": "./data",
-    "data_file": "data_74.csv",
+    "data_path": "./etf_data",
+    "data_file": "etf_74.csv",
 }
 
 MODEL_CONFIGS = {

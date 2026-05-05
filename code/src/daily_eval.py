@@ -33,6 +33,47 @@ from predict import (
 from models import create_model
 import joblib
 import multiprocessing as mp
+import subprocess
+
+
+# ============================================================
+# 数据更新
+# ============================================================
+
+def update_etf_data(verbose: bool = True) -> bool:
+    """运行 get_etf_data.py 获取最新ETF数据"""
+    script_path = str(PROJECT_ROOT / "get_etf_data.py")
+    if not os.path.exists(script_path):
+        if verbose:
+            print("[数据更新] 未找到 get_etf_data.py，跳过")
+        return False
+
+    if verbose:
+        print("[数据更新] 运行 get_etf_data.py 获取最新数据...")
+
+    try:
+        result = subprocess.run(
+            ["python", script_path],
+            cwd=str(PROJECT_ROOT),
+            capture_output=False,
+            timeout=600,
+        )
+        if result.returncode == 0:
+            if verbose:
+                print("[数据更新] ETF数据获取成功")
+            return True
+        else:
+            if verbose:
+                print(f"[数据更新] ETF数据获取失败 (exit code: {result.returncode})")
+            return False
+    except subprocess.TimeoutExpired:
+        if verbose:
+            print("[数据更新] 超时 (10分钟)，跳过")
+        return False
+    except Exception as e:
+        if verbose:
+            print(f"[数据更新] 异常: {e}")
+        return False
 
 
 # ============================================================
@@ -246,6 +287,7 @@ def save_history(history: list, history_path: str):
 
 def daily_eval(
     config_name: str = "config",
+    update_data: bool = True,
     backtest_months: int = 6,
     top_k: int = 5,
     verbose: bool = True,
@@ -258,15 +300,27 @@ def daily_eval(
         config_module = __import__(config_name, fromlist=["config"])
         config = config_module.config.copy()
         output_dir = config.get("output_dir", "./model/default")
-        data_path = config.get("data_path", "./data")
-        data_file = os.path.join(data_path, config.get("data_file", "data_74.csv"))
+        data_path = config.get("data_path", "./etf_data")
+        data_file = os.path.join(data_path, config.get("data_file", "etf_74.csv"))
 
-        # 1. 查找最佳模型
+        # 1. 更新数据
+        if update_data:
+            if verbose:
+                print(f"\n{'='*60}")
+                print(f"[{timestamp}] 每日测评开始")
+                print(f"{'='*60}")
+                print("\n[1/3] 获取最新ETF数据...")
+            data_success = update_etf_data(verbose=verbose)
+            log_entry["data_update"] = data_success
+            if not data_success:
+                print("[数据更新] 失败，使用现有数据继续")
+
+        step_num = 2 if update_data else 1
+        total_steps = 3 if update_data else 2
+
+        # 2. 查找最佳模型
         if verbose:
-            print(f"\n{'='*60}")
-            print(f"[{timestamp}] 每日测评开始")
-            print(f"{'='*60}")
-            print("\n[1/2] 查找最佳模型并预测...")
+            print(f"\n[{step_num}/{total_steps}] 查找最佳模型并预测...")
 
         model_info = find_best_model(output_dir)
         if model_info is None:
@@ -295,9 +349,9 @@ def daily_eval(
         )
         log_entry["prediction"] = pred_result
 
-        # 2. 运行近期回测
+        # 3. 运行近期回测
         if verbose:
-            print(f"\n[2/2] 运行近期回测 ({backtest_months}个月)...")
+            print(f"\n[{step_num+1}/{total_steps}] 运行近期回测 ({backtest_months}个月)...")
         bt_result = run_recent_backtest(
             exp_dir=exp_dir,
             model_file=model_file,
@@ -342,6 +396,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="每日定时测评")
     parser.add_argument("--config", type=str, default="config", help="配置模块名")
+    parser.add_argument("--no-update", action="store_true", help="跳过数据更新")
     parser.add_argument("--backtest-months", type=int, default=6, help="回测月数")
     parser.add_argument("--topk", type=int, default=5, help="Top-K推荐数量")
     parser.add_argument("--quiet", action="store_true", help="静默模式")
@@ -351,6 +406,7 @@ if __name__ == "__main__":
 
     daily_eval(
         config_name=args.config,
+        update_data=not args.no_update,
         backtest_months=args.backtest_months,
         top_k=args.topk,
         verbose=not args.quiet,
