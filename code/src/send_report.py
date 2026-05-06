@@ -192,8 +192,8 @@ def send_report(model_key=None):
             </div>
         </div>
 
-        <h3>当前持仓 ({len(holdings)} 只)</h3>
-        <table>
+        <h3 style="font-size: 14px;">当前持仓 ({len(holdings)} 只)</h3>
+        <table style="font-size: 12px;">
             <thead>
                 <tr>
                     <th>代码</th>
@@ -208,8 +208,8 @@ def send_report(model_key=None):
             </tbody>
         </table>
 
-        <h3>今日调仓</h3>
-        <table>
+        <h3 style="font-size: 14px;">今日调仓</h3>
+        <table style="font-size: 12px;">
             <thead>
                 <tr>
                     <th>操作</th>
@@ -223,7 +223,6 @@ def send_report(model_key=None):
                 {trades_rows}
             </tbody>
         </table>
-
         <div class="chart">
             <h3>收益曲线对比</h3>
             <img src="cid:chart_img" alt="Equity Curves">
