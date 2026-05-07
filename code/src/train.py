@@ -453,7 +453,7 @@ class WeightedRankingLoss(nn.Module):
         return total_loss
 
 
-def calculate_ranking_metrics(y_pred, y_true, masks, k=5):
+def calculate_ranking_metrics(y_pred, y_true, masks, k=5, hs300_returns=None):
     """计算新的评估指标：Top 5 收益之和，以及与理论最高值和随机值的比值"""
     batch_size = y_pred.size(0)
 
@@ -522,8 +522,15 @@ def calculate_ranking_metrics(y_pred, y_true, masks, k=5):
 
         # ========== 计算新增指标 ==========
 
-        # 4. 超额收益
-        excess_return = pred_return_sum - random_return_sum
+        # 4. 超额收益 (相对 HS300)
+        # hs300_returns 是 shape [batch_size] 的张量，表示每个样本的 HS300 收益率
+        # pred_return_sum 是该样本选中的 K 只股票的收益总和
+        # excess_return = pred_return_sum / k - hs300_return (单只平均相对 HS300)
+        if hs300_returns is not None:
+            hs300_ret = hs300_returns[i] if i < len(hs300_returns) else 0.0
+            excess_return = (pred_return_sum / k) - hs300_ret
+        else:
+            excess_return = pred_return_sum - random_return_sum
         excess_return_list.append(excess_return)
 
         # 5. 命中率 (Hit Rate): 选中的股票中有多少在真实Top-K中
@@ -676,11 +683,12 @@ def calculate_ranking_metrics(y_pred, y_true, masks, k=5):
 class RankingDataset(torch.utils.data.Dataset):
     """排序数据集类"""
 
-    def __init__(self, sequences, targets, relevance_scores, stock_indices):
+    def __init__(self, sequences, targets, relevance_scores, stock_indices, hs300_rets=None):
         self.sequences = sequences
         self.targets = targets
         self.relevance_scores = relevance_scores
         self.stock_indices = stock_indices
+        self.hs300_rets = hs300_rets if hs300_rets else [0.0] * len(sequences)
 
     def __len__(self):
         return len(self.sequences)
@@ -689,14 +697,15 @@ class RankingDataset(torch.utils.data.Dataset):
         return {
             "sequences": torch.FloatTensor(
                 self.sequences[idx]
-            ),  # [num_stocks, seq_len, features]
-            "targets": torch.FloatTensor(self.targets[idx]),  # [num_stocks] 真实涨跌幅
+            ),
+            "targets": torch.FloatTensor(self.targets[idx]),
             "relevance": torch.LongTensor(
                 self.relevance_scores[idx]
-            ),  # [num_stocks] 排序标签
+            ),
             "stock_indices": torch.LongTensor(
                 self.stock_indices[idx]
-            ),  # [num_stocks] 股票索引
+            ),
+            "hs300_rets": torch.FloatTensor([self.hs300_rets[idx]]),
         }
 
 
@@ -706,6 +715,7 @@ def collate_fn(batch):
     targets = [item["targets"] for item in batch]
     relevance = [item["relevance"] for item in batch]
     stock_indices = [item["stock_indices"] for item in batch]
+    hs300_rets = [item["hs300_rets"] for item in batch]
 
     # 找到最大股票数量
     max_stocks = max(seq.size(0) for seq in sequences)
@@ -717,7 +727,7 @@ def collate_fn(batch):
     padded_stock_indices = []
     masks = []
 
-    for seq, tgt, rel, stock_idx in zip(sequences, targets, relevance, stock_indices):
+    for seq, tgt, rel, stock_idx, hs300_ret in zip(sequences, targets, relevance, stock_indices, hs300_rets):
         num_stocks = seq.size(0)
         seq_len = seq.size(1)
         feature_dim = seq.size(2)
@@ -753,12 +763,13 @@ def collate_fn(batch):
         "relevance": torch.stack(padded_relevance),  # [batch, max_stocks]
         "stock_indices": torch.stack(padded_stock_indices),  # [batch, max_stocks]
         "masks": torch.stack(masks),  # [batch, max_stocks]
+        "hs300_rets": torch.stack(hs300_rets),  # [batch, 1]
     }
 
 
 # 排序训练函数
 def train_ranking_model(
-    model, dataloader, criterion, optimizer, device, epoch, writer, top_k=5
+    model, dataloader, criterion, optimizer, device, epoch, writer, top_k=5, hs300_returns=None
 ):
     model.train()
     total_loss = 0
@@ -774,6 +785,7 @@ def train_ranking_model(
             device
         )  # [batch, max_stocks] 预处理的相关性得分
         masks = batch["masks"].to(device)  # [batch, max_stocks] 有效位置mask
+        hs300_rets = batch["hs300_rets"].to(device)  # [batch, 1] HS300 收益率
 
         optimizer.zero_grad()
 
@@ -830,7 +842,8 @@ def train_ranking_model(
             # 计算评估指标
             with torch.no_grad():
                 metrics = calculate_ranking_metrics(
-                    masked_outputs, masked_targets, masks, k=top_k
+                    masked_outputs, masked_targets, masks, k=top_k,
+                    hs300_returns=hs300_rets.squeeze(1)
                 )
                 for metric_name, v in metrics.items():
                     if metric_name not in total_metrics:
@@ -872,6 +885,7 @@ def evaluate_ranking_model(
             sequences = batch["sequences"].to(device)
             targets = batch["targets"].to(device)
             masks = batch["masks"].to(device)
+            hs300_rets = batch.get("hs300_rets", torch.zeros(sequences.size(0), 1)).to(device)
 
             # 模型预测
             outputs = model(sequences)
@@ -916,7 +930,8 @@ def evaluate_ranking_model(
 
             # 计算评估指标
             metrics = calculate_ranking_metrics(
-                masked_outputs, masked_targets, masks, k=top_k
+                masked_outputs, masked_targets, masks, k=top_k,
+                hs300_returns=hs300_rets.squeeze(1)
             )
             for metric_name, v in metrics.items():
                 if metric_name not in total_metrics:

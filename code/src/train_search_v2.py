@@ -103,9 +103,18 @@ def preprocess_and_save(config, search_dir):
     val_sliding_data = val_sliding_data.dropna(subset=features)
     val_sliding_data[features] = scaler.transform(val_sliding_data[features])
 
-    train_sequences, train_targets, train_relevance, train_stock_indices, _ = (
+    # 提取 HS300 收益率用于计算超额收益
+    hs300_code = "510300.XSHG"
+    hs300_data = full_df[full_df["股票代码"] == hs300_code].sort_values("日期").copy()
+    hs300_data["pct_change"] = hs300_data["收盘"].pct_change()
+    hs300_labels_map = {}
+    for _, row in hs300_data.iterrows():
+        hs300_labels_map[str(row["日期"])[:10]] = row["label"]
+
+    train_sequences, train_targets, train_relevance, train_stock_indices, _, _ = (
         create_ranking_dataset_vectorized(
-            train_data, features, config["sequence_length"], ranking_data_path=None
+            train_data, features, config["sequence_length"], ranking_data_path=None,
+            hs300_labels_map=hs300_labels_map
         )
     )
     (
@@ -114,12 +123,14 @@ def preprocess_and_save(config, search_dir):
         val_relevance,
         val_stock_indices,
         val_first_window_date,
+        val_hs300_rets,
     ) = create_ranking_dataset_vectorized(
         val_data,
         features,
         config["sequence_length"],
         ranking_data_path=None,
         min_window_end_date=val_start.strftime("%Y-%m-%d"),
+        hs300_labels_map=hs300_labels_map,
     )
 
     # 记录按周验证的第一个窗口结束日期，用于滑动验证对齐
@@ -130,12 +141,21 @@ def preprocess_and_save(config, search_dir):
     # 滑动验证使用val_first_sample_date作为min_window_end_date，与按周验证对齐
     min_date_for_sliding = val_first_sample_date.strftime("%Y-%m-%d")
 
+    # 提取 HS300 收益率用于计算超额收益
+    hs300_code = "510300.XSHG"
+    hs300_data = full_df[full_df["股票代码"] == hs300_code].sort_values("日期").copy()
+    hs300_data["pct_change"] = hs300_data["收盘"].pct_change()
+    hs300_labels_map = {}
+    for _, row in hs300_data.iterrows():
+        hs300_labels_map[str(row["日期"])[:10]] = row["label"]
+
     (
         val_sliding_sequences,
         val_sliding_targets,
         val_sliding_relevance,
         val_sliding_stock_indices,
         _,
+        val_sliding_hs300_rets,
     ) = create_ranking_dataset_vectorized(
         val_sliding_data,
         features,
@@ -143,6 +163,7 @@ def preprocess_and_save(config, search_dir):
         ranking_data_path=None,
         min_window_end_date=min_date_for_sliding,
         require_natural_day_consecutive=False,
+        hs300_labels_map=hs300_labels_map,
     )
 
     preprocessed_data = {
@@ -154,6 +175,7 @@ def preprocess_and_save(config, search_dir):
         "train_targets": train_targets,
         "train_relevance": train_relevance,
         "train_stock_indices": train_stock_indices,
+        "train_hs300_rets": train_hs300_rets,
         "val_sequences": val_sequences,
         "val_targets": val_targets,
         "val_relevance": val_relevance,
@@ -162,6 +184,8 @@ def preprocess_and_save(config, search_dir):
         "val_sliding_targets": val_sliding_targets,
         "val_sliding_relevance": val_sliding_relevance,
         "val_sliding_stock_indices": val_sliding_stock_indices,
+        "val_hs300_rets": val_hs300_rets,
+        "val_sliding_hs300_rets": val_sliding_hs300_rets,
     }
 
     preprocessed_path = os.path.join(search_dir, "preprocessed_data.pkl")
@@ -212,18 +236,21 @@ def run_experiment(
         preprocessed_data["train_targets"],
         preprocessed_data["train_relevance"],
         preprocessed_data["train_stock_indices"],
+        preprocessed_data.get("train_hs300_rets"),
     )
     val_dataset = RankingDataset(
         preprocessed_data["val_sequences"],
         preprocessed_data["val_targets"],
         preprocessed_data["val_relevance"],
         preprocessed_data["val_stock_indices"],
+        preprocessed_data.get("val_hs300_rets"),
     )
     val_sliding_dataset = RankingDataset(
         preprocessed_data["val_sliding_sequences"],
         preprocessed_data["val_sliding_targets"],
         preprocessed_data["val_sliding_relevance"],
         preprocessed_data["val_sliding_stock_indices"],
+        preprocessed_data.get("val_sliding_hs300_rets"),
     )
 
     train_loader = torch.utils.data.DataLoader(
@@ -311,6 +338,7 @@ def run_experiment(
         weekly_max_sum = eval_metrics.get("max_return_sum", 0.0)
         weekly_random_sum = eval_metrics.get("random_return_sum", 0.0)
         weekly_excess = eval_metrics.get("excess_return", 0.0)
+        
         weekly_hit_rate = eval_metrics.get("hit_rate", 0.0)
         weekly_proximity = eval_metrics.get("proximity_score", 0.0)
         weekly_rank_ic = eval_metrics.get("rank_ic", 0.0)
@@ -326,6 +354,7 @@ def run_experiment(
         sliding_max_sum = eval_sliding_metrics.get("max_return_sum", 0.0)
         sliding_random_sum = eval_sliding_metrics.get("random_return_sum", 0.0)
         sliding_excess = eval_sliding_metrics.get("excess_return", 0.0)
+        
         sliding_hit_rate = eval_sliding_metrics.get("hit_rate", 0.0)
         sliding_proximity = eval_sliding_metrics.get("proximity_score", 0.0)
         sliding_rank_ic = eval_sliding_metrics.get("rank_ic", 0.0)

@@ -869,6 +869,7 @@ def create_ranking_dataset_vectorized(
     min_window_end_date=None,
     require_natural_day_consecutive=True,
     verbose=False,
+    hs300_labels_map=None,
 ):
     """
     向量化加速版本：预计算每只股票的所有滑动窗口，再按日期聚合。
@@ -956,6 +957,7 @@ def create_ranking_dataset_vectorized(
     if min_window_end_date is not None:
         min_window_end_date = pd.to_datetime(min_window_end_date)
 
+    hs300_rets = []
     sample_info = []
     for date, group in tqdm(grouped_by_date, desc="Aggregating by date"):
         if (
@@ -975,6 +977,12 @@ def create_ranking_dataset_vectorized(
         day_seqs = np.stack(group["seq"].values)  # (N, L, F)
         day_targets = group["target"].values  # (N,)
         day_stocks = group["stock_code"].tolist()  # [str]
+
+        # 提取 HS300 收益率
+        if hs300_labels_map is not None:
+            hs300_rets.append(hs300_labels_map.get(str(date)[:10], 0.0))
+        else:
+            hs300_rets.append(0.0)
 
         # 计算 relevance（与原逻辑一致）
         sorted_indices = np.argsort(day_targets)[::-1]
@@ -1003,4 +1011,4 @@ def create_ranking_dataset_vectorized(
     #     joblib.dump((sequences, targets, relevance_scores, stock_indices), ranking_data_path)
     #     print(f"数据集已保存到: {ranking_data_path}")
 
-    return sequences, targets, relevance_scores, stock_indices, first_window_end_date
+    return sequences, targets, relevance_scores, stock_indices, first_window_end_date, hs300_rets
