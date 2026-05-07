@@ -43,8 +43,8 @@ etf_data/
 # 输出
 output/
 
-# 笔记本
-notebooks/
+# 笔记本 (保留，但手动管理需要时单独备份)
+# notebooks/
 
 # 聚宽登录状态
 joinquant_state.json
