@@ -523,11 +523,8 @@ def calculate_ranking_metrics(y_pred, y_true, masks, k=5, hs300_returns=None):
         # ========== 计算新增指标 ==========
 
         # 4. 超额收益 (相对 HS300)
-        # hs300_returns 是 shape [batch_size] 的张量，表示每个样本的 HS300 收益率
-        # pred_return_sum 是该样本选中的 K 只股票的收益总和
-        # excess_return = pred_return_sum / k - hs300_return (单只平均相对 HS300)
         if hs300_returns is not None:
-            hs300_ret = hs300_returns[i] if i < len(hs300_returns) else 0.0
+            hs300_ret = hs300_returns[i].item() if i < len(hs300_returns) else 0.0
             excess_return = (pred_return_sum / k) - hs300_ret
         else:
             excess_return = pred_return_sum - random_return_sum
