@@ -500,10 +500,9 @@ def main(args):
 
     data_file = config.get("data_file", "data.csv")
     topk = config.get("top_k", 5)
-    search_dir = config.get(
-        "output_dir",
-        f"./model/search_{config['model_type']}_{data_file.split('_')[1].split('.')[0]}_{topk}",
-    )
+    model_type = config.get("model_type", "tcn")
+    file_prefix = data_file.split("_")[1].split(".")[0]
+    search_dir = f"./model/search_{model_type}_{file_prefix}_{topk}"
     os.makedirs(search_dir, exist_ok=True)
 
     preprocessed_path = os.path.join(search_dir, "preprocessed_data.pkl")
