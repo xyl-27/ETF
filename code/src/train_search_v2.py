@@ -106,7 +106,7 @@ def preprocess_and_save(config, search_dir):
     # 提取 HS300 收益率用于计算超额收益
     hs300_code = "510300.XSHG"
     hs300_data = full_df[full_df["股票代码"] == hs300_code].sort_values("日期").copy()
-    hs300_data["pct_change"] = hs300_data["收盘"].pct_change()
+    hs300_data["label"] = hs300_data["收盘"].pct_change()
     hs300_labels_map = {}
     for _, row in hs300_data.iterrows():
         hs300_labels_map[str(row["日期"])[:10]] = row["label"]
@@ -144,7 +144,7 @@ def preprocess_and_save(config, search_dir):
     # 提取 HS300 收益率用于计算超额收益
     hs300_code = "510300.XSHG"
     hs300_data = full_df[full_df["股票代码"] == hs300_code].sort_values("日期").copy()
-    hs300_data["pct_change"] = hs300_data["收盘"].pct_change()
+    hs300_data["label"] = hs300_data["收盘"].pct_change()
     hs300_labels_map = {}
     for _, row in hs300_data.iterrows():
         hs300_labels_map[str(row["日期"])[:10]] = row["label"]
