@@ -111,7 +111,7 @@ def preprocess_and_save(config, search_dir):
     for _, row in hs300_data.iterrows():
         hs300_labels_map[str(row["日期"])[:10]] = row["label"]
 
-    train_sequences, train_targets, train_relevance, train_stock_indices, _, _ = (
+    train_sequences, train_targets, train_relevance, train_stock_indices, _, train_hs300_rets = (
         create_ranking_dataset_vectorized(
             train_data, features, config["sequence_length"], ranking_data_path=None,
             hs300_labels_map=hs300_labels_map
