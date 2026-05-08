@@ -56,10 +56,9 @@ def send_report(model_key=None):
     holdings = seq_data.get("holdings", report.get("holdings", []))
     cash = seq_data.get("cash", report.get("cash", 0))
     total_value = metrics.get("latest_value", 0)
-    
-    trades = [t for t in report.get("today_trades", []) if t.get("model_key") == model_key or not report.get("today_trades")]
-    if not trades:
-        trades = report.get("today_trades", [])
+
+    # 今日调仓（所有序列）
+    trades = report.get("all_today_trades", report.get("today_trades", []))
 
     # 今日盈亏
     today_pnl_data = seq_data.get("today_pnl", {})
@@ -128,6 +127,7 @@ def send_report(model_key=None):
             action_color = "#cc0000" if t["action"] == "买入" else "#009900"
             trades_rows += f"""
             <tr>
+                <td style="font-size: 11px; color: #888;">{t.get('model_key', '')}</td>
                 <td><span style="color: {action_color}; font-weight: bold;">{t['action']}</span></td>
                 <td><a href="{_eastmoney_url(t['stock'])}" target="_blank" style="text-decoration: none; color: inherit;">{t['stock']}</a></td>
                 <td>{t.get('name', '')}</td>
@@ -136,7 +136,7 @@ def send_report(model_key=None):
             </tr>
             """
     else:
-        trades_rows = "<tr><td colspan='5' style='color: #999; text-align: center;'>无调仓操作</td></tr>"
+        trades_rows = "<tr><td colspan='6' style='color: #999; text-align: center;'>无调仓操作</td></tr>"
 
     next_rebalance = report.get("next_rebalance_date", "")
 
@@ -296,6 +296,7 @@ def send_report(model_key=None):
         <table style="font-size: 12px;">
             <thead>
                 <tr>
+                    <th style="font-size: 11px;">模型</th>
                     <th>操作</th>
                     <th>代码</th>
                     <th>名称</th>

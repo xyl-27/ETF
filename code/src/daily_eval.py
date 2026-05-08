@@ -658,6 +658,14 @@ def daily_eval(
         today_trades = [t for t in report_data["trades"] if t["date"] == latest_date_str]
         is_rebalance_day = len(today_trades) > 0
 
+        # 收集所有序列的今日调仓
+        all_today_trades = []
+        for key, seq in sequences.items():
+            for t in seq.get("trades", []):
+                if t["date"] == latest_date_str:
+                    t["model_key"] = key
+                    all_today_trades.append(t)
+
         # 加载ETF名称映射
         etf_names = {}
         etf_list_path = PROJECT_ROOT / "etf_data" / "etf_list_before_2022_74.csv"
@@ -687,6 +695,10 @@ def daily_eval(
         for t in today_trades:
             t["name"] = etf_names.get(t["stock"], "")
 
+        for t in all_today_trades:
+            if "name" not in t:
+                t["name"] = etf_names.get(t["stock"], "")
+
         # 收集所有序列的信息
         sequences_summary = {}
         for key, seq in sequences.items():
@@ -706,6 +718,7 @@ def daily_eval(
             "is_rebalance_day": is_rebalance_day,
             "next_rebalance_date": next_rebalance,
             "today_trades": today_trades,
+            "all_today_trades": all_today_trades,
             "metrics": report_data["metrics"],
             "holdings": holdings,
             "cash": report_data["cash"],
@@ -773,10 +786,10 @@ def daily_eval(
                 sr = seq["metrics"]["strategy_return_pct"]
                 print(f"    {key}: {sr:+.2f}%")
 
-            if today_trades:
-                print(f"\n  今日调仓:")
-                for t in today_trades:
-                    print(f"    {t['action']} {t['stock']} x {t['shares']}股 @ {t['price']:.4f}")
+            if all_today_trades:
+                print(f"\n  今日调仓 (全部序列):")
+                for t in all_today_trades:
+                    print(f"    [{t.get('model_key', '?')}] {t['action']} {t['stock']} x {t['shares']}股 @ {t['price']:.4f}")
 
             print(f"\n  当前持仓:")
             for h in holdings:
