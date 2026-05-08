@@ -53,7 +53,8 @@ def plot_equity_curves(sequences: Dict[str, Any], data_file: str, initial_capita
     fig, ax = plt.subplots(figsize=(14, 8))
 
     colors = {
-        "fusion": "#e74c3c",
+        "average": "#e74c3c",
+        "voting": "#e67e22",
         "exp_28": "#2ecc71",
         "exp_42": "#3498db",
         "exp_66": "#9b59b6",
@@ -110,8 +111,8 @@ def plot_equity_curves(sequences: Dict[str, Any], data_file: str, initial_capita
         all_dates.extend(dates)
 
         color = colors.get(key, None)
-        linewidth = 3 if key == "fusion" else 1.5
-        linestyle = "--" if key == "fusion" else "-"
+        linewidth = 3 if key in ("average", "voting") else 1.5
+        linestyle = "--" if key in ("average", "voting") else "-"
 
         ax.plot(dates, values, label=f"{key} ({seq['metrics']['strategy_return_pct']:+.2f}%)",
                 color=color, linewidth=linewidth, linestyle=linestyle)
@@ -186,13 +187,14 @@ def update_etf_data(verbose: bool = True) -> bool:
 # 模型加载
 # ============================================================
 
-def load_model_selection(path: str) -> Tuple[List[Dict], str, bool]:
+def load_model_selection(path: str) -> Tuple[List[Dict], str, bool, bool]:
     import yaml
     with open(path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
     models = []
     master = data.get("master", "")
-    fusion_enabled = data.get("fusion", False)
+    average_enabled = data.get("average", data.get("fusion", False))
+    voting_enabled = data.get("voting", False)
     for m in data.get("models", []):
         if isinstance(m, dict):
             enabled = m.get("enabled", True)
@@ -201,7 +203,7 @@ def load_model_selection(path: str) -> Tuple[List[Dict], str, bool]:
                 "model_file": m.get("file", ""),
                 "enabled": enabled,
             })
-    return models, master, fusion_enabled
+    return models, master, average_enabled, voting_enabled
 
 
 def find_best_model(output_dir: str) -> Optional[Tuple[str, str, float]]:
@@ -516,8 +518,8 @@ def _history_chart_b64(all_sequences, hs300_raw, rb_date, first_date, initial_ca
         all_dates.extend(dates)
         ret_pct = (eq_seg[-1]["total_value"] / eq_seg[0]["total_value"] - 1) * 100
         c = colors[idx % len(colors)]
-        lw = 3 if key == "fusion" else 1.5
-        ls = "--" if key == "fusion" else "-"
+        lw = 3 if key in ("average", "voting") else 1.5
+        ls = "--" if key in ("average", "voting") else "-"
         ax.plot(dates, vals, label=f"{key} ({ret_pct:+.2f}%)", color=c, linewidth=lw, linestyle=ls)
 
     hs300_plot = hs300_raw[(hs300_raw["date"] >= pd.Timestamp(first_date)) & (hs300_raw["date"] <= pd.Timestamp(rb_date))].copy()
@@ -753,12 +755,13 @@ def daily_eval(
             print(f"\n[2/4] 加载模型...")
 
         single_models = []
-        fusion_enabled = False
+        average_enabled = False
+        voting_enabled = False
         if os.path.exists(str(MODEL_SELECTION_PATH)):
-            single_models, master, fusion_enabled = load_model_selection(str(MODEL_SELECTION_PATH))
+            single_models, master, average_enabled, voting_enabled = load_model_selection(str(MODEL_SELECTION_PATH))
             enabled_models = [m for m in single_models if m.get("enabled", True)]
             if verbose:
-                print(f"  融合: {'开' if fusion_enabled else '关'}, 主序列: {master or 'auto'}, 模型数: {len(enabled_models)}")
+                print(f"  平均: {'开' if average_enabled else '关'}, 投票: {'开' if voting_enabled else '关'}, 主序列: {master or 'auto'}, 模型数: {len(enabled_models)}")
                 for m in single_models:
                     status = "启用" if m.get("enabled", True) else "禁用"
                     print(f"    {status}: {_make_model_key(m)} ({m['model_file']})")
@@ -774,7 +777,8 @@ def daily_eval(
             exp_dir, model_file, score = model_info
             single_models = [{"exp_dir": exp_dir, "model_file": model_file, "enabled": True}]
             master = ""
-            fusion_enabled = False
+            average_enabled = False
+            voting_enabled = False
             if verbose:
                 print(f"  单模型: {_make_model_key((exp_dir,))} (score={score:.4f})")
 
@@ -832,11 +836,11 @@ def daily_eval(
             )
             sequences[model_key] = result
 
-        if fusion_enabled and len(single_backtesters) >= 2:
+        if average_enabled and len(single_backtesters) >= 2:
             if verbose:
-                print(f"  回测融合模型 ({len(single_backtesters)}个模型)...")
+                print(f"  回测平均模型 ({len(single_backtesters)}个模型)...")
 
-            def fusion_pred_func(date):
+            def avg_pred_func(date):
                 all_score_dicts = []
                 for _, bt in single_backtesters:
                     preds = bt._get_predictions(date)
@@ -851,7 +855,7 @@ def daily_eval(
                 return [{"rank": i+1, "stock_id": sid, "score": sc} for i, (sid, sc) in enumerate(sorted_stocks)]
 
             result = run_backtest_sequence(
-                predictions_func=fusion_pred_func,
+                predictions_func=avg_pred_func,
                 data_file=str(DATA_FILE),
                 start_date=start_date,
                 end_date=end_date,
@@ -860,7 +864,57 @@ def daily_eval(
                 position_pct=position_pct,
                 initial_capital=initial_capital,
             )
-            sequences["fusion"] = result
+            sequences["average"] = result
+
+        if voting_enabled and len(single_backtesters) >= 2:
+            if verbose:
+                print(f"  回测投票模型 ({len(single_backtesters)}个模型)...")
+
+            first_model_key = _make_model_key(single_backtesters[0][0])
+
+            def voting_pred_func(date):
+                all_preds = []
+                for _, bt in single_backtesters:
+                    preds = bt._get_predictions(date)
+                    if preds is None:
+                        return None
+                    all_preds.append(preds)
+                freq = {}
+                for preds in all_preds:
+                    for p in preds:
+                        sid = p["stock_id"]
+                        freq[sid] = freq.get(sid, 0) + 1
+                avg_score = {}
+                for preds in all_preds:
+                    for p in preds:
+                        sid = p["stock_id"]
+                        avg_score[sid] = avg_score.get(sid, 0) + p["score"]
+                for sid in avg_score:
+                    avg_score[sid] /= freq.get(sid, 1)
+                ranked = sorted(freq.items(), key=lambda x: (-x[1], -avg_score.get(x[0], 0)))
+                result = [{"rank": i+1, "stock_id": sid, "score": freq} for i, (sid, freq) in enumerate(ranked)]
+                if len(result) < top_k:
+                    first_picks = [p["stock_id"] for p in all_preds[0]]
+                    existing = {r["stock_id"] for r in result}
+                    for sid in first_picks:
+                        if sid not in existing:
+                            result.append({"rank": len(result)+1, "stock_id": sid, "score": 0})
+                            existing.add(sid)
+                        if len(result) >= top_k:
+                            break
+                return result[:top_k]
+
+            result = run_backtest_sequence(
+                predictions_func=voting_pred_func,
+                data_file=str(DATA_FILE),
+                start_date=start_date,
+                end_date=end_date,
+                top_k=top_k,
+                rebalance_days=rebalance_days,
+                position_pct=position_pct,
+                initial_capital=initial_capital,
+            )
+            sequences["voting"] = result
 
         state = {
             "sequences": sequences,
@@ -883,7 +937,12 @@ def daily_eval(
         if master == "first":
             report_key = list(sequences.keys())[0]
         else:
-            report_key = "fusion" if "fusion" in sequences else list(sequences.keys())[0]
+            for fallback in ["average", "voting", list(sequences.keys())[0]]:
+                if fallback in sequences:
+                    report_key = fallback
+                    break
+            else:
+                report_key = list(sequences.keys())[0]
         report_data = sequences[report_key]
         today_trades = [t for t in report_data["trades"] if t["date"] == latest_date_str]
         is_rebalance_day = len(today_trades) > 0
@@ -974,7 +1033,12 @@ def daily_eval(
             if master == "first":
                 email_key = list(sequences.keys())[0]
             else:
-                email_key = "fusion" if "fusion" in sequences else list(sequences.keys())[0]
+                for fallback in ["average", "voting", list(sequences.keys())[0]]:
+                    if fallback in sequences:
+                        email_key = fallback
+                        break
+                else:
+                    email_key = list(sequences.keys())[0]
             if "holdings" not in sequences[email_key]:
                 sequences[email_key]["holdings"] = holdings
             if verbose:
