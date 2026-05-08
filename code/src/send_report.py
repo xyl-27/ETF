@@ -90,11 +90,13 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
     """
 
     pnl_total_color = "#cc0000" if today_pnl_total >= 0 else "#009900"
+    total_rebal_pnl = sum(round(h["price"] * h["shares"] - h["cost"], 2) for h in holdings if h.get("price"))
+    rebal_total_color = "#cc0000" if total_rebal_pnl >= 0 else "#009900"
     holdings_rows += f"""
     <tr style="font-weight: bold; border-top: 2px solid #333;">
         <td colspan="6" style="text-align: right;">总计盈亏</td>
-        <td style="text-align: right;"></td>
         <td style="text-align: right; color: {pnl_total_color};">{today_pnl_total:+.2f}</td>
+        <td style="text-align: right; color: {rebal_total_color};">{total_rebal_pnl:+.2f}</td>
     </tr>
     """
 
