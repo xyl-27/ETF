@@ -880,19 +880,18 @@ def daily_eval(
                         return None
                     all_preds.append(preds)
                 freq = {}
-                for preds in all_preds:
-                    for p in preds:
-                        sid = p["stock_id"]
-                        freq[sid] = freq.get(sid, 0) + 1
                 avg_score = {}
                 for preds in all_preds:
-                    for p in preds:
+                    for i, p in enumerate(preds):
+                        if i >= top_k:
+                            break
                         sid = p["stock_id"]
+                        freq[sid] = freq.get(sid, 0) + 1
                         avg_score[sid] = avg_score.get(sid, 0) + p["score"]
                 for sid in avg_score:
                     avg_score[sid] /= freq.get(sid, 1)
                 ranked = sorted(freq.items(), key=lambda x: (-x[1], -avg_score.get(x[0], 0)))
-                result = [{"rank": i+1, "stock_id": sid, "score": freq} for i, (sid, freq) in enumerate(ranked)]
+                result = [{"rank": i+1, "stock_id": sid, "score": float(freq)} for i, (sid, freq) in enumerate(ranked)]
                 if len(result) < top_k:
                     first_picks = [p["stock_id"] for p in all_preds[0]]
                     existing = {r["stock_id"] for r in result}
