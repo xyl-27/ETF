@@ -690,6 +690,7 @@ def daily_eval(
                 "cash": seq["cash"],
                 "positions_count": len(seq["positions"]),
                 "trades_count": len(seq["trades"]),
+                "trades": seq["trades"],
                 "today_pnl": seq.get("today_pnl", {}),
             }
 

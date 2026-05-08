@@ -33,6 +33,7 @@ if ($Mode -eq "Init") {
     $filesToRemove = @(
         "output\backtest_state.json",
         "output\latest_report.json",
+        "output\latest_report.html",
         "output\equity_curves.png",
         "output\portfolio.json"
     )
