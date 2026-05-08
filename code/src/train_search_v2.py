@@ -104,11 +104,14 @@ def preprocess_and_save(config, search_dir):
     val_sliding_data[features] = scaler.transform(val_sliding_data[features])
 
     # 提取 HS300 收益率用于计算超额收益
+    # 注意：ETF标签使用5日开盘收益率，HS300也要用相同的计算方式
     hs300_code = "510300.XSHG"
     hs300_data = full_df[full_df["股票代码"] == hs300_code].sort_values("日期").copy()
-    hs300_data["label"] = hs300_data["收盘"].pct_change()
+    hs300_data["open_t1"] = hs300_data["开盘"].shift(-1)
+    hs300_data["open_t5"] = hs300_data["开盘"].shift(-5)
+    hs300_data["label"] = (hs300_data["open_t5"] - hs300_data["open_t1"]) / (hs300_data["open_t1"] + 1e-12)
     hs300_labels_map = {}
-    for _, row in hs300_data.iterrows():
+    for _, row in hs300_data.dropna(subset=["label"]).iterrows():
         hs300_labels_map[str(row["日期"])[:10]] = row["label"]
 
     train_sequences, train_targets, train_relevance, train_stock_indices, _, train_hs300_rets = (
@@ -142,11 +145,14 @@ def preprocess_and_save(config, search_dir):
     min_date_for_sliding = val_first_sample_date.strftime("%Y-%m-%d")
 
     # 提取 HS300 收益率用于计算超额收益
+    # 注意：ETF标签使用5日开盘收益率，HS300也要用相同的计算方式
     hs300_code = "510300.XSHG"
     hs300_data = full_df[full_df["股票代码"] == hs300_code].sort_values("日期").copy()
-    hs300_data["label"] = hs300_data["收盘"].pct_change()
+    hs300_data["open_t1"] = hs300_data["开盘"].shift(-1)
+    hs300_data["open_t5"] = hs300_data["开盘"].shift(-5)
+    hs300_data["label"] = (hs300_data["open_t5"] - hs300_data["open_t1"]) / (hs300_data["open_t1"] + 1e-12)
     hs300_labels_map = {}
-    for _, row in hs300_data.iterrows():
+    for _, row in hs300_data.dropna(subset=["label"]).iterrows():
         hs300_labels_map[str(row["日期"])[:10]] = row["label"]
 
     (
