@@ -330,6 +330,14 @@ def send_report(model_key=None):
     report_html_path.parent.mkdir(parents=True, exist_ok=True)
     report_html_path.write_text(html_body, encoding="utf-8")
 
+    # 调仓日额外保存历史副本
+    if is_rebalance:
+        history_dir = PROJECT_ROOT / "output" / "history_report"
+        history_dir.mkdir(parents=True, exist_ok=True)
+        history_path = history_dir / f"{date}.html"
+        history_path.write_text(html_body, encoding="utf-8")
+        print(f"  历史报告已保存: {history_path}")
+
     msg.attach(MIMEText(html_body, "html", "utf-8"))
 
     if CHART_PATH.exists():
