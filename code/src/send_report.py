@@ -96,18 +96,24 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
     # 交易表
     trades_rows = ""
     if trades_list:
+        prev_model = None
         for t in trades_list:
+            cur_model = t.get('model_key', '')
+            if cur_model and cur_model != prev_model:
+                model_display = cur_model.replace('itransformer_', '').replace('_exp_', ' ')
+                trades_rows += f"""
+            <tr style="background-color: #f0f4f8;"><td colspan="6" style="padding: 4px 10px; font-size: 11px; font-weight: bold; color: #555;">▸ {model_display}</td></tr>"""
+                prev_model = cur_model
             action_color = "#cc0000" if t["action"] == "买入" else "#009900"
             trades_rows += f"""
             <tr>
-                <td style="font-size: 11px; color: #888;">{t.get('model_key', '')}</td>
+                <td style="font-size: 11px; color: #888;">{cur_model}</td>
                 <td><span style="color: {action_color}; font-weight: bold;">{t['action']}</span></td>
                 <td><a href="{_eastmoney_url(t['stock'])}" target="_blank" style="text-decoration: none; color: inherit;">{t['stock']}</a></td>
                 <td>{t.get('name', '')}</td>
                 <td style="text-align: right;">{t['shares']:,}</td>
                 <td style="text-align: right;">{t['price']:.4f}</td>
-            </tr>
-            """
+            </tr>"""
     else:
         trades_rows = "<tr><td colspan='6' style='color: #999; text-align: center;'>无调仓操作</td></tr>"
 
