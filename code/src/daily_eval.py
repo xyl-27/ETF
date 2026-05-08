@@ -498,18 +498,27 @@ def _rebuild_positions(trades, up_to_date):
     return pos
 
 
-def _history_chart_b64(ec_seg, hs300_raw, rb_date, first_date, initial_capital):
-    """生成截止到rb_date的收益曲线图, 返回base64 data URL"""
-    dates = [pd.Timestamp(e["date"]) for e in ec_seg]
-    vals = [e["total_value"] for e in ec_seg]
-    ret_pct = (vals[-1] / vals[0] - 1) * 100
-
+def _history_chart_b64(all_sequences, hs300_raw, rb_date, first_date, initial_capital):
+    """生成截止到rb_date的多序列收益曲线图, 返回base64 data URL"""
+    colors = ["#2ecc71", "#3498db", "#9b59b6", "#f39c12", "#1abc9c"]
     fig, ax = plt.subplots(figsize=(10, 5))
     fig.patch.set_facecolor("white")
     ax.set_facecolor("#f5f5f5")
 
-    val_wan = [v / 10000 for v in vals]
-    ax.plot(dates, val_wan, label=f"策略 ({ret_pct:+.2f}%)", color="#2ecc71", linewidth=2)
+    all_dates = []
+    for idx, (key, seq) in enumerate(all_sequences.items()):
+        eq = seq.get("equity_curve", [])
+        eq_seg = [e for e in eq if e["date"] <= rb_date]
+        if len(eq_seg) < 2:
+            continue
+        dates = [pd.Timestamp(e["date"]) for e in eq_seg]
+        vals = [e["total_value"] / 10000 for e in eq_seg]
+        all_dates.extend(dates)
+        ret_pct = (eq_seg[-1]["total_value"] / eq_seg[0]["total_value"] - 1) * 100
+        c = colors[idx % len(colors)]
+        lw = 3 if key == "fusion" else 1.5
+        ls = "--" if key == "fusion" else "-"
+        ax.plot(dates, vals, label=f"{key} ({ret_pct:+.2f}%)", color=c, linewidth=lw, linestyle=ls)
 
     hs300_plot = hs300_raw[(hs300_raw["date"] >= pd.Timestamp(first_date)) & (hs300_raw["date"] <= pd.Timestamp(rb_date))].copy()
     if len(hs300_plot) >= 2:
@@ -519,12 +528,14 @@ def _history_chart_b64(ec_seg, hs300_raw, rb_date, first_date, initial_capital):
         ax.plot(hs300_plot["date"], hs300_val_wan, label=f"沪深300 ({hs300_ret:+.2f}%)",
                 color="#7f8c8d", linewidth=2, linestyle=":")
 
+    if all_dates:
+        ax.set_xlim(min(all_dates), max(all_dates))
     ax.axhline(y=initial_capital / 10000, color="gray", linewidth=0.8, linestyle=":")
     ax.set_title(f"收益曲线 (截至 {rb_date})", fontsize=14, fontweight="bold", pad=15)
     ax.set_ylabel("账户总值 (万元)", fontsize=11)
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d"))
     ax.grid(True, alpha=0.3, linestyle="--", linewidth=0.8)
-    ax.legend(fontsize=10, framealpha=0.9, edgecolor="gray", loc="upper left")
+    ax.legend(fontsize=9, framealpha=0.9, edgecolor="gray", loc="upper left")
     fig.tight_layout()
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=120)
@@ -533,7 +544,7 @@ def _history_chart_b64(ec_seg, hs300_raw, rb_date, first_date, initial_capital):
     return f"data:image/png;base64,{b64}"
 
 
-def _save_history_reports(seq, data_file, initial_capital, etf_names):
+def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_names):
     """为序列的每一个调仓日保存历史报告HTML"""
     trades = seq.get("trades", [])
     equity_curve = seq.get("equity_curve", [])
@@ -638,7 +649,8 @@ def _save_history_reports(seq, data_file, initial_capital, etf_names):
             wcut = (today_dt - pd.Timedelta(days=wdays)).strftime("%Y-%m-%d")
             wseg = [ec_by_dict[d] for d in ec_sorted if d >= wcut]
             if len(wseg) >= 2:
-                wm = _compute_metrics(wseg, wseg[0]["total_value"])
+                base = initial_capital if wseg[0]["date"] == ec_seg[0]["date"] else wseg[0]["total_value"]
+                wm = _compute_metrics(wseg, base)
                 if wm:
                     metrics[f"window_{wlabel}"] = wm
 
@@ -659,8 +671,8 @@ def _save_history_reports(seq, data_file, initial_capital, etf_names):
             for h in holdings
         ]
 
-        # 生成截止到该调仓日的收益曲线
-        chart_data_url = _history_chart_b64(ec_seg, hs300_raw, rb_date, sorted_dates[0], initial_capital)
+        # 生成截止到该调仓日的收益曲线（绘制所有序列）
+        chart_data_url = _history_chart_b64(all_sequences, hs300_raw, rb_date, sorted_dates[0], initial_capital)
 
         from send_report import build_report_html
         try:
@@ -972,7 +984,7 @@ def daily_eval(
             if verbose:
                 print(f"\n[历史] 生成各调仓日报告...")
             _save_history_reports(
-                sequences[report_key], str(DATA_FILE), initial_capital, etf_names
+                sequences[report_key], sequences, str(DATA_FILE), initial_capital, etf_names
             )
         except Exception as e:
             if verbose:
