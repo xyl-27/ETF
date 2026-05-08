@@ -395,6 +395,12 @@ class BacktestEngine:
                         self._write_log("预测失败，跳过调仓")
                     continue
 
+                pred_scores = [p["score"] for p in predictions]
+                score_std = float(np.std(pred_scores)) if len(pred_scores) > 1 else 1.0
+                cutoff_idx = min(self.top_k, len(predictions) - 1)
+                score_cutoff = predictions[cutoff_idx]["score"]
+                score_map = {p["stock_id"]: p["score"] for p in predictions}
+
                 if self.log:
                     self._write_log(f"目标持仓 (Top {self.top_k}):")
                     for p in predictions[: self.top_k]:
@@ -438,6 +444,10 @@ class BacktestEngine:
                     price = price_dict.get(stock, 0)
                     if price > 0 and stock not in self.positions:
                         self.buy(stock, price, buy_value, current_date)
+                        if self.trades:
+                            s = score_map[stock]
+                            self.trades[-1]["score"] = float(s)
+                            self.trades[-1]["advantage"] = round((s - score_cutoff) / score_std, 4)
                         if self.log:
                             shares = self.positions[stock]["shares"]
                             actual_value = shares * price

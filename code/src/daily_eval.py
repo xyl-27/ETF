@@ -276,14 +276,19 @@ def run_backtest_sequence(
 
     trades = []
     for t in engine.trades:
-        trades.append({
+        trade = {
             "date": t["date"].strftime("%Y-%m-%d") if isinstance(t["date"], pd.Timestamp) else str(t["date"]),
             "action": t["action"],
             "stock": t["stock"],
             "price": round(t["price"], 4),
             "shares": t["shares"],
             "amount": round(t["amount"], 2),
-        })
+        }
+        if "score" in t:
+            trade["score"] = t["score"]
+        if "advantage" in t:
+            trade["advantage"] = t["advantage"]
+        trades.append(trade)
 
     positions = {}
     for stock_id, pos in engine.positions.items():
@@ -873,8 +878,10 @@ def daily_eval(
                 print(f"  回测投票模型 ({len(single_backtesters)}个模型)...")
 
             first_model_key = _make_model_key(single_backtesters[0][0])
+            voting_pred_cache = {}
 
             def voting_pred_func(date):
+                nonlocal voting_pred_cache
                 all_preds = []
                 for _, bt in single_backtesters:
                     preds = bt._get_predictions(date)
@@ -894,6 +901,7 @@ def daily_eval(
                     avg_score[sid] /= freq.get(sid, 1)
                 ranked = sorted(freq.items(), key=lambda x: (-x[1], -avg_score.get(x[0], 0)))
                 result = [{"rank": i+1, "stock_id": sid, "score": float(freq)} for i, (sid, freq) in enumerate(ranked)]
+                voting_pred_cache[date] = {"ranked": ranked, "top_k": top_k}
                 if len(result) < top_k:
                     first_picks = [p["stock_id"] for p in all_preds[0]]
                     existing = {r["stock_id"] for r in result}
@@ -915,6 +923,15 @@ def daily_eval(
                 position_pct=position_pct,
                 initial_capital=initial_capital,
             )
+            for t in result.get("trades", []):
+                if t.get("action") == "买入" and t["date"] in voting_pred_cache:
+                    cache = voting_pred_cache[t["date"]]
+                    full_ranked = cache["ranked"]
+                    k = cache["top_k"]
+                    cutoff_votes = full_ranked[k][1] if len(full_ranked) > k else 0
+                    stock_votes = next((f for sid, f in full_ranked if sid == t["stock"]), 0)
+                    t["score"] = float(stock_votes)
+                    t["advantage"] = int(stock_votes - cutoff_votes)
             sequences["voting"] = result
 
         state = {

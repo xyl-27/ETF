@@ -40,6 +40,14 @@ def _pct(v, suffix="%"):
     return f"{v:+.2f}{suffix}" if isinstance(v, (int, float)) else str(v)
 
 
+def _fmt_advantage(v):
+    if v is None:
+        return "-"
+    if isinstance(v, int):
+        return f"{v:+d}"
+    return f"{v:+.2f}"
+
+
 def build_report_html(*, date, model_display, total_value, cash, holdings,
                       trades_list, metrics, next_rebalance, is_rebalance,
                       today_pnl_total, today_pnl_positions=None,
@@ -122,7 +130,7 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
             if cur_model and cur_model != prev_model:
                 model_display = cur_model.replace('itransformer_', '').replace('_exp_', ' ')
                 trades_rows += f"""
-            <tr style="background-color: #f0f4f8;"><td colspan="6" style="padding: 4px 10px; font-size: 11px; font-weight: bold; color: #555;">▸ {model_display}</td></tr>"""
+            <tr style="background-color: #f0f4f8;"><td colspan="7" style="padding: 4px 10px; font-size: 11px; font-weight: bold; color: #555;">▸ {model_display}</td></tr>"""
                 prev_model = cur_model
             action_color = "#cc0000" if t["action"] == "买入" else "#009900"
             name_display = t.get('name', '')
@@ -137,9 +145,10 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
                 <td>{name_display}</td>
                 <td style="text-align: right;">{t['shares']:,}</td>
                 <td style="text-align: right;">{t['price']:.4f}</td>
+                <td style="text-align: right;{('color: ' + ('#cc0000' if t.get('advantage') >= 0 else '#009900') + ';') if t.get('advantage') is not None else ''}">{_fmt_advantage(t.get('advantage'))}</td>
             </tr>"""
     else:
-        trades_rows = "<tr><td colspan='6' style='color: #999; text-align: center;'>无调仓操作</td></tr>"
+        trades_rows = "<tr><td colspan='7' style='color: #999; text-align: center;'>无调仓操作</td></tr>"
 
     # 指标
     mdd_detail = metrics.get("max_drawdown_details", {})
@@ -295,6 +304,7 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
                     <th>名称</th>
                     <th style="text-align: right;">数量</th>
                     <th style="text-align: right;">价格</th>
+                    <th style="text-align: right;">优势</th>
                 </tr>
             </thead>
             <tbody>
