@@ -65,6 +65,12 @@ def send_report(model_key=None):
     today_pnl_data = seq_data.get("today_pnl", {})
     today_pnl_total = today_pnl_data.get("total_pnl", 0)
 
+    def _eastmoney_url(stock_id):
+        code = stock_id.split(".")[0]
+        exchange = stock_id.split(".")[1] if "." in stock_id else ""
+        prefix = "sh" if exchange == "XSHG" else "sz"
+        return f"https://quote.eastmoney.com/{prefix}{code}.html"
+
     # 构建持仓表格
     pnl_by_stock = {p["stock_id"]: p for p in today_pnl_data.get("positions", [])}
     holdings_rows = ""
@@ -79,7 +85,7 @@ def send_report(model_key=None):
         pnl_color = "#cc0000" if (pnl and pnl["pnl"] >= 0) else "#009900"
         holdings_rows += f"""
         <tr>
-            <td>{code}</td>
+            <td><a href="{_eastmoney_url(code)}" target="_blank" style="text-decoration: none; color: inherit;">{code}</a></td>
             <td>{name}</td>
             <td style="text-align: right;">{shares:,}</td>
             <td style="text-align: right;">{cost:,.2f}</td>
@@ -119,7 +125,7 @@ def send_report(model_key=None):
             trades_rows += f"""
             <tr>
                 <td><span style="color: {action_color}; font-weight: bold;">{t['action']}</span></td>
-                <td>{t['stock']}</td>
+                <td><a href="{_eastmoney_url(t['stock'])}" target="_blank" style="text-decoration: none; color: inherit;">{t['stock']}</a></td>
                 <td>{t.get('name', '')}</td>
                 <td style="text-align: right;">{t['shares']:,}</td>
                 <td style="text-align: right;">{t['price']:.4f}</td>
