@@ -79,14 +79,17 @@ def send_report(model_key=None):
         name = h.get("name", code)
         shares = h["shares"]
         cost = h["cost"]
+        price = h.get("price", 0)
         weight = (cost / total_value * 100) if total_value > 0 else 0
         pnl = pnl_by_stock.get(code, {})
         pnl_str = f"{pnl['pnl']:+.2f}" if pnl else ""
         pnl_color = "#cc0000" if (pnl and pnl["pnl"] >= 0) else "#009900"
+        price_str = f"{price:.4f}" if price else "-"
         holdings_rows += f"""
         <tr>
             <td><a href="{_eastmoney_url(code)}" target="_blank" style="text-decoration: none; color: inherit;">{code}</a></td>
             <td>{name}</td>
+            <td style="text-align: right;">{price_str}</td>
             <td style="text-align: right;">{shares:,}</td>
             <td style="text-align: right;">{cost:,.2f}</td>
             <td style="text-align: right; font-weight: bold;">{weight:.2f}%</td>
@@ -101,6 +104,7 @@ def send_report(model_key=None):
         <td>现金</td>
         <td>未投资资金</td>
         <td style="text-align: right;">-</td>
+        <td style="text-align: right;">-</td>
         <td style="text-align: right;">{cash:,.2f}</td>
         <td style="text-align: right;">{cash_weight:.2f}%</td>
         <td style="text-align: right;">-</td>
@@ -111,7 +115,7 @@ def send_report(model_key=None):
     pnl_total_color = "#cc0000" if today_pnl_total >= 0 else "#009900"
     holdings_rows += f"""
     <tr style="font-weight: bold; border-top: 2px solid #333;">
-        <td colspan="4" style="text-align: right;">今日合计盈亏</td>
+        <td colspan="5" style="text-align: right;">今日合计盈亏</td>
         <td style="text-align: right;"></td>
         <td style="text-align: right; color: {pnl_total_color};">{today_pnl_total:+.2f}</td>
     </tr>
@@ -276,6 +280,7 @@ def send_report(model_key=None):
                 <tr>
                     <th>代码</th>
                     <th>名称</th>
+                    <th style="text-align: right;">价格</th>
                     <th style="text-align: right;">股数</th>
                     <th style="text-align: right;">成本</th>
                     <th style="text-align: right;">仓位</th>

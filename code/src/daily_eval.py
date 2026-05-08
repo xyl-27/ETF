@@ -670,11 +670,16 @@ def daily_eval(
                     if code and name:
                         etf_names[code] = name
 
+        # 当前价格（从今日盈亏中取）
+        pnl_positions = {p["stock_id"]: p for p in report_data.get("today_pnl", {}).get("positions", [])}
+
         holdings = []
         for stock_id, pos in report_data["positions"].items():
+            price = pnl_positions.get(stock_id, {}).get("today_close", 0)
             holdings.append({
                 "stock_id": stock_id,
                 "name": etf_names.get(stock_id, ""),
+                "price": price,
                 "shares": pos["shares"],
                 "cost": pos["cost"],
             })
@@ -775,7 +780,8 @@ def daily_eval(
 
             print(f"\n  当前持仓:")
             for h in holdings:
-                print(f"    {h['stock_id']}: {h['shares']}股 (成本: {h['cost']:.2f})")
+                price_str = f" @ {h['price']:.4f}" if h.get("price") else ""
+                print(f"    {h['stock_id']}: {h['shares']}股{price_str} (成本: {h['cost']:.2f})")
 
             if today_pnl_data.get("positions"):
                 print(f"\n  今日持仓盈亏:")
