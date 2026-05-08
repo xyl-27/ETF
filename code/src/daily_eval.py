@@ -471,6 +471,149 @@ def run_backtest_sequence(
 # 主流程
 # ============================================================
 
+def _rebuild_positions(trades, up_to_date):
+    """从交易记录重建截至某日的持仓"""
+    pos = {}
+    sorted_trades = sorted(trades, key=lambda x: x["date"])
+    for t in sorted_trades:
+        if t["date"] > up_to_date:
+            break
+        stock = t["stock"]
+        if stock not in pos:
+            pos[stock] = {"shares": 0, "cost": 0.0}
+        if t["action"] == "买入":
+            pos[stock]["shares"] += t["shares"]
+            pos[stock]["cost"] += t.get("amount", t["shares"] * t["price"])
+        elif t["action"] == "卖出":
+            if pos[stock]["shares"] == 0:
+                continue
+            ratio = t["shares"] / pos[stock]["shares"]
+            pos[stock]["cost"] -= pos[stock]["cost"] * min(ratio, 1.0)
+            pos[stock]["shares"] -= t["shares"]
+            if pos[stock]["shares"] <= 0:
+                del pos[stock]
+    # 保留 cost 作为持仓成本总金额
+    return pos
+
+
+def _save_history_reports(seq, data_file, initial_capital, etf_names):
+    """为序列的每一个调仓日保存历史报告HTML"""
+    trades = seq.get("trades", [])
+    equity_curve = seq.get("equity_curve", [])
+    if not trades or not equity_curve:
+        return
+
+    raw_df = pd.read_csv(data_file, dtype={"股票代码": str})
+    raw_df["股票代码"] = raw_df["股票代码"].astype(str).str.zfill(6)
+    raw_df["日期"] = pd.to_datetime(raw_df["日期"])
+    ec_by_date = {e["date"]: e["total_value"] for e in equity_curve}
+    sorted_dates = sorted(ec_by_date.keys())
+
+    rebalance_dates = sorted(set(t["date"] for t in trades))
+    history_dir = PROJECT_ROOT / "output" / "history_report"
+    history_dir.mkdir(parents=True, exist_ok=True)
+
+    for rb_date in rebalance_dates:
+        ec_seg = [e for e in equity_curve if e["date"] <= rb_date]
+        if len(ec_seg) < 1:
+            continue
+
+        today_total = ec_seg[-1]["total_value"]
+        yesterday_total = ec_seg[-2]["total_value"] if len(ec_seg) >= 2 else today_total
+
+        positions = _rebuild_positions(trades, rb_date)
+
+        today_trades_list = [t for t in trades if t["date"] == rb_date]
+        today_trades_list.sort(key=lambda x: {"买入": 0, "卖出": 1}.get(x["action"], 2))
+
+        holdings = []
+        today_ts = pd.Timestamp(rb_date)
+        yesterday_ts = pd.Timestamp(sorted_dates[max(0, sorted_dates.index(rb_date) - 1)]) if rb_date in sorted_dates else today_ts
+
+        for stock_id, p in positions.items():
+            sub = raw_df[raw_df["股票代码"] == stock_id]
+            tc_s = sub.loc[sub["日期"] == today_ts, "收盘"]
+            yc_s = sub.loc[sub["日期"] == yesterday_ts, "收盘"]
+            price = tc_s.values[0] if not tc_s.empty else 0
+            yc = yc_s.values[0] if not yc_s.empty else price
+            pnl = round(p["shares"] * (price - yc), 2) if price and yc else 0
+            holdings.append({
+                "stock_id": stock_id,
+                "name": etf_names.get(stock_id, ""),
+                "price": round(price, 4) if price else 0,
+                "shares": p["shares"],
+                "cost": round(p["cost"], 2),
+                "today_pnl": pnl,
+            })
+
+        today_pnl_total = round(today_total - yesterday_total, 2)
+
+        def _compute_metrics(ec_segment, init_cap):
+            if len(ec_segment) < 2:
+                return {"strategy_return_pct": 0, "total_days": 0, "latest_value": today_total}
+            vals = [e["total_value"] for e in ec_segment]
+            total_ret = (vals[-1] / init_cap - 1) * 100
+            cum = np.array(vals) / init_cap
+            daily_rets = np.diff(vals) / np.array(vals[:-1])
+            n_days = len(daily_rets)
+            win_rate = float(np.mean(daily_rets > 0)) if n_days > 0 else 0
+            ann_ret = (1 + total_ret / 100) ** (252 / n_days) - 1 if n_days > 0 else 0
+            daily_std = float(np.std(daily_rets)) if n_days > 0 else 0
+            ann_vol = daily_std * np.sqrt(252) * 100
+            sharpe = float((np.mean(daily_rets) / daily_std) * np.sqrt(252)) if daily_std != 0 else 0
+            running_max = np.maximum.accumulate(cum)
+            dd = (cum - running_max) / running_max * 100
+            max_dd = float(abs(dd.min())) if len(dd) > 0 else 0
+            if max_dd > 0:
+                dd_end = np.argmin(dd)
+                dd_start = np.argmax(running_max[:dd_end + 1])
+                mdd_info = {"start_date": ec_segment[int(dd_start)]["date"], "end_date": ec_segment[int(dd_end)]["date"], "duration_days": int(dd_end - dd_start)}
+            else:
+                mdd_info = {}
+            calmar = ann_ret / (max_dd / 100) if max_dd > 0 else 0
+            downside = daily_rets[daily_rets < 0]
+            ds_std = float(np.std(downside)) if len(downside) > 0 else daily_std
+            sortino = float((np.mean(daily_rets) / ds_std) * np.sqrt(252)) if ds_std != 0 else 0
+            return {
+                "strategy_return_pct": round(total_ret, 4),
+                "annualized_return_pct": round(ann_ret * 100, 4),
+                "daily_win_rate": round(win_rate, 4),
+                "max_drawdown_pct": round(max_dd, 4),
+                "max_drawdown_details": mdd_info,
+                "sharpe_ratio": round(sharpe, 4),
+                "calmar_ratio": round(calmar, 4),
+                "sortino_ratio": round(sortino, 4),
+                "annualized_volatility_pct": round(ann_vol, 4),
+                "total_days": n_days,
+                "latest_value": round(vals[-1], 2),
+            }
+
+        metrics = _compute_metrics(ec_segment, initial_capital)
+
+        # 构建简化版的报告HTML
+        cash = today_total - sum(h["cost"] for h in holdings)
+
+        from send_report import build_report_html
+        try:
+            html = build_report_html(
+                date=rb_date,
+                model_display="历史调仓",
+                total_value=today_total,
+                cash=cash,
+                holdings=holdings,
+                trades_list=today_trades_list,
+                metrics=metrics,
+                next_rebalance="",
+                is_rebalance=True,
+                today_pnl_total=today_pnl_total,
+                today_pnl_positions=[],
+            )
+            history_path = history_dir / f"{rb_date}.html"
+            history_path.write_text(html, encoding="utf-8")
+        except Exception as e:
+            print(f"  [历史报告] {rb_date} 保存失败: {e}")
+
+
 def _make_model_key(m):
     """生成 model_type_exp_X 格式的模型标识"""
     if isinstance(m, dict):
@@ -753,6 +896,17 @@ def daily_eval(
         except Exception as e:
             if verbose:
                 print(f"\n[邮件] 发送失败: {e}")
+
+        # 生成历史调仓日报告（从回测数据重建）
+        try:
+            if verbose:
+                print(f"\n[历史] 生成各调仓日报告...")
+            _save_history_reports(
+                sequences[report_key], str(DATA_FILE), initial_capital, etf_names
+            )
+        except Exception as e:
+            if verbose:
+                print(f"\n[历史] 生成失败: {e}")
 
         for fn in ["equity_curve.csv", "daily_metrics.json", "trades_log.csv"]:
             fp = OUTPUT_DIR / fn

@@ -28,50 +28,24 @@ SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")
 EMAIL_FROM = os.environ.get("EMAIL_FROM", SMTP_USER)
 EMAIL_TO = os.environ.get("EMAIL_TO", "1280745039@qq.com")
 
-def send_report(model_key=None):
-    if not SMTP_USER or not SMTP_PASSWORD:
-        print("错误: 请设置 SMTP_USER 和 SMTP_PASSWORD 环境变量")
-        return False
 
-    if not REPORT_PATH.exists():
-        print(f"错误: 未找到报告文件 {REPORT_PATH}")
-        print("请先运行 daily_eval 生成报告")
-        return False
+def _eastmoney_url(stock_id):
+    code = stock_id.split(".")[0]
+    exchange = stock_id.split(".")[1] if "." in stock_id else ""
+    prefix = "sh" if exchange == "XSHG" else "sz"
+    return f"https://quote.eastmoney.com/{prefix}{code}.html"
 
-    with open(REPORT_PATH, "r", encoding="utf-8") as f:
-        report = json.load(f)
 
-    date = report["date"]
-    sequences = report.get("sequences", {})
-    is_rebalance = report["is_rebalance_day"]
+def _pct(v, suffix="%"):
+    return f"{v:+.2f}{suffix}" if isinstance(v, (int, float)) else str(v)
 
-    if model_key and model_key in sequences:
-        seq_data = sequences[model_key]
-    else:
-        # 默认取 sequences 中的第一个模型
-        model_key = next(iter(sequences))
-        seq_data = sequences[model_key]
 
-    metrics = seq_data["metrics"]
-    holdings = seq_data.get("holdings", report.get("holdings", []))
-    cash = seq_data.get("cash", report.get("cash", 0))
-    total_value = metrics.get("latest_value", 0)
-
-    # 今日调仓（所有序列）
-    trades = report.get("all_today_trades", report.get("today_trades", []))
-
-    # 今日盈亏
-    today_pnl_data = seq_data.get("today_pnl", {})
-    today_pnl_total = today_pnl_data.get("total_pnl", 0)
-
-    def _eastmoney_url(stock_id):
-        code = stock_id.split(".")[0]
-        exchange = stock_id.split(".")[1] if "." in stock_id else ""
-        prefix = "sh" if exchange == "XSHG" else "sz"
-        return f"https://quote.eastmoney.com/{prefix}{code}.html"
-
-    # 构建持仓表格
-    pnl_by_stock = {p["stock_id"]: p for p in today_pnl_data.get("positions", [])}
+def build_report_html(*, date, model_display, total_value, cash, holdings,
+                      trades_list, metrics, next_rebalance, is_rebalance,
+                      today_pnl_total, today_pnl_positions=None):
+    """构建报告HTML，各组件已预先准备好"""
+    # 持仓表
+    pnl_by_stock = {p["stock_id"]: p for p in (today_pnl_positions or [])}
     holdings_rows = ""
     for h in holdings:
         code = h["stock_id"]
@@ -96,7 +70,6 @@ def send_report(model_key=None):
         </tr>
         """
 
-    # 现金行
     cash_weight = (cash / total_value * 100) if total_value > 0 else 0
     holdings_rows += f"""
     <tr style="color: #999;">
@@ -110,7 +83,6 @@ def send_report(model_key=None):
     </tr>
     """
 
-    # 今日盈亏汇总行
     pnl_total_color = "#cc0000" if today_pnl_total >= 0 else "#009900"
     holdings_rows += f"""
     <tr style="font-weight: bold; border-top: 2px solid #333;">
@@ -120,10 +92,10 @@ def send_report(model_key=None):
     </tr>
     """
 
-    # 构建交易表格
+    # 交易表
     trades_rows = ""
-    if trades:
-        for t in trades:
+    if trades_list:
+        for t in trades_list:
             action_color = "#cc0000" if t["action"] == "买入" else "#009900"
             trades_rows += f"""
             <tr>
@@ -138,21 +110,13 @@ def send_report(model_key=None):
     else:
         trades_rows = "<tr><td colspan='6' style='color: #999; text-align: center;'>无调仓操作</td></tr>"
 
-    next_rebalance = report.get("next_rebalance_date", "")
-
-    model_display = model_key.replace("_", " ").title()
-    
-    # 构建详细指标HTML
-    def _pct(v, suffix="%"):
-        return f"{v:+.2f}{suffix}" if isinstance(v, (int, float)) else str(v)
-    
+    # 指标
     mdd_detail = metrics.get("max_drawdown_details", {})
     mdd_period = f"{mdd_detail.get('start_date', '')} ~ {mdd_detail.get('end_date', '')} ({mdd_detail.get('duration_days', 0)}天)" if mdd_detail.get('start_date') else ""
-    
+
     win_rate = metrics.get("daily_win_rate")
     win_rate_str = f"{win_rate*100:.1f}%" if isinstance(win_rate, (int, float)) else ""
-    
-    # 近期窗口指标
+
     window_labels = {"window_5d": "近5天(交易日)", "window_1m": "近一个月"}
     window_rows = ""
     for wkey in ["window_5d", "window_1m"]:
@@ -161,10 +125,7 @@ def send_report(model_key=None):
             w_ret = w.get("strategy_return_pct", 0)
             w_ann = w.get("annualized_return_pct", 0)
             w_win = w.get("daily_win_rate", 0)
-            if isinstance(w_win, (int, float)):
-                w_win_str = f"{w_win*100:.1f}%"
-            else:
-                w_win_str = ""
+            w_win_str = f"{w_win*100:.1f}%" if isinstance(w_win, (int, float)) else ""
             w_dd = w.get("max_drawdown_pct", 0)
             window_rows += f"""
             <tr>
@@ -174,8 +135,8 @@ def send_report(model_key=None):
                 <td style="text-align: right;">{w_win_str}</td>
                 <td style="text-align: right;">{_pct(w_dd)}</td>
             </tr>"""
-    
-    html_body = f"""
+
+    return f"""
     <html>
     <head>
         <meta charset="utf-8">
@@ -219,14 +180,14 @@ def send_report(model_key=None):
             </div>
             <div class="metric-box">
                 <div class="label">沪深300</div>
-                <div class="value {'pos' if metrics['hs300_return_pct'] >= 0 else 'neg'}">
-                    {metrics['hs300_return_pct']:+.2f}%
+                <div class="value {'pos' if metrics.get('hs300_return_pct', 0) >= 0 else 'neg'}">
+                    {_pct(metrics.get('hs300_return_pct', 0))}
                 </div>
             </div>
             <div class="metric-box">
                 <div class="label">超额收益</div>
-                <div class="value {'pos' if metrics['excess_return_pct'] >= 0 else 'neg'}">
-                    {metrics['excess_return_pct']:+.2f}%
+                <div class="value {'pos' if metrics.get('excess_return_pct', 0) >= 0 else 'neg'}">
+                    {_pct(metrics.get('excess_return_pct', 0))}
                 </div>
             </div>
             <div class="metric-box">
@@ -235,11 +196,11 @@ def send_report(model_key=None):
             </div>
             <div class="metric-box">
                 <div class="label">最大回撤</div>
-                <div class="value">{metrics['max_drawdown_pct']:.2f}%</div>
+                <div class="value">{metrics.get('max_drawdown_pct', 0):.2f}%</div>
             </div>
             <div class="metric-box">
                 <div class="label">夏普比率</div>
-                <div class="value">{metrics['sharpe_ratio']:.2f}</div>
+                <div class="value">{metrics.get('sharpe_ratio', 0):.2f}</div>
             </div>
             <div class="metric-box">
                 <div class="label">卡玛比率</div>
@@ -308,10 +269,6 @@ def send_report(model_key=None):
                 {trades_rows}
             </tbody>
         </table>
-        <div class="chart">
-            <h3>收益曲线对比</h3>
-            <img src="cid:chart_img" alt="Equity Curves">
-        </div>
 
         <div class="footer">
             由 ETF 每日测评系统自动生成 | {datetime.now().strftime("%Y-%m-%d %H:%M")}
@@ -319,6 +276,58 @@ def send_report(model_key=None):
     </body>
     </html>
     """
+
+
+def send_report(model_key=None):
+    if not SMTP_USER or not SMTP_PASSWORD:
+        print("错误: 请设置 SMTP_USER 和 SMTP_PASSWORD 环境变量")
+        return False
+
+    if not REPORT_PATH.exists():
+        print(f"错误: 未找到报告文件 {REPORT_PATH}")
+        print("请先运行 daily_eval 生成报告")
+        return False
+
+    with open(REPORT_PATH, "r", encoding="utf-8") as f:
+        report = json.load(f)
+
+    date = report["date"]
+    sequences = report.get("sequences", {})
+    is_rebalance = report["is_rebalance_day"]
+
+    if model_key and model_key in sequences:
+        seq_data = sequences[model_key]
+    else:
+        model_key = next(iter(sequences))
+        seq_data = sequences[model_key]
+
+    metrics = seq_data["metrics"]
+    holdings = seq_data.get("holdings", report.get("holdings", []))
+    cash = seq_data.get("cash", report.get("cash", 0))
+    total_value = metrics.get("latest_value", 0)
+
+    trades = report.get("all_today_trades", report.get("today_trades", []))
+
+    today_pnl_data = seq_data.get("today_pnl", {})
+    today_pnl_total = today_pnl_data.get("total_pnl", 0)
+    today_pnl_positions = today_pnl_data.get("positions", [])
+
+    next_rebalance = report.get("next_rebalance_date", "")
+    model_display = model_key.replace("_", " ").title()
+
+    html_body = build_report_html(
+        date=date,
+        model_display=model_display,
+        total_value=total_value,
+        cash=cash,
+        holdings=holdings,
+        trades_list=trades,
+        metrics=metrics,
+        next_rebalance=next_rebalance,
+        is_rebalance=is_rebalance,
+        today_pnl_total=today_pnl_total,
+        today_pnl_positions=today_pnl_positions,
+    )
 
     msg = MIMEMultipart()
     msg["Subject"] = f"ETF 每日测评报告 ({model_display}) - {date}"
@@ -356,7 +365,7 @@ def send_report(model_key=None):
         else:
             server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
             server.starttls()
-        
+
         server.login(SMTP_USER, SMTP_PASSWORD)
         server.sendmail(EMAIL_FROM, EMAIL_TO.split(","), msg.as_string())
         server.quit()
