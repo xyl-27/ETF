@@ -543,6 +543,18 @@ def main(args):
     search_dir = f"./model/{method_prefix}_{model_type}_{file_prefix}_{topk}"
     os.makedirs(search_dir, exist_ok=True)
 
+    # 兼容旧 search_ 前缀目录
+    old_search_dir = f"./model/search_{model_type}_{file_prefix}_{topk}"
+    if args.resume and os.path.exists(old_search_dir) and not os.path.exists(os.path.join(search_dir, "preprocessed_data.pkl")):
+        print(f"Migrating preprocessed data from legacy directory: {old_search_dir}")
+        import shutil
+        for fname in ["preprocessed_data.pkl", "scaler.pkl", "search_results.json", "optuna_study.db"]:
+            src = os.path.join(old_search_dir, fname)
+            if os.path.exists(src):
+                dst = os.path.join(search_dir, fname)
+                shutil.copy2(src, dst)
+                print(f"  Copied {fname}")
+
     preprocessed_path = os.path.join(search_dir, "preprocessed_data.pkl")
 
     if args.resume and os.path.exists(preprocessed_path):
