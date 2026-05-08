@@ -694,6 +694,7 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
                 today_pnl_total=today_pnl_total,
                 today_pnl_positions=today_pnl_positions,
                 chart_data_url=chart_data_url,
+                total_models=len(all_sequences),
             )
             history_path = history_dir / f"{rb_date}.html"
             history_path.write_text(html, encoding="utf-8")

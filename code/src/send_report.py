@@ -43,7 +43,7 @@ def _pct(v, suffix="%"):
 def build_report_html(*, date, model_display, total_value, cash, holdings,
                       trades_list, metrics, next_rebalance, is_rebalance,
                       today_pnl_total, today_pnl_positions=None,
-                      chart_data_url=None):
+                      chart_data_url=None, total_models=0):
     """构建报告HTML，各组件已预先准备好"""
     # 持仓表
     pnl_by_stock = {p["stock_id"]: p for p in (today_pnl_positions or [])}
@@ -117,7 +117,8 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
             name_display = t.get('name', '')
             cnt = stock_model_count.get(t["stock"], 0)
             if cnt > 1:
-                name_display += f" ({cnt})"
+                m = total_models or cnt
+                name_display += f" ({cnt}/{m})"
             trades_rows += f"""
             <tr>
                 <td style="font-size: 11px; color: #888;">{cur_model}</td>
@@ -351,6 +352,7 @@ def send_report(model_key=None):
         is_rebalance=is_rebalance,
         today_pnl_total=today_pnl_total,
         today_pnl_positions=today_pnl_positions,
+        total_models=len(sequences),
     )
 
     msg = MIMEMultipart()
