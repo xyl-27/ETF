@@ -313,6 +313,11 @@ def send_report(model_key=None):
     msg["From"] = EMAIL_FROM
     msg["To"] = EMAIL_TO
 
+    # 保存HTML到本地
+    report_html_path = PROJECT_ROOT / "output" / "latest_report.html"
+    report_html_path.parent.mkdir(parents=True, exist_ok=True)
+    report_html_path.write_text(html_body, encoding="utf-8")
+
     msg.attach(MIMEText(html_body, "html", "utf-8"))
 
     if CHART_PATH.exists():

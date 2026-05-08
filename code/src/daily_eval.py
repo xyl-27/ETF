@@ -187,7 +187,7 @@ def update_etf_data(verbose: bool = True) -> bool:
 def load_model_selection(path: str) -> Tuple[str, List[Dict], str]:
     models = []
     mode = "single"
-    display = ""
+    master = ""
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -195,8 +195,8 @@ def load_model_selection(path: str) -> Tuple[str, List[Dict], str]:
                 continue
             if line.startswith("mode:"):
                 mode = line.split(":", 1)[1].strip()
-            elif line.startswith("display:"):
-                display = line.split(":", 1)[1].strip()
+            elif line.startswith("master:"):
+                master = line.split(":", 1)[1].strip()
             elif line.startswith("models:") or line.startswith("count:"):
                 continue
             else:
@@ -207,7 +207,7 @@ def load_model_selection(path: str) -> Tuple[str, List[Dict], str]:
                         "model_file": parts[1],
                         "score": float(parts[2]),
                     })
-    return mode, models, display
+    return mode, models, master
 
 
 def find_best_model(output_dir: str) -> Optional[Tuple[str, str, float]]:
@@ -533,9 +533,14 @@ def daily_eval(
         single_models = []
         mode = "single"
         if os.path.exists(str(MODEL_SELECTION_PATH)):
-            mode, single_models, display = load_model_selection(str(MODEL_SELECTION_PATH))
+            mode, single_models, master = load_model_selection(str(MODEL_SELECTION_PATH))
+            if master == "first":
+                single_models = single_models[:1]
+                mode = "single"
+                if verbose:
+                    print(f"  → 主序列模式, 仅用第一个模型: {_make_model_key(single_models[0])}")
             if verbose:
-                print(f"  模式: {mode}, 显示: {display or 'auto'}, 模型数: {len(single_models)}")
+                print(f"  模式: {mode}, 模型数: {len(single_models)}")
                 for m in single_models:
                     print(f"    {_make_model_key(m)} ({m['model_file']}, score={m['score']:.4f})")
         else:
@@ -549,7 +554,7 @@ def daily_eval(
             exp_dir, model_file, score = model_info
             single_models = [{"exp_dir": exp_dir, "model_file": model_file, "score": score}]
             mode = "single"
-            display = ""
+            master = ""
             if verbose:
                 print(f"  单模型: {_make_model_key((exp_dir,))} (score={score:.4f})")
 
@@ -655,7 +660,7 @@ def daily_eval(
             if verbose:
                 print(f"\n  [图表] 保存失败: {e}")
 
-        if display == "first":
+        if master == "first":
             report_key = list(sequences.keys())[0]
         else:
             report_key = "fusion" if "fusion" in sequences else list(sequences.keys())[0]
@@ -727,7 +732,7 @@ def daily_eval(
         # 发送邮件报告
         try:
             from send_report import send_report
-            if display == "first":
+            if master == "first":
                 email_key = list(sequences.keys())[0]
             else:
                 email_key = "fusion" if "fusion" in sequences else list(sequences.keys())[0]
