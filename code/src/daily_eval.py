@@ -184,30 +184,32 @@ def update_etf_data(verbose: bool = True) -> bool:
 # 模型加载
 # ============================================================
 
-def load_model_selection(path: str) -> Tuple[str, List[Dict], str]:
+def load_model_selection(path: str) -> Tuple[List[Dict], str, bool]:
     models = []
-    mode = "single"
     master = ""
+    fusion_enabled = False
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            if line.startswith("mode:"):
-                mode = line.split(":", 1)[1].strip()
-            elif line.startswith("master:"):
+            if line.startswith("master:"):
                 master = line.split(":", 1)[1].strip()
-            elif line.startswith("models:") or line.startswith("count:"):
+            elif line.startswith("models:"):
+                parts = line.split(":", 1)[1].split(",")
+                fusion_enabled = parts[0].strip() == "fusion" and (len(parts) < 2 or parts[1].strip() == "1")
+            elif line.startswith("count:") or line.startswith("mode:"):
                 continue
             else:
                 parts = line.split(",")
-                if len(parts) == 3:
+                if len(parts) >= 2:
+                    enabled = len(parts) < 3 or parts[2].strip() == "1"
                     models.append({
                         "exp_dir": parts[0],
                         "model_file": parts[1],
-                        "score": float(parts[2]),
+                        "enabled": enabled,
                     })
-    return mode, models, master
+    return models, master, fusion_enabled
 
 
 def find_best_model(output_dir: str) -> Optional[Tuple[str, str, float]]:
@@ -531,18 +533,16 @@ def daily_eval(
             print(f"\n[2/4] 加载模型...")
 
         single_models = []
-        mode = "single"
+        fusion_enabled = False
         if os.path.exists(str(MODEL_SELECTION_PATH)):
-            mode, single_models, master = load_model_selection(str(MODEL_SELECTION_PATH))
-            if master == "first":
-                single_models = single_models[:1]
-                mode = "single"
-                if verbose:
-                    print(f"  → 主序列模式, 仅用第一个模型: {_make_model_key(single_models[0])}")
+            single_models, master, fusion_enabled = load_model_selection(str(MODEL_SELECTION_PATH))
+            enabled_models = [m for m in single_models if m.get("enabled", True)]
             if verbose:
-                print(f"  模式: {mode}, 模型数: {len(single_models)}")
+                print(f"  融合: {'开' if fusion_enabled else '关'}, 主序列: {master or 'auto'}, 模型数: {len(enabled_models)}")
                 for m in single_models:
-                    print(f"    {_make_model_key(m)} ({m['model_file']}, score={m['score']:.4f})")
+                    status = "启用" if m.get("enabled", True) else "禁用"
+                    print(f"    {status}: {_make_model_key(m)} ({m['model_file']})")
+            single_models = enabled_models
         else:
             config_module = __import__(config_name, fromlist=["config"])
             config = config_module.config.copy()
@@ -552,9 +552,9 @@ def daily_eval(
                 print("错误: 未找到可用模型")
                 return
             exp_dir, model_file, score = model_info
-            single_models = [{"exp_dir": exp_dir, "model_file": model_file, "score": score}]
-            mode = "single"
+            single_models = [{"exp_dir": exp_dir, "model_file": model_file, "enabled": True}]
             master = ""
+            fusion_enabled = False
             if verbose:
                 print(f"  单模型: {_make_model_key((exp_dir,))} (score={score:.4f})")
 
@@ -612,7 +612,7 @@ def daily_eval(
             )
             sequences[model_key] = result
 
-        if mode == "fusion" and len(single_backtesters) >= 2:
+        if fusion_enabled and len(single_backtesters) >= 2:
             if verbose:
                 print(f"  回测融合模型 ({len(single_backtesters)}个模型)...")
 
