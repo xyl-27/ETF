@@ -35,13 +35,13 @@ if ($Mode -eq "Init") {
         "output\latest_report.json",
         "output\latest_report.html",
         "output\equity_curves.png",
-        "output\portfolio.json"
+        "output\portfolio.json",
+        "output\history_report\*.html"
     )
     foreach ($f in $filesToRemove) {
-        if (Test-Path $f) {
-            Remove-Item $f
-            Write-Host "  [清理] 删除 $f" -ForegroundColor DarkYellow
-        }
+        Remove-Item $f -ErrorAction SilentlyContinue
+        $displayPath = $f -replace [regex]::Escape("\*.html"), " (历史报告)"
+        Write-Host "  [清理] 删除 $displayPath" -ForegroundColor DarkYellow
     }
     Write-Host ""
 
