@@ -7,7 +7,6 @@
 import os
 import sys
 import smtplib
-import csv
 import json
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
@@ -18,7 +17,6 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 REPORT_PATH = PROJECT_ROOT / "output" / "latest_report.json"
 CHART_PATH = PROJECT_ROOT / "output" / "equity_curves.png"
-ETF_LIST_PATH = PROJECT_ROOT / "etf_data" / "etf_list_before_2022_74.csv"
 
 # 邮件配置 (从环境变量读取)
 os.environ['SMTP_USER'] = '3759608757@qq.com'
@@ -29,22 +27,6 @@ SMTP_USER = os.environ.get("SMTP_USER")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")
 EMAIL_FROM = os.environ.get("EMAIL_FROM", SMTP_USER)
 EMAIL_TO = os.environ.get("EMAIL_TO", "1280745039@qq.com")
-
-def load_etf_names():
-    mapping = {}
-    if not ETF_LIST_PATH.exists():
-        return mapping
-    try:
-        with open(ETF_LIST_PATH, "r", encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                code = row.get("代码", "").strip()
-                name = row.get("名称", "").strip()
-                if code and name:
-                    mapping[code] = name
-    except Exception:
-        pass
-    return mapping
 
 def send_report(model_key=None):
     if not SMTP_USER or not SMTP_PASSWORD:
@@ -79,8 +61,6 @@ def send_report(model_key=None):
     if not trades:
         trades = report.get("today_trades", [])
 
-    etf_names = load_etf_names()
-
     # 今日盈亏
     today_pnl_data = seq_data.get("today_pnl", {})
     today_pnl_total = today_pnl_data.get("total_pnl", 0)
@@ -90,7 +70,7 @@ def send_report(model_key=None):
     holdings_rows = ""
     for h in holdings:
         code = h["stock_id"]
-        name = etf_names.get(code, code)
+        name = h.get("name", code)
         shares = h["shares"]
         cost = h["cost"]
         weight = (cost / total_value * 100) if total_value > 0 else 0
@@ -140,7 +120,7 @@ def send_report(model_key=None):
             <tr>
                 <td><span style="color: {action_color}; font-weight: bold;">{t['action']}</span></td>
                 <td>{t['stock']}</td>
-                <td>{etf_names.get(t['stock'].replace('.XSHG','').replace('.XSHE',''), '')}</td>
+                <td>{t.get('name', '')}</td>
                 <td style="text-align: right;">{t['shares']:,}</td>
                 <td style="text-align: right;">{t['price']:.4f}</td>
             </tr>

@@ -651,13 +651,29 @@ def daily_eval(
         today_trades = [t for t in report_data["trades"] if t["date"] == latest_date_str]
         is_rebalance_day = len(today_trades) > 0
 
+        # 加载ETF名称映射
+        etf_names = {}
+        etf_list_path = DATA_DIR / "etf_list_before_2022_74.csv"
+        if etf_list_path.exists():
+            import csv
+            with open(etf_list_path, "r", encoding="utf-8-sig") as f:
+                for row in csv.DictReader(f):
+                    code = row.get("代码", "").strip()
+                    name = row.get("名称", "").strip()
+                    if code and name:
+                        etf_names[code] = name
+
         holdings = []
         for stock_id, pos in report_data["positions"].items():
             holdings.append({
                 "stock_id": stock_id,
+                "name": etf_names.get(stock_id, ""),
                 "shares": pos["shares"],
                 "cost": pos["cost"],
             })
+
+        for t in today_trades:
+            t["name"] = etf_names.get(t["stock"], "")
 
         # 收集所有序列的信息
         sequences_summary = {}
