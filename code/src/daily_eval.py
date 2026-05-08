@@ -188,22 +188,24 @@ def load_model_selection(path: str) -> Tuple[List[Dict], str, bool]:
     models = []
     master = ""
     fusion_enabled = False
+    in_models = False
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            if line.startswith("master:"):
+            if line.startswith("fusion:"):
+                val = line.split(":", 1)[1].strip().lower()
+                fusion_enabled = val in ("true", "1", "yes")
+            elif line.startswith("master:"):
                 master = line.split(":", 1)[1].strip()
             elif line.startswith("models:"):
-                parts = line.split(":", 1)[1].split(",")
-                fusion_enabled = parts[0].strip() == "fusion" and (len(parts) < 2 or parts[1].strip() == "1")
-            elif line.startswith("count:") or line.startswith("mode:"):
-                continue
-            else:
-                parts = line.split(",")
+                in_models = True
+            elif in_models and line.startswith("- "):
+                entry = line[2:].strip()
+                parts = [p.strip() for p in entry.split(",")]
                 if len(parts) >= 2:
-                    enabled = len(parts) < 3 or parts[2].strip() == "1"
+                    enabled = len(parts) < 3 or parts[2].lower() in ("true", "1", "yes", "enabled")
                     models.append({
                         "exp_dir": parts[0],
                         "model_file": parts[1],
