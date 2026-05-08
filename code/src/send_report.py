@@ -216,6 +216,10 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
             </div>
         </div>
 
+        <div class="chart">
+            <img src="cid:chart_img" alt="收益曲线">
+        </div>
+
         <h3 style="font-size: 14px;">近期表现</h3>
         <table style="font-size: 12px;">
             <thead>
