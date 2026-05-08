@@ -184,9 +184,10 @@ def update_etf_data(verbose: bool = True) -> bool:
 # 模型加载
 # ============================================================
 
-def load_model_selection(path: str) -> Tuple[str, List[Dict]]:
+def load_model_selection(path: str) -> Tuple[str, List[Dict], str]:
     models = []
     mode = "single"
+    display = ""
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -194,6 +195,8 @@ def load_model_selection(path: str) -> Tuple[str, List[Dict]]:
                 continue
             if line.startswith("mode:"):
                 mode = line.split(":", 1)[1].strip()
+            elif line.startswith("display:"):
+                display = line.split(":", 1)[1].strip()
             elif line.startswith("models:") or line.startswith("count:"):
                 continue
             else:
@@ -204,7 +207,7 @@ def load_model_selection(path: str) -> Tuple[str, List[Dict]]:
                         "model_file": parts[1],
                         "score": float(parts[2]),
                     })
-    return mode, models
+    return mode, models, display
 
 
 def find_best_model(output_dir: str) -> Optional[Tuple[str, str, float]]:
@@ -398,12 +401,17 @@ def run_backtest_sequence(
 
     # -- 下一个调仓日 --
     all_dates_sorted = sorted(raw_df["日期"].unique())
-    start_idx = all_dates_sorted.index(start_ts)
-    current_idx = all_dates_sorted.index(backtest_dates[-1])
-    next_reb_idx = ((current_idx - start_idx) // rebalance_days + 1) * rebalance_days + start_idx
-    if next_reb_idx < len(all_dates_sorted):
-        next_rebalance_date = all_dates_sorted[next_reb_idx].strftime("%Y-%m-%d")
-    else:
+    try:
+        start_idx = all_dates_sorted.index(start_ts)
+        current_idx = all_dates_sorted.index(backtest_dates[-1])
+        next_reb_idx = ((current_idx - start_idx) // rebalance_days + 1) * rebalance_days + start_idx
+        if next_reb_idx < len(all_dates_sorted):
+            next_rebalance_date = all_dates_sorted[next_reb_idx].strftime("%Y-%m-%d")
+        else:
+            extra_trading_days = next_reb_idx - current_idx
+            estimated = int(extra_trading_days * 7 / 5)
+            next_rebalance_date = (backtest_dates[-1] + pd.Timedelta(days=estimated)).strftime("%Y-%m-%d")
+    except ValueError:
         next_rebalance_date = ""
 
     # -- 今日盈亏 --
@@ -525,9 +533,9 @@ def daily_eval(
         single_models = []
         mode = "single"
         if os.path.exists(str(MODEL_SELECTION_PATH)):
-            mode, single_models = load_model_selection(str(MODEL_SELECTION_PATH))
+            mode, single_models, display = load_model_selection(str(MODEL_SELECTION_PATH))
             if verbose:
-                print(f"  模式: {mode}, 单模型数: {len(single_models)}")
+                print(f"  模式: {mode}, 显示: {display or 'auto'}, 模型数: {len(single_models)}")
                 for m in single_models:
                     print(f"    {_make_model_key(m)} ({m['model_file']}, score={m['score']:.4f})")
         else:
@@ -541,6 +549,7 @@ def daily_eval(
             exp_dir, model_file, score = model_info
             single_models = [{"exp_dir": exp_dir, "model_file": model_file, "score": score}]
             mode = "single"
+            display = ""
             if verbose:
                 print(f"  单模型: {_make_model_key((exp_dir,))} (score={score:.4f})")
 
@@ -646,14 +655,17 @@ def daily_eval(
             if verbose:
                 print(f"\n  [图表] 保存失败: {e}")
 
-        report_key = "fusion" if "fusion" in sequences else list(sequences.keys())[0]
+        if display == "first":
+            report_key = list(sequences.keys())[0]
+        else:
+            report_key = "fusion" if "fusion" in sequences else list(sequences.keys())[0]
         report_data = sequences[report_key]
         today_trades = [t for t in report_data["trades"] if t["date"] == latest_date_str]
         is_rebalance_day = len(today_trades) > 0
 
         # 加载ETF名称映射
         etf_names = {}
-        etf_list_path = DATA_DIR / "etf_list_before_2022_74.csv"
+        etf_list_path = PROJECT_ROOT / "etf_data" / "etf_list_before_2022_74.csv"
         if etf_list_path.exists():
             import csv
             with open(etf_list_path, "r", encoding="utf-8-sig") as f:
@@ -715,7 +727,10 @@ def daily_eval(
         # 发送邮件报告
         try:
             from send_report import send_report
-            email_key = list(sequences.keys())[0]
+            if display == "first":
+                email_key = list(sequences.keys())[0]
+            else:
+                email_key = "fusion" if "fusion" in sequences else list(sequences.keys())[0]
             if "holdings" not in sequences[email_key]:
                 sequences[email_key]["holdings"] = holdings
             if verbose:
@@ -769,8 +784,7 @@ def daily_eval(
             if today_pnl_data.get("positions"):
                 print(f"\n  今日持仓盈亏:")
                 for pos in today_pnl_data["positions"]:
-                    arrow = "+" if pos["pnl"] >= 0 else ""
-                    print(f"    {pos['stock_id']}: {arrow}{pos['pnl']:+.2f} ({pos['pnl_pct']:+.2f}%)")
+                    print(f"    {pos['stock_id']}: {pos['pnl']:+.2f} ({pos['pnl_pct']:+.2f}%)")
 
             print(f"\n{'='*60}")
             print(f"[{timestamp}] 每日测评完成")
