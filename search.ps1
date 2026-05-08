@@ -13,7 +13,7 @@ if (Test-Path ".venv") {
 }
 
 # 要搜索的模型类型 (空格分隔)
-$SEARCH_MODEL_TYPES = @("tcn")
+$SEARCH_MODEL_TYPES = @("itransformer", "gru")
 
 # 通用配置
 $CONFIG_NAME = "config"

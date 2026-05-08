@@ -1015,6 +1015,15 @@ def daily_eval(
             "total_value": report_data["metrics"]["latest_value"],
             "sequences": sequences_summary,
         }
+
+        # 计算持仓变动（相对上一次调仓）
+        try:
+            trade_dates = sorted(set(t["date"] for t in report_data["trades"]))
+            prev_rb = None
+            for td in trade_dates:
+                if td >= latest_date_str:
+                    break
+                prev_rb = td
         with open(REPORT_PATH, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
 

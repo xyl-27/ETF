@@ -58,6 +58,9 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
         pnl = pnl_by_stock.get(code, {})
         pnl_str = f"{pnl['pnl']:+.2f}" if pnl else ""
         pnl_color = "#cc0000" if (pnl and pnl["pnl"] >= 0) else "#009900"
+        rebal_pnl = round(price * shares - cost, 2) if price else 0
+        rebal_str = f"{rebal_pnl:+.2f}"
+        rebal_color = "#cc0000" if rebal_pnl >= 0 else "#009900"
         price_str = f"{price:.4f}" if price else "-"
         holdings_rows += f"""
         <tr>
@@ -67,9 +70,10 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
             <td style="text-align: right;">{shares:,}</td>
             <td style="text-align: right;">{cost:,.2f}</td>
             <td style="text-align: right; font-weight: bold;">{weight:.2f}%</td>
-            <td style="text-align: right; color: {pnl_color}; font-weight: bold;">{pnl_str}</td>
-        </tr>
-        """
+        <td style="text-align: right; color: {pnl_color}; font-weight: bold;">{pnl_str}</td>
+        <td style="text-align: right; font-weight: bold; color: {rebal_color};">{rebal_str}</td>
+    </tr>
+    """
 
     cash_weight = (cash / total_value * 100) if total_value > 0 else 0
     holdings_rows += f"""
@@ -81,13 +85,14 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
         <td style="text-align: right;">{cash:,.2f}</td>
         <td style="text-align: right;">{cash_weight:.2f}%</td>
         <td style="text-align: right;">-</td>
+        <td style="text-align: right;">-</td>
     </tr>
     """
 
     pnl_total_color = "#cc0000" if today_pnl_total >= 0 else "#009900"
     holdings_rows += f"""
     <tr style="font-weight: bold; border-top: 2px solid #333;">
-        <td colspan="5" style="text-align: right;">今日合计盈亏</td>
+        <td colspan="6" style="text-align: right;">今日合计盈亏</td>
         <td style="text-align: right;"></td>
         <td style="text-align: right; color: {pnl_total_color};">{today_pnl_total:+.2f}</td>
     </tr>
@@ -270,6 +275,7 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
                     <th style="text-align: right;">成本</th>
                     <th style="text-align: right;">仓位</th>
                     <th style="text-align: right;">今日盈亏</th>
+                    <th style="text-align: right;">调仓盈亏</th>
                 </tr>
             </thead>
             <tbody>
