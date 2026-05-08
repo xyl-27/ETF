@@ -13,7 +13,7 @@ if (Test-Path ".venv") {
 }
 
 # 要搜索的模型类型 (空格分隔)
-$SEARCH_MODEL_TYPES = @("gru","itransformer")
+$SEARCH_MODEL_TYPES = @("itransformer", "gru")
 
 # 通用配置
 $CONFIG_NAME = "config"
@@ -29,10 +29,10 @@ foreach ($MODEL_TYPE in $SEARCH_MODEL_TYPES) {
     Write-Host "Running search for model type: $MODEL_TYPE"
     Write-Host "========================================"
 
-    # 计算搜索目录
+    # 计算搜索目录 (与 train_search_v2.py 逻辑一致)
     $N = 74
-    $SEARCH_DIR = "./model/search_${MODEL_TYPE}_${N}_${TOPK}"
-    New-Item -ItemType Directory -Force -Path $SEARCH_DIR | Out-Null
+    $METHOD_PREFIX = if ($SEARCH_METHOD -eq "grid") { "grid" } else { "bayes" }
+    $SEARCH_DIR = "./model/${METHOD_PREFIX}_${MODEL_TYPE}_${N}_${TOPK}"
 
     Write-Host "Config: $CONFIG_NAME"
     Write-Host "Output directory: $SEARCH_DIR"
@@ -41,9 +41,13 @@ foreach ($MODEL_TYPE in $SEARCH_MODEL_TYPES) {
     Write-Host "FEATURE_NUM: $FEATURE_NUM"
     Write-Host ""
 
-    # 检查是否已有预处理数据
+    # 检查是否已有预处理数据（兼容旧 search_ 前缀）
+    $OLD_SEARCH_DIR = "./model/search_${MODEL_TYPE}_${N}_${TOPK}"
     if (Test-Path "$SEARCH_DIR/preprocessed_data.pkl") {
         Write-Host "Found preprocessed data, using --resume"
+        $RESUME = "--resume"
+    } elseif (Test-Path "$OLD_SEARCH_DIR/preprocessed_data.pkl") {
+        Write-Host "Found preprocessed data (legacy search_ dir), using --resume"
         $RESUME = "--resume"
     } else {
         $RESUME = ""
@@ -80,7 +84,7 @@ with open('$RESULTS_FILE') as f:
 sorted_results = sorted([r for r in results if r.get('success')], key=lambda x: x.get('score', 0), reverse=True)
 for i, r in enumerate(sorted_results[:5]):
     params = r['params']
-    print(f\"{i+1}. LR={params['learning_rate']}, DM={params['d_model']}, NL={params['num_layers']}, DP={params['dropout']} -> {r['score']:.4f}\")
+    print(f'{i+1}. LR={params[\"learning_rate\"]}, DM={params[\"d_model\"]}, NL={params[\"num_layers\"]}, DP={params[\"dropout\"]} -> {r[\"score\"]:.4f}')
 "
     }
 
