@@ -498,32 +498,33 @@ def _rebuild_positions(trades, up_to_date):
     return pos
 
 
-def _history_chart_b64(ec_seg, hs300_raw, rb_date, first_date):
+def _history_chart_b64(ec_seg, hs300_raw, rb_date, first_date, initial_capital):
     """生成截止到rb_date的收益曲线图, 返回base64 data URL"""
     dates = [pd.Timestamp(e["date"]) for e in ec_seg]
     vals = [e["total_value"] for e in ec_seg]
-    init_v = vals[0]
-    rets = [(v / init_v - 1) * 100 for v in vals]
-
-    hs300_seg = hs300_raw[(hs300_raw["date"] >= pd.Timestamp(first_date)) & (hs300_raw["date"] <= pd.Timestamp(rb_date))].copy()
-    hs300_ret = []
-    hs300_dates = []
-    if len(hs300_seg) >= 2:
-        hs300_init = hs300_seg["close"].iloc[0]
-        hs300_ret = [(c / hs300_init - 1) * 100 for c in hs300_seg["close"]]
-        hs300_dates = hs300_seg["date"].tolist()
+    ret_pct = (vals[-1] / vals[0] - 1) * 100
 
     fig, ax = plt.subplots(figsize=(10, 5))
     fig.patch.set_facecolor("white")
     ax.set_facecolor("#f5f5f5")
-    ax.plot(dates, rets, label="策略", color="#2ecc71", linewidth=2)
-    if hs300_dates:
-        ax.plot(hs300_dates, hs300_ret, label="沪深300", color="#e74c3c", linewidth=1.5, linestyle="--")
-    ax.axhline(y=0, color="gray", linewidth=0.8, linestyle=":")
-    ax.legend(fontsize=11)
-    ax.set_title(f"累计收益曲线 (截至 {rb_date})", fontsize=13)
-    ax.set_ylabel("累计收益率 (%)", fontsize=11)
+
+    val_wan = [v / 10000 for v in vals]
+    ax.plot(dates, val_wan, label=f"策略 ({ret_pct:+.2f}%)", color="#2ecc71", linewidth=2)
+
+    hs300_plot = hs300_raw[(hs300_raw["date"] >= pd.Timestamp(first_date)) & (hs300_raw["date"] <= pd.Timestamp(rb_date))].copy()
+    if len(hs300_plot) >= 2:
+        hs300_init = hs300_plot["close"].iloc[0]
+        hs300_val_wan = [(c / hs300_init) * (initial_capital / 10000) for c in hs300_plot["close"]]
+        hs300_ret = (hs300_plot["close"].iloc[-1] / hs300_init - 1) * 100
+        ax.plot(hs300_plot["date"], hs300_val_wan, label=f"沪深300 ({hs300_ret:+.2f}%)",
+                color="#7f8c8d", linewidth=2, linestyle=":")
+
+    ax.axhline(y=initial_capital / 10000, color="gray", linewidth=0.8, linestyle=":")
+    ax.set_title(f"收益曲线 (截至 {rb_date})", fontsize=14, fontweight="bold", pad=15)
+    ax.set_ylabel("账户总值 (万元)", fontsize=11)
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d"))
+    ax.grid(True, alpha=0.3, linestyle="--", linewidth=0.8)
+    ax.legend(fontsize=10, framealpha=0.9, edgecolor="gray", loc="upper left")
     fig.tight_layout()
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=120)
@@ -659,7 +660,7 @@ def _save_history_reports(seq, data_file, initial_capital, etf_names):
         ]
 
         # 生成截止到该调仓日的收益曲线
-        chart_data_url = _history_chart_b64(ec_seg, hs300_raw, rb_date, sorted_dates[0])
+        chart_data_url = _history_chart_b64(ec_seg, hs300_raw, rb_date, sorted_dates[0], initial_capital)
 
         from send_report import build_report_html
         try:

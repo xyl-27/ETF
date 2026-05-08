@@ -217,10 +217,6 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
             </div>
         </div>
 
-        <div class="chart">
-            <img src="{chart_data_url or 'cid:chart_img'}" alt="收益曲线">
-        </div>
-
         <h3 style="font-size: 14px;">近期表现</h3>
         <table style="font-size: 12px;">
             <thead>
@@ -274,6 +270,10 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
                 {trades_rows}
             </tbody>
         </table>
+
+        <div class="chart">
+            <img src="{chart_data_url or 'cid:chart_img'}" alt="收益曲线">
+        </div>
 
         <div class="footer">
             由 ETF 每日测评系统自动生成 | {datetime.now().strftime("%Y-%m-%d %H:%M")}
