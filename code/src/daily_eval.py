@@ -588,7 +588,7 @@ def _save_history_reports(seq, data_file, initial_capital, etf_names):
                 "latest_value": round(vals[-1], 2),
             }
 
-        metrics = _compute_metrics(ec_segment, initial_capital)
+        metrics = _compute_metrics(ec_seg, initial_capital)
 
         # 构建简化版的报告HTML
         cash = today_total - sum(h["cost"] for h in holdings)
