@@ -128,7 +128,41 @@ def send_report(model_key=None):
     else:
         trades_rows = "<tr><td colspan='5' style='color: #999; text-align: center;'>无调仓操作</td></tr>"
 
+    next_rebalance = report.get("next_rebalance_date", "")
+
     model_display = model_key.replace("_", " ").title()
+    
+    # 构建详细指标HTML
+    def _pct(v, suffix="%"):
+        return f"{v:+.2f}{suffix}" if isinstance(v, (int, float)) else str(v)
+    
+    mdd_detail = metrics.get("max_drawdown_details", {})
+    mdd_period = f"{mdd_detail.get('start_date', '')} ~ {mdd_detail.get('end_date', '')} ({mdd_detail.get('duration_days', 0)}天)" if mdd_detail.get('start_date') else ""
+    
+    win_rate = metrics.get("daily_win_rate")
+    win_rate_str = f"{win_rate*100:.1f}%" if isinstance(win_rate, (int, float)) else ""
+    
+    # 近期窗口指标
+    window_rows = ""
+    for wkey in ["window_1m", "window_3m"]:
+        w = metrics.get(wkey)
+        if w:
+            w_ret = w.get("strategy_return_pct", 0)
+            w_ann = w.get("annualized_return_pct", 0)
+            w_win = w.get("daily_win_rate", 0)
+            if isinstance(w_win, (int, float)):
+                w_win_str = f"{w_win*100:.1f}%"
+            else:
+                w_win_str = ""
+            w_dd = w.get("max_drawdown_pct", 0)
+            window_rows += f"""
+            <tr>
+                <td>{wkey.replace('window_', '近').replace('_', '')}</td>
+                <td style="text-align: right; color: {'#cc0000' if w_ret >= 0 else '#009900'}; font-weight: bold;">{_pct(w_ret)}</td>
+                <td style="text-align: right;">{_pct(w_ann)}</td>
+                <td style="text-align: right;">{w_win_str}</td>
+                <td style="text-align: right;">{_pct(w_dd)}</td>
+            </tr>"""
     
     html_body = f"""
     <html>
@@ -156,7 +190,7 @@ def send_report(model_key=None):
     <body>
         <div class="header">
             <h2>ETF 每日测评报告</h2>
-            <div class="model">模型: {model_display} | 日期: {date}</div>
+            <div class="model">模型: {model_display} | 日期: {date} | 下个调仓日: {next_rebalance}</div>
         </div>
 
         <div class="metrics">
@@ -164,6 +198,12 @@ def send_report(model_key=None):
                 <div class="label">策略收益</div>
                 <div class="value {'pos' if metrics['strategy_return_pct'] >= 0 else 'neg'}">
                     {metrics['strategy_return_pct']:+.2f}%
+                </div>
+            </div>
+            <div class="metric-box">
+                <div class="label">年化收益</div>
+                <div class="value {'pos' if metrics.get('annualized_return_pct', 0) >= 0 else 'neg'}">
+                    {_pct(metrics.get('annualized_return_pct', 0))}
                 </div>
             </div>
             <div class="metric-box">
@@ -179,6 +219,10 @@ def send_report(model_key=None):
                 </div>
             </div>
             <div class="metric-box">
+                <div class="label">日胜率</div>
+                <div class="value">{win_rate_str}</div>
+            </div>
+            <div class="metric-box">
                 <div class="label">最大回撤</div>
                 <div class="value">{metrics['max_drawdown_pct']:.2f}%</div>
             </div>
@@ -187,10 +231,37 @@ def send_report(model_key=None):
                 <div class="value">{metrics['sharpe_ratio']:.2f}</div>
             </div>
             <div class="metric-box">
+                <div class="label">卡玛比率</div>
+                <div class="value">{metrics.get('calmar_ratio', 0):.2f}</div>
+            </div>
+            <div class="metric-box">
+                <div class="label">索提诺</div>
+                <div class="value">{metrics.get('sortino_ratio', 0):.2f}</div>
+            </div>
+            <div class="metric-box">
                 <div class="label">账户总值</div>
                 <div class="value">{total_value:,.2f}</div>
             </div>
         </div>
+
+        <h3 style="font-size: 14px;">近期表现</h3>
+        <table style="font-size: 12px;">
+            <thead>
+                <tr>
+                    <th>区间</th>
+                    <th style="text-align: right;">收益</th>
+                    <th style="text-align: right;">年化</th>
+                    <th style="text-align: right;">日胜率</th>
+                    <th style="text-align: right;">最大回撤</th>
+                </tr>
+            </thead>
+            <tbody>
+                {window_rows}
+            </tbody>
+        </table>
+
+        <h3 style="font-size: 14px;">回撤区间</h3>
+        <p style="font-size: 12px;">{mdd_period}</p>
 
         <h3 style="font-size: 14px;">当前持仓 ({len(holdings)} 只)</h3>
         <table style="font-size: 12px;">

@@ -17,6 +17,18 @@ import numpy as np
 import pandas as pd
 import torch
 
+
+class NumpyEncoder(json.JSONEncoder):
+    """将 numpy 类型转为 JSON 可序列化的 Python 原生类型"""
+    def default(self, obj):
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, (np.ndarray,)):
+            return obj.tolist()
+        return super().default(obj)
+
 # 项目根目录
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 os.chdir(PROJECT_ROOT)
@@ -281,12 +293,80 @@ def run_backtest_sequence(
             "cost": round(pos["cost"], 2),
         }
 
-    if equity_curve:
-        ev = [ec["total_value"] for ec in equity_curve]
-        strategy_return = (ev[-1] / initial_capital - 1) * 100
-    else:
-        strategy_return = 0.0
+    def _compute_window_metrics(ec_segment, init_cap):
+        """Helper: compute metrics for a segment of equity curve."""
+        if len(ec_segment) < 2:
+            return {}
+        vals = [e["total_value"] for e in ec_segment]
+        dates = [e["date"] for e in ec_segment]
+        total_ret = (vals[-1] / init_cap - 1) * 100
+        cum = np.array(vals) / init_cap
+        daily_rets = np.diff(vals) / np.array(vals[:-1])
+        n_days = len(daily_rets)
+        # 胜率
+        win_rate = float(np.mean(daily_rets > 0)) if n_days > 0 else 0.0
+        # 日均收益率
+        daily_avg = float(np.mean(daily_rets)) * 100
+        # 年化收益率
+        ann_ret = (1 + total_ret / 100) ** (252 / n_days) - 1 if n_days > 0 else 0.0
+        annualized_ret_pct = ann_ret * 100
+        # 波动率
+        daily_std = float(np.std(daily_rets)) if n_days > 0 else 0.0
+        annualized_vol = daily_std * np.sqrt(252) * 100
+        # 夏普
+        sharpe = float((np.mean(daily_rets) / daily_std) * np.sqrt(252)) if daily_std != 0 else 0.0
+        # 最大回撤
+        running_max = np.maximum.accumulate(cum)
+        dd = (cum - running_max) / running_max * 100
+        max_dd = float(abs(dd.min())) if len(dd) > 0 else 0.0
+        # 最大回撤区间
+        if max_dd > 0:
+            dd_end_idx = np.argmin(dd)
+            dd_series = dd[:dd_end_idx + 1]
+            dd_start_idx = np.argmax(running_max[:dd_end_idx + 1])
+            mdd_start = dates[int(dd_start_idx)]
+            mdd_end = dates[int(dd_end_idx)]
+            mdd_duration = int(dd_end_idx - dd_start_idx)
+        else:
+            mdd_start = mdd_end = ""
+            mdd_duration = 0
+        # 卡玛比率
+        calmar = ann_ret / (max_dd / 100) if max_dd > 0 else 0.0
+        # 索提诺比率
+        downside = daily_rets[daily_rets < 0]
+        downside_std = float(np.std(downside)) if len(downside) > 0 else daily_std
+        sortino = float((np.mean(daily_rets) / downside_std) * np.sqrt(252)) if downside_std != 0 else 0.0
+        return {
+            "strategy_return_pct": round(total_ret, 4),
+            "annualized_return_pct": round(annualized_ret_pct, 4),
+            "daily_avg_return_pct": round(daily_avg, 4),
+            "daily_win_rate": round(win_rate, 4),
+            "max_drawdown_pct": round(max_dd, 4),
+            "max_drawdown_details": {
+                "start_date": mdd_start,
+                "end_date": mdd_end,
+                "duration_days": mdd_duration,
+            },
+            "sharpe_ratio": round(sharpe, 4),
+            "calmar_ratio": round(calmar, 4),
+            "sortino_ratio": round(sortino, 4),
+            "annualized_volatility_pct": round(annualized_vol, 4),
+            "total_days": n_days,
+            "latest_value": round(vals[-1], 2),
+        }
 
+    # -- 整体指标 --
+    overall = _compute_window_metrics(equity_curve, initial_capital)
+    if not overall:
+        return {
+            "equity_curve": equity_curve,
+            "trades": trades,
+            "positions": positions,
+            "metrics": {},
+            "cash": round(engine.cash, 2),
+        }
+
+    # -- HS300 对比 --
     hs300_code = "510300.XSHG"
     hs300_df = raw_df[raw_df["股票代码"] == hs300_code].copy()
     hs300_df = hs300_df[(hs300_df["日期"] >= start_ts) & (hs300_df["日期"] < end_ts)]
@@ -294,33 +374,48 @@ def run_backtest_sequence(
         hs300_return = (hs300_df["收盘"].iloc[-1] / hs300_df["收盘"].iloc[0] - 1) * 100
     else:
         hs300_return = 0.0
-    excess_return = strategy_return - hs300_return
+    excess_return = overall["strategy_return_pct"] - hs300_return
 
-    if equity_curve:
-        cumulative = np.array(ev) / initial_capital
-        running_max = np.maximum.accumulate(cumulative)
-        drawdown = (cumulative - running_max) / running_max * 100
-        max_drawdown = float(abs(drawdown.min())) if len(drawdown) > 0 else 0.0
+    # -- 近期窗口 --
+    ec_by_date = {}
+    for ec in equity_curve:
+        ec_by_date[ec["date"]] = ec
+    sorted_dates = sorted(ec_by_date.keys())
+    today = pd.Timestamp(sorted_dates[-1])
+
+    windows = {}
+    for label, delta in [("1m", 30), ("3m", 90)]:
+        cutoff = (today - pd.Timedelta(days=delta)).strftime("%Y-%m-%d")
+        seg = [ec_by_date[d] for d in sorted_dates if d >= cutoff]
+        if seg:
+            win_metrics = _compute_window_metrics(seg, seg[0]["total_value"])
+            if win_metrics:
+                windows[f"window_{label}"] = win_metrics
+
+    # -- 交易统计 --
+    trade_actions = [t for t in trades if t["action"] in ("buy", "sell")]
+    n_trades = len(trade_actions)
+
+    # -- 下一个调仓日 --
+    all_dates_sorted = sorted(raw_df["日期"].unique())
+    start_idx = all_dates_sorted.index(start_ts)
+    current_idx = all_dates_sorted.index(backtest_dates[-1])
+    next_reb_idx = ((current_idx - start_idx) // rebalance_days + 1) * rebalance_days + start_idx
+    if next_reb_idx < len(all_dates_sorted):
+        next_rebalance_date = all_dates_sorted[next_reb_idx].strftime("%Y-%m-%d")
     else:
-        max_drawdown = 0.0
+        next_rebalance_date = ""
 
-    if len(equity_curve) >= 2:
-        ev_arr = np.array(ev)
-        daily_returns = np.diff(ev_arr) / ev_arr[:-1]
-        sharpe = float((np.mean(daily_returns) / np.std(daily_returns)) * np.sqrt(252)) if np.std(daily_returns) != 0 else 0.0
-    else:
-        sharpe = 0.0
-
+    # -- 整合 --
     metrics = {
-        "strategy_return_pct": round(strategy_return, 4),
+        **overall,
         "hs300_return_pct": round(hs300_return, 4),
         "excess_return_pct": round(excess_return, 4),
-        "max_drawdown_pct": round(max_drawdown, 4),
-        "sharpe_ratio": round(sharpe, 4),
         "start_date": start_date,
         "end_date": end_date,
-        "latest_value": equity_curve[-1]["total_value"] if equity_curve else initial_capital,
-        "total_days": len(equity_curve),
+        "next_rebalance_date": next_rebalance_date,
+        "total_trades": n_trades,
+        **windows,
     }
 
     return {
@@ -357,7 +452,7 @@ def daily_eval(
     update_data: bool = True,
     top_k: int = 3,
     verbose: bool = True,
-    start_date: str = "2026-04-02",
+    start_date: str = "2026-04-01",
     rebalance_days: int = 5,
     position_pct: float = 0.95,
     initial_capital: float = 100000,
@@ -499,7 +594,7 @@ def daily_eval(
         }
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         with open(STATE_PATH, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
+            json.dump(state, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
 
         # 绘制收益曲线图
         plot_path = OUTPUT_DIR / "equity_curves.png"
@@ -534,9 +629,12 @@ def daily_eval(
                 "trades_count": len(seq["trades"]),
             }
 
+        next_rebalance = report_data["metrics"].get("next_rebalance_date", "")
+
         report = {
             "date": latest_date_str,
             "is_rebalance_day": is_rebalance_day,
+            "next_rebalance_date": next_rebalance,
             "today_trades": today_trades,
             "metrics": report_data["metrics"],
             "holdings": holdings,
@@ -545,7 +643,7 @@ def daily_eval(
             "sequences": sequences_summary,
         }
         with open(REPORT_PATH, "w", encoding="utf-8") as f:
-            json.dump(report, f, ensure_ascii=False, indent=2)
+            json.dump(report, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
 
         portfolio = {
             "last_updated": timestamp,
@@ -555,7 +653,7 @@ def daily_eval(
             "total_value": report_data["metrics"]["latest_value"],
         }
         with open(PORTFOLIO_PATH, "w", encoding="utf-8") as f:
-            json.dump(portfolio, f, ensure_ascii=False, indent=2)
+            json.dump(portfolio, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
 
         # 发送邮件报告
         try:
@@ -581,12 +679,17 @@ def daily_eval(
             print(f"  每日报告 ({latest_date_str}) [序列: {report_key}]")
             print(f"{'='*60}")
             print(f"  累计收益: {m['strategy_return_pct']:+.2f}%")
+            print(f"  年化收益: {m.get('annualized_return_pct', 0):+.2f}%")
+            print(f"  日胜率:   {m.get('daily_win_rate', 0)*100:.1f}%")
             print(f"  沪深300:  {m['hs300_return_pct']:+.2f}%")
             print(f"  超额收益: {m['excess_return_pct']:+.2f}%")
             print(f"  最大回撤: {m['max_drawdown_pct']:.2f}%")
-            print(f"  夏普比率: {m['sharpe_ratio']:.2f}")
+            print(f"  夏普:     {m['sharpe_ratio']:.2f}")
+            print(f"  卡玛:     {m.get('calmar_ratio', 0):.2f}")
+            print(f"  索提诺:   {m.get('sortino_ratio', 0):.2f}")
             print(f"  账户总值: {m['latest_value']:,.2f}")
             print(f"  调仓日:   {'是' if is_rebalance_day else '否'}")
+            print(f"  下个调仓: {m.get('next_rebalance_date', '')}")
             print(f"{'='*60}")
 
             print(f"\n  各序列收益:")

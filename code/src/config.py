@@ -190,3 +190,50 @@ def get_param_grid(model_type):
     if model_type not in PARAM_GRID:
         raise ValueError(f"Unknown model type: {model_type}")
     return PARAM_GRID[model_type]
+
+
+def get_search_space(model_type):
+    """返回贝叶斯搜索的搜索空间函数（Optuna trial 风格）"""
+    if model_type not in MODEL_CONFIGS:
+        raise ValueError(f"Unknown model type: {model_type}")
+
+    def search_space(trial):
+        params = {}
+        params["learning_rate"] = trial.suggest_float("learning_rate", 5e-6, 5e-4, log=True)
+        params["d_model"] = trial.suggest_categorical("d_model", [64, 128, 256])
+        params["num_layers"] = trial.suggest_int("num_layers", 1, 4)
+        params["dropout"] = trial.suggest_float("dropout", 0.05, 0.4)
+
+        if model_type in ("transformer",):
+            d_model = params["d_model"]
+            if d_model >= 128:
+                params["nhead"] = trial.suggest_categorical("nhead", [4, 8])
+            else:
+                params["nhead"] = 4
+
+        if model_type in ("itransformer",):
+            d_model = params["d_model"]
+            if d_model >= 256:
+                params["nhead"] = trial.suggest_categorical("nhead", [4, 8, 16])
+            elif d_model >= 128:
+                params["nhead"] = trial.suggest_categorical("nhead", [4, 8])
+            else:
+                params["nhead"] = 4
+
+        if model_type in ("tcn",):
+            params["kernel_size"] = trial.suggest_categorical("kernel_size", [3, 5, 7])
+            params["num_experts"] = trial.suggest_categorical("num_experts", [None, 2, 3])
+
+        if model_type in ("lstm", "gru"):
+            params["num_experts"] = trial.suggest_categorical("num_experts", [None, 2, 3, 4])
+
+        if model_type in ("timesnet",):
+            params["num_kernels"] = trial.suggest_categorical("num_kernels", [4, 6, 8])
+            params["fft_top_k"] = trial.suggest_int("fft_top_k", 1, 5)
+
+        if model_type in ("dlinear",):
+            params["kernel_size"] = trial.suggest_categorical("kernel_size", [25, 51])
+
+        return params
+
+    return search_space

@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import gc
 import weakref
+import optuna
 from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 import multiprocessing as mp
@@ -549,131 +550,204 @@ def main(args):
     else:
         preprocessed_data, scaler = preprocess_and_save(config, search_dir)
 
-    PARAM_GRID = config_module.get_param_grid(config["model_type"])
+    search_method = args.search_method or config.get("search_method", "bayesian")
 
-    results = []
-    results_path = os.path.join(search_dir, "search_results.json")
-    if args.resume and os.path.exists(results_path):
-        with open(results_path, "r") as f:
-            results = json.load(f)
-        print(f"Resuming from {len(results)} existing results...")
+    if search_method == "grid":
+        # ========== 网格搜索 ==========
+        PARAM_GRID = config_module.get_param_grid(config["model_type"])
 
-        # 找到最后一个完成的实验（通过检查final_score.txt或epoch_scores.txt是否完整）
-        completed_indices = set()
-        for r in results:
-            completed_indices.add(r.get("exp_idx", -1))
+        results = []
+        results_path = os.path.join(search_dir, "search_results.json")
+        if args.resume and os.path.exists(results_path):
+            with open(results_path, "r") as f:
+                results = json.load(f)
+            print(f"Resuming from {len(results)} existing results...")
 
-        # 也检查目录中是否有完整的exp_X目录（final_score.txt 或 epoch_scores.txt完整）
-        import glob
+            completed_indices = set()
+            for r in results:
+                completed_indices.add(r.get("exp_idx", -1))
 
-        exp_dirs = glob.glob(os.path.join(search_dir, "exp_*"))
-        num_epochs = config.get("num_epochs", 30)
-        for d in exp_dirs:
-            dirname = os.path.basename(d)
-            try:
-                idx = int(dirname.split("_")[1])
-            except:
-                continue
-
-            final_score_file = os.path.join(d, "final_score.txt")
-            epoch_scores_file = os.path.join(d, "epoch_scores.txt")
-
-            if os.path.exists(final_score_file):
-                completed_indices.add(idx)
-            elif os.path.exists(epoch_scores_file):
+            import glob
+            exp_dirs = glob.glob(os.path.join(search_dir, "exp_*"))
+            num_epochs = config.get("num_epochs", 30)
+            for d in exp_dirs:
+                dirname = os.path.basename(d)
                 try:
-                    df = pd.read_csv(epoch_scores_file)
-                    if len(df) >= num_epochs:
-                        completed_indices.add(idx)
+                    idx = int(dirname.split("_")[1])
                 except:
-                    pass
+                    continue
+                final_score_file = os.path.join(d, "final_score.txt")
+                epoch_scores_file = os.path.join(d, "epoch_scores.txt")
+                if os.path.exists(final_score_file):
+                    completed_indices.add(idx)
+                elif os.path.exists(epoch_scores_file):
+                    try:
+                        df = pd.read_csv(epoch_scores_file)
+                        if len(df) >= num_epochs:
+                            completed_indices.add(idx)
+                    except:
+                        pass
 
-        # 从最大的已完成索引+1继续
-        if completed_indices:
-            start_idx = max(completed_indices) + 1
+            start_idx = max(completed_indices) + 1 if completed_indices else 0
             print(f"Continuing from experiment {start_idx + 1}")
         else:
             start_idx = 0
-    else:
-        start_idx = 0
 
-    for i, params in enumerate(PARAM_GRID):
-        if i < start_idx:
-            continue
-
-        output_dir = os.path.join(search_dir, f"exp_{i}")
-        if args.resume and os.path.exists(output_dir):
-            final_score_file = os.path.join(output_dir, "final_score.txt")
-            epoch_scores_file = os.path.join(output_dir, "epoch_scores.txt")
-
-            skip = False
-            if os.path.exists(final_score_file):
-                skip = True
-            elif os.path.exists(epoch_scores_file):
-                try:
-                    df = pd.read_csv(epoch_scores_file)
-                    if len(df) >= config.get("num_epochs", 30):
-                        skip = True
-                except:
-                    pass
-
-            if skip:
-                print(f"\n{'=' * 50}")
-                print(
-                    f"Experiment {i + 1}/{len(PARAM_GRID)} - SKIPPED (already completed)"
-                )
-                print(f"Params: {params}")
-                print(f"{'=' * 50}")
+        for i, params in enumerate(PARAM_GRID):
+            if i < start_idx:
                 continue
 
-        print(f"\n{'=' * 50}")
-        print(f"Experiment {i + 1}/{len(PARAM_GRID)}")
-        print(f"Params: {params}")
-        print(f"{'=' * 50}")
+            output_dir = os.path.join(search_dir, f"exp_{i}")
+            if args.resume and os.path.exists(output_dir):
+                final_score_file = os.path.join(output_dir, "final_score.txt")
+                epoch_scores_file = os.path.join(output_dir, "epoch_scores.txt")
+                skip = False
+                if os.path.exists(final_score_file):
+                    skip = True
+                elif os.path.exists(epoch_scores_file):
+                    try:
+                        df = pd.read_csv(epoch_scores_file)
+                        if len(df) >= config.get("num_epochs", 30):
+                            skip = True
+                    except:
+                        pass
+                if skip:
+                    print(f"\n{'=' * 50}")
+                    print(f"Experiment {i + 1}/{len(PARAM_GRID)} - SKIPPED (already completed)")
+                    print(f"Params: {params}")
+                    print(f"{'=' * 50}")
+                    continue
 
-        # Debug: Check GPU memory before running
-        if torch.cuda.is_available():
-            print(f"GPU before: allocated={torch.cuda.memory_allocated()/1e9:.2f}GB, reserved={torch.cuda.memory_reserved()/1e9:.2f}GB")
+            print(f"\n{'=' * 50}")
+            print(f"Experiment {i + 1}/{len(PARAM_GRID)}")
+            print(f"Params: {params}")
+            print(f"{'=' * 50}")
 
-        start_time = time.time()
-        result = run_experiment(
-            params, config, preprocessed_data, scaler, search_dir, i, config_module
+            if torch.cuda.is_available():
+                print(f"GPU before: allocated={torch.cuda.memory_allocated()/1e9:.2f}GB, reserved={torch.cuda.memory_reserved()/1e9:.2f}GB")
+
+            start_time = time.time()
+            result = run_experiment(params, config, preprocessed_data, scaler, search_dir, i, config_module)
+            result["exp_idx"] = i
+            elapsed = time.time() - start_time
+
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+            gc.collect()
+            elapsed = time.time() - start_time
+
+            results.append(result)
+            with open(results_path, "w") as f:
+                json.dump(results, f, indent=2)
+
+            completed = i + 1
+            remaining = len(PARAM_GRID) - completed
+            avg_time = results[-1].get("time", elapsed) if results else elapsed
+            if "time" not in results[-1]:
+                results[-1]["time"] = elapsed
+
+            print(f"\n📊 Progress: {completed}/{len(PARAM_GRID)} ({completed / len(PARAM_GRID) * 100:.1f}%)")
+            print(f"⏱️  Last exp took: {elapsed:.1f}s")
+            if remaining > 0:
+                print(f"⏳ Est. remaining: {remaining * avg_time / 60:.1f} min")
+            print(f"✅ Best score so far: {max(r['score'] for r in results if r['success']):.4f}")
+
+    else:
+        # ========== 贝叶斯搜索 (Optuna) ==========
+        n_trials = args.n_trials or config.get("n_trials", 50)
+
+        search_space_fn = config_module.get_search_space(config["model_type"])
+
+        results_path = os.path.join(search_dir, "search_results.json")
+
+        # 加载已有的结果（兼容旧格点搜索的结果或之前贝叶斯的结果）
+        results = []
+        if args.resume and os.path.exists(results_path):
+            with open(results_path, "r") as f:
+                results = json.load(f)
+            print(f"Loaded {len(results)} existing results for best-score tracking.")
+
+        optuna_storage = f"sqlite:///{search_dir}/optuna_study.db"
+        study = optuna.create_study(
+            storage=optuna_storage,
+            study_name=f"etf_{config['model_type']}_{config.get('top_k', 3)}",
+            load_if_exists=True,
+            direction="maximize",
+            sampler=optuna.samplers.TPESampler(seed=42),
         )
-        result["exp_idx"] = i  # 添加exp_idx便于resume
-        elapsed = time.time() - start_time
 
-        # Force garbage collection after experiment
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
-        gc.collect()
-        elapsed = time.time() - start_time
+        if len(study.trials) > 0:
+            print(f"Optuna study loaded with {len(study.trials)} existing trials.")
+            n_completed = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
+            print(f"  Completed: {n_completed}, remaining: {n_trials - n_completed}")
+        else:
+            print(f"Starting new Optuna study ({n_trials} trials).")
 
-        results.append(result)
+        def objective(trial):
+            params = search_space_fn(trial)
+            exp_idx = trial.number
+
+            output_dir = os.path.join(search_dir, f"exp_{exp_idx}")
+            if args.resume and os.path.exists(output_dir):
+                final_score_file = os.path.join(output_dir, "final_score.txt")
+                if os.path.exists(final_score_file):
+                    with open(final_score_file) as f:
+                        for line in f:
+                            if "Best weekly_final_score:" in line:
+                                score = float(line.split(":")[-1].strip())
+                                return score
+
+            print(f"\n{'=' * 50}")
+            print(f"Trial {trial.number + 1} (Bayesian)")
+            print(f"Params: {params}")
+            print(f"{'=' * 50}")
+
+            if torch.cuda.is_available():
+                print(f"GPU before: allocated={torch.cuda.memory_allocated()/1e9:.2f}GB, reserved={torch.cuda.memory_reserved()/1e9:.2f}GB")
+
+            result = run_experiment(params, config, preprocessed_data, scaler, search_dir, exp_idx, config_module)
+            result["exp_idx"] = exp_idx
+            results.append(result)
+
+            with open(results_path, "w") as f:
+                json.dump(results, f, indent=2)
+
+            # 清理资源
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+            gc.collect()
+
+            return result["score"]
+
+        study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
+
+        # 后处理：将所有完成的 Optuna trial 同步到 results，确保 search_results.json 完整
+        completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+        for t in completed_trials:
+            exp_idx = t.number
+            if not any(r.get("exp_idx") == exp_idx for r in results):
+                entry = {
+                    "success": True,
+                    "score": t.value,
+                    "params": t.params,
+                    "exp_idx": exp_idx,
+                }
+                results.append(entry)
+
+        results.sort(key=lambda x: x.get("exp_idx", -1))
 
         with open(results_path, "w") as f:
             json.dump(results, f, indent=2)
 
-        # Progress summary
-        completed = i + 1
-        remaining = len(PARAM_GRID) - completed
-        avg_time = (
-            (results[-1].get("time", elapsed) + results[-1].get("time", elapsed)) / 2
-            if results
-            else elapsed
-        )
-        if "time" not in results[-1]:
-            results[-1]["time"] = elapsed
-
-        print(
-            f"\n📊 Progress: {completed}/{len(PARAM_GRID)} ({completed / len(PARAM_GRID) * 100:.1f}%)"
-        )
-        print(f"⏱️  Last exp took: {elapsed:.1f}s")
-        if remaining > 0:
-            print(f"⏳ Est. remaining: {remaining * avg_time / 60:.1f} min")
-        print(
-            f"✅ Best score so far: {max(r['score'] for r in results if r['success']):.4f}"
-        )
+        best_trial = study.best_trial
+        print(f"\n{'=' * 50}")
+        print(f"Bayesian search completed!")
+        print(f"Total completed: {len(completed_trials)} trials")
+        print(f"Best trial: #{best_trial.number}")
+        print(f"Best params: {best_trial.params}")
+        print(f"Best score: {best_trial.value:.4f}")
 
     total_elapsed = time.time() - total_start_time
     hours = int(total_elapsed // 3600)
@@ -702,5 +776,7 @@ if __name__ == "__main__":
     parser.add_argument("--topk", type=int, default=None)
     parser.add_argument("--sequence-length", type=int, default=None)
     parser.add_argument("--N", type=int, default=None)
+    parser.add_argument("--search-method", type=str, default="bayesian", choices=["grid", "bayesian"])
+    parser.add_argument("--n-trials", type=int, default=None)
     args = parser.parse_args()
     main(args)
