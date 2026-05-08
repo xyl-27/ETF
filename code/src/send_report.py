@@ -42,7 +42,8 @@ def _pct(v, suffix="%"):
 
 def build_report_html(*, date, model_display, total_value, cash, holdings,
                       trades_list, metrics, next_rebalance, is_rebalance,
-                      today_pnl_total, today_pnl_positions=None):
+                      today_pnl_total, today_pnl_positions=None,
+                      chart_data_url=None):
     """构建报告HTML，各组件已预先准备好"""
     # 持仓表
     pnl_by_stock = {p["stock_id"]: p for p in (today_pnl_positions or [])}
@@ -217,7 +218,7 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
         </div>
 
         <div class="chart">
-            <img src="cid:chart_img" alt="收益曲线">
+            <img src="{chart_data_url or 'cid:chart_img'}" alt="收益曲线">
         </div>
 
         <h3 style="font-size: 14px;">近期表现</h3>
