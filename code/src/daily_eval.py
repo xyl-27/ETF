@@ -574,7 +574,12 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
 
         positions = _rebuild_positions(trades, rb_date)
 
-        today_trades_list = [t for t in trades if t["date"] == rb_date]
+        today_trades_list = []
+        for key, s in all_sequences.items():
+            for t in s.get("trades", []):
+                if t["date"] == rb_date:
+                    t = {**t, "model_key": key, "name": etf_names.get(t["stock"], "")}
+                    today_trades_list.append(t)
         today_trades_list.sort(key=lambda x: {"买入": 0, "卖出": 1}.get(x["action"], 2))
 
         holdings = []
