@@ -231,6 +231,61 @@ def find_best_model(output_dir: str) -> Optional[Tuple[str, str, float]]:
 # 回测执行
 # ============================================================
 
+def _extract_drawdowns(vals, dates, max_periods=5):
+    """提取前 N 大回撤区间 (开始→谷底→恢复, 深度, 持续时间)"""
+    running_max = -np.inf
+    peak_idx = 0
+    in_dd = False
+    dd_start = None
+    dd_start_idx = None
+    trough_date = None
+    trough_idx = None
+    trough_depth = 0
+    periods = []
+
+    for i, v in enumerate(vals):
+        if v > running_max:
+            running_max = v
+            if in_dd:
+                periods.append({
+                    "start": str(dd_start),
+                    "trough": str(trough_date),
+                    "recovery": str(dates[i]),
+                    "depth_pct": round(float(trough_depth), 2),
+                    "duration_days": int(i - dd_start_idx),
+                    "recovery_days": int(i - trough_idx),
+                })
+                in_dd = False
+            peak_idx = i
+        else:
+            dd_pct = (running_max - v) / running_max * 100
+            if not in_dd:
+                in_dd = True
+                dd_start = dates[peak_idx]
+                dd_start_idx = peak_idx
+                trough_date = dates[i]
+                trough_idx = i
+                trough_depth = dd_pct
+            else:
+                if dd_pct > trough_depth:
+                    trough_date = dates[i]
+                    trough_idx = i
+                    trough_depth = dd_pct
+
+    if in_dd:
+        periods.append({
+            "start": str(dd_start),
+            "trough": str(trough_date),
+            "recovery": None,
+            "depth_pct": round(float(trough_depth), 2),
+            "duration_days": int(len(vals) - dd_start_idx),
+            "recovery_days": None,
+        })
+
+    periods.sort(key=lambda x: x["depth_pct"], reverse=True)
+    return periods[:max_periods]
+
+
 def run_backtest_sequence(
     predictions_func,
     data_file: str,
@@ -340,6 +395,8 @@ def run_backtest_sequence(
         downside = daily_rets[daily_rets < 0]
         downside_std = float(np.std(downside)) if len(downside) > 0 else daily_std
         sortino = float((np.mean(daily_rets) / downside_std) * np.sqrt(252)) if downside_std != 0 else 0.0
+        # 计算多段回撤（前5大）
+        dd_periods = _extract_drawdowns(vals, dates)
         return {
             "strategy_return_pct": round(total_ret, 4),
             "annualized_return_pct": round(annualized_ret_pct, 4),
@@ -351,6 +408,7 @@ def run_backtest_sequence(
                 "end_date": mdd_end,
                 "duration_days": mdd_duration,
             },
+            "drawdown_periods": dd_periods,
             "sharpe_ratio": round(sharpe, 4),
             "calmar_ratio": round(calmar, 4),
             "sortino_ratio": round(sortino, 4),
@@ -637,12 +695,14 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
             downside = daily_rets[daily_rets < 0]
             ds_std = float(np.std(downside)) if len(downside) > 0 else daily_std
             sortino = float((np.mean(daily_rets) / ds_std) * np.sqrt(252)) if ds_std != 0 else 0
+            dd_periods = _extract_drawdowns(vals, [e["date"] for e in ec_segment])
             return {
                 "strategy_return_pct": round(total_ret, 4),
                 "annualized_return_pct": round(ann_ret * 100, 4),
                 "daily_win_rate": round(win_rate, 4),
                 "max_drawdown_pct": round(max_dd, 4),
                 "max_drawdown_details": mdd_info,
+                "drawdown_periods": dd_periods,
                 "sharpe_ratio": round(sharpe, 4),
                 "calmar_ratio": round(calmar, 4),
                 "sortino_ratio": round(sortino, 4),

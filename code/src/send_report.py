@@ -155,6 +155,22 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
     mdd_detail = metrics.get("max_drawdown_details", {})
     mdd_period = f"{mdd_detail.get('start_date', '')} ~ {mdd_detail.get('end_date', '')} ({mdd_detail.get('duration_days', 0)}天)" if mdd_detail.get('start_date') else ""
 
+    dd_periods = metrics.get("drawdown_periods", [])
+    dd_rows = ""
+    for dp in dd_periods:
+        recovery = dp.get("recovery") or "进行中"
+        dd_rows += f"""
+            <tr>
+                <td>{dp['start']}</td>
+                <td>{dp['trough']}</td>
+                <td>{recovery}</td>
+                <td style="text-align: right;">{_pct(dp['depth_pct'])}</td>
+                <td style="text-align: right;">{dp['duration_days']}天</td>
+                <td style="text-align: right;">{dp.get('recovery_days', '-')}天</td>
+            </tr>"""
+    if not dd_rows:
+        dd_rows = "<tr><td colspan='6' style='color: #999; text-align: center;'>暂无回撤</td></tr>"
+
     win_rate = metrics.get("daily_win_rate")
     win_rate_str = f"{win_rate*100:.1f}%" if isinstance(win_rate, (int, float)) else ""
 
@@ -274,7 +290,21 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
         </table>
 
         <h3 style="font-size: 14px;">回撤区间</h3>
-        <p style="font-size: 12px;">{mdd_period}</p>
+        <table style="font-size: 12px;">
+            <thead>
+                <tr>
+                    <th>开始</th>
+                    <th>谷底</th>
+                    <th>恢复</th>
+                    <th style="text-align: right;">最大回撤</th>
+                    <th style="text-align: right;">持续时间</th>
+                    <th style="text-align: right;">恢复天数</th>
+                </tr>
+            </thead>
+            <tbody>
+                {dd_rows}
+            </tbody>
+        </table>
 
         <h3 style="font-size: 14px;">当前持仓 ({len(holdings)} 只)</h3>
         <table style="font-size: 12px;">
