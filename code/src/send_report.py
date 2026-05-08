@@ -81,7 +81,12 @@ def send_report(model_key=None):
 
     etf_names = load_etf_names()
 
+    # 今日盈亏
+    today_pnl_data = seq_data.get("today_pnl", {})
+    today_pnl_total = today_pnl_data.get("total_pnl", 0)
+
     # 构建持仓表格
+    pnl_by_stock = {p["stock_id"]: p for p in today_pnl_data.get("positions", [])}
     holdings_rows = ""
     for h in holdings:
         code = h["stock_id"]
@@ -89,6 +94,9 @@ def send_report(model_key=None):
         shares = h["shares"]
         cost = h["cost"]
         weight = (cost / total_value * 100) if total_value > 0 else 0
+        pnl = pnl_by_stock.get(code, {})
+        pnl_str = f"{pnl['pnl']:+.2f}" if pnl else ""
+        pnl_color = "#cc0000" if (pnl and pnl["pnl"] >= 0) else "#009900"
         holdings_rows += f"""
         <tr>
             <td>{code}</td>
@@ -96,6 +104,7 @@ def send_report(model_key=None):
             <td style="text-align: right;">{shares:,}</td>
             <td style="text-align: right;">{cost:,.2f}</td>
             <td style="text-align: right; font-weight: bold;">{weight:.2f}%</td>
+            <td style="text-align: right; color: {pnl_color}; font-weight: bold;">{pnl_str}</td>
         </tr>
         """
 
@@ -108,6 +117,17 @@ def send_report(model_key=None):
         <td style="text-align: right;">-</td>
         <td style="text-align: right;">{cash:,.2f}</td>
         <td style="text-align: right;">{cash_weight:.2f}%</td>
+        <td style="text-align: right;">-</td>
+    </tr>
+    """
+
+    # 今日盈亏汇总行
+    pnl_total_color = "#cc0000" if today_pnl_total >= 0 else "#009900"
+    holdings_rows += f"""
+    <tr style="font-weight: bold; border-top: 2px solid #333;">
+        <td colspan="4" style="text-align: right;">今日合计盈亏</td>
+        <td style="text-align: right;"></td>
+        <td style="text-align: right; color: {pnl_total_color};">{today_pnl_total:+.2f}</td>
     </tr>
     """
 
@@ -143,8 +163,9 @@ def send_report(model_key=None):
     win_rate_str = f"{win_rate*100:.1f}%" if isinstance(win_rate, (int, float)) else ""
     
     # 近期窗口指标
+    window_labels = {"window_5d": "近5天(交易日)", "window_1m": "近一个月"}
     window_rows = ""
-    for wkey in ["window_1m", "window_3m"]:
+    for wkey in ["window_5d", "window_1m"]:
         w = metrics.get(wkey)
         if w:
             w_ret = w.get("strategy_return_pct", 0)
@@ -157,7 +178,7 @@ def send_report(model_key=None):
             w_dd = w.get("max_drawdown_pct", 0)
             window_rows += f"""
             <tr>
-                <td>{wkey.replace('window_', '近').replace('_', '')}</td>
+                <td>{window_labels.get(wkey, wkey)}</td>
                 <td style="text-align: right; color: {'#cc0000' if w_ret >= 0 else '#009900'}; font-weight: bold;">{_pct(w_ret)}</td>
                 <td style="text-align: right;">{_pct(w_ann)}</td>
                 <td style="text-align: right;">{w_win_str}</td>
@@ -272,6 +293,7 @@ def send_report(model_key=None):
                     <th style="text-align: right;">股数</th>
                     <th style="text-align: right;">成本</th>
                     <th style="text-align: right;">仓位</th>
+                    <th style="text-align: right;">今日盈亏</th>
                 </tr>
             </thead>
             <tbody>

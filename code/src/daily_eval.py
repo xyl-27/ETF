@@ -384,7 +384,7 @@ def run_backtest_sequence(
     today = pd.Timestamp(sorted_dates[-1])
 
     windows = {}
-    for label, delta in [("1m", 30), ("3m", 90)]:
+    for label, delta in [("5d", 5), ("1m", 30)]:
         cutoff = (today - pd.Timedelta(days=delta)).strftime("%Y-%m-%d")
         seg = [ec_by_date[d] for d in sorted_dates if d >= cutoff]
         if seg:
@@ -406,6 +406,45 @@ def run_backtest_sequence(
     else:
         next_rebalance_date = ""
 
+    # -- 今日盈亏 --
+    today_pnl = {}
+    if len(equity_curve) >= 2:
+        ec_today = equity_curve[-1]
+        ec_yesterday = equity_curve[-2]
+        today_date_str = ec_today["date"]
+        yesterday_date_str = ec_yesterday["date"]
+        today_total = ec_today["total_value"]
+        yesterday_total = ec_yesterday["total_value"]
+        today_pnl_total = round(today_total - yesterday_total, 2)
+
+        today_ts = pd.Timestamp(today_date_str)
+        yesterday_ts = pd.Timestamp(yesterday_date_str)
+
+        per_position_pnl = []
+        for stock_id, pos in engine.positions.items():
+            shares = pos["shares"]
+            sub = raw_df[raw_df["股票代码"] == stock_id]
+            today_close_s = sub.loc[sub["日期"] == today_ts, "收盘"]
+            yesterday_close_s = sub.loc[sub["日期"] == yesterday_ts, "收盘"]
+            if not today_close_s.empty and not yesterday_close_s.empty:
+                tc = today_close_s.values[0]
+                yc = yesterday_close_s.values[0]
+                pnl = round(shares * (tc - yc), 2)
+                pnl_pct = round((tc / yc - 1) * 100, 4) if yc > 0 else 0.0
+                per_position_pnl.append({
+                    "stock_id": stock_id,
+                    "shares": shares,
+                    "today_close": round(tc, 4),
+                    "yesterday_close": round(yc, 4),
+                    "pnl": pnl,
+                    "pnl_pct": pnl_pct,
+                })
+
+        today_pnl = {
+            "total_pnl": today_pnl_total,
+            "positions": per_position_pnl,
+        }
+
     # -- 整合 --
     metrics = {
         **overall,
@@ -424,6 +463,7 @@ def run_backtest_sequence(
         "positions": positions,
         "metrics": metrics,
         "cash": round(engine.cash, 2),
+        "today_pnl": today_pnl,
     }
 
 
@@ -627,6 +667,7 @@ def daily_eval(
                 "cash": seq["cash"],
                 "positions_count": len(seq["positions"]),
                 "trades_count": len(seq["trades"]),
+                "today_pnl": seq.get("today_pnl", {}),
             }
 
         next_rebalance = report_data["metrics"].get("next_rebalance_date", "")
@@ -675,9 +716,12 @@ def daily_eval(
 
         if verbose:
             m = report_data["metrics"]
+            today_pnl_data = report_data.get("today_pnl", {})
+            pnl_total = today_pnl_data.get("total_pnl", 0)
             print(f"\n{'='*60}")
             print(f"  每日报告 ({latest_date_str}) [序列: {report_key}]")
             print(f"{'='*60}")
+            print(f"  今日盈亏: {pnl_total:+.2f}")
             print(f"  累计收益: {m['strategy_return_pct']:+.2f}%")
             print(f"  年化收益: {m.get('annualized_return_pct', 0):+.2f}%")
             print(f"  日胜率:   {m.get('daily_win_rate', 0)*100:.1f}%")
@@ -705,6 +749,12 @@ def daily_eval(
             print(f"\n  当前持仓:")
             for h in holdings:
                 print(f"    {h['stock_id']}: {h['shares']}股 (成本: {h['cost']:.2f})")
+
+            if today_pnl_data.get("positions"):
+                print(f"\n  今日持仓盈亏:")
+                for pos in today_pnl_data["positions"]:
+                    arrow = "+" if pos["pnl"] >= 0 else ""
+                    print(f"    {pos['stock_id']}: {arrow}{pos['pnl']:+.2f} ({pos['pnl_pct']:+.2f}%)")
 
             print(f"\n{'='*60}")
             print(f"[{timestamp}] 每日测评完成")
