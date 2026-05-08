@@ -677,10 +677,11 @@ def main(args):
             sampler=optuna.samplers.TPESampler(seed=42),
         )
 
+        n_completed = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
+        remaining_trials = max(0, n_trials - n_completed)
         if len(study.trials) > 0:
             print(f"Optuna study loaded with {len(study.trials)} existing trials.")
-            n_completed = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
-            print(f"  Completed: {n_completed}, remaining: {n_trials - n_completed}")
+            print(f"  Completed: {n_completed}, remaining: {remaining_trials}")
         else:
             print(f"Starting new Optuna study ({n_trials} trials).")
 
@@ -721,7 +722,7 @@ def main(args):
 
             return result["score"]
 
-        study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
+        study.optimize(objective, n_trials=remaining_trials, show_progress_bar=True)
 
         # 后处理：将所有完成的 Optuna trial 同步到 results，确保 search_results.json 完整
         completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
