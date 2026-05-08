@@ -96,6 +96,15 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
     # 交易表
     trades_rows = ""
     if trades_list:
+        stock_model_count = {}
+        for t in trades_list:
+            s = t["stock"]
+            m = t.get('model_key', '')
+            if s not in stock_model_count:
+                stock_model_count[s] = set()
+            stock_model_count[s].add(m)
+        stock_model_count = {s: len(ms) for s, ms in stock_model_count.items()}
+
         prev_model = None
         for t in trades_list:
             cur_model = t.get('model_key', '')
@@ -105,12 +114,16 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
             <tr style="background-color: #f0f4f8;"><td colspan="6" style="padding: 4px 10px; font-size: 11px; font-weight: bold; color: #555;">▸ {model_display}</td></tr>"""
                 prev_model = cur_model
             action_color = "#cc0000" if t["action"] == "买入" else "#009900"
+            name_display = t.get('name', '')
+            cnt = stock_model_count.get(t["stock"], 0)
+            if cnt > 1:
+                name_display += f" ({cnt})"
             trades_rows += f"""
             <tr>
                 <td style="font-size: 11px; color: #888;">{cur_model}</td>
                 <td><span style="color: {action_color}; font-weight: bold;">{t['action']}</span></td>
                 <td><a href="{_eastmoney_url(t['stock'])}" target="_blank" style="text-decoration: none; color: inherit;">{t['stock']}</a></td>
-                <td>{t.get('name', '')}</td>
+                <td>{name_display}</td>
                 <td style="text-align: right;">{t['shares']:,}</td>
                 <td style="text-align: right;">{t['price']:.4f}</td>
             </tr>"""
