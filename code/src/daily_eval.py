@@ -709,7 +709,7 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
 
 
 def _make_model_key(m):
-    """生成 model_type_exp_X 格式的模型标识"""
+    """生成 {search_type}_{model_type}_exp_X 格式的模型标识"""
     if isinstance(m, dict):
         exp_dir = m["exp_dir"]
     elif isinstance(m, (list, tuple)):
@@ -717,10 +717,6 @@ def _make_model_key(m):
     else:
         exp_dir = m
     parent = os.path.basename(os.path.dirname(exp_dir))
-    for prefix in ["search_", "grid_", "bayes_"]:
-        if parent.startswith(prefix):
-            parent = parent[len(prefix):]
-            break
     parent = re.sub(r'_\d+_\d+', '', parent)
     name = os.path.basename(exp_dir)
     return f"{parent}_{name}"

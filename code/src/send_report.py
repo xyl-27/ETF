@@ -5,6 +5,7 @@
 """
 
 import os
+import re
 import sys
 import smtplib
 import json
@@ -128,7 +129,7 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
         for t in trades_list:
             cur_model = t.get('model_key', '')
             if cur_model and cur_model != prev_model:
-                model_display = cur_model.replace('itransformer_', '').replace('_exp_', ' ')
+                model_display = re.sub(r'_\w+_exp_', ' ', cur_model)
                 trades_rows += f"""
             <tr style="background-color: #f0f4f8;"><td colspan="7" style="padding: 4px 10px; font-size: 11px; font-weight: bold; color: #555;">▸ {model_display}</td></tr>"""
                 prev_model = cur_model
