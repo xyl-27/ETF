@@ -506,6 +506,9 @@ def _save_history_reports(seq, data_file, initial_capital, etf_names):
     raw_df = pd.read_csv(data_file, dtype={"股票代码": str})
     raw_df["股票代码"] = raw_df["股票代码"].astype(str).str.zfill(6)
     raw_df["日期"] = pd.to_datetime(raw_df["日期"])
+    hs300_raw = raw_df[raw_df["股票代码"] == "510300.XSHG"][["日期", "收盘"]].copy()
+    hs300_raw = hs300_raw.rename(columns={"日期": "date", "收盘": "close"})
+    hs300_raw = hs300_raw.sort_values("date").reset_index(drop=True)
     ec_by_date = {e["date"]: e["total_value"] for e in equity_curve}
     sorted_dates = sorted(ec_by_date.keys())
 
@@ -590,8 +593,22 @@ def _save_history_reports(seq, data_file, initial_capital, etf_names):
 
         metrics = _compute_metrics(ec_seg, initial_capital)
 
+        # 沪深300收益
+        hs300_seg = hs300_raw[(hs300_raw["date"] >= pd.Timestamp(sorted_dates[0])) & (hs300_raw["date"] <= today_ts)]
+        if len(hs300_seg) >= 2:
+            hs300_ret = (hs300_seg["close"].iloc[-1] / hs300_seg["close"].iloc[0] - 1) * 100
+        else:
+            hs300_ret = 0.0
+        metrics["hs300_return_pct"] = round(hs300_ret, 4)
+        metrics["excess_return_pct"] = round(metrics["strategy_return_pct"] - hs300_ret, 4)
+
         # 构建简化版的报告HTML
         cash = today_total - sum(h["cost"] for h in holdings)
+
+        today_pnl_positions = [
+            {"stock_id": h["stock_id"], "shares": h["shares"], "pnl": h["today_pnl"]}
+            for h in holdings
+        ]
 
         from send_report import build_report_html
         try:
@@ -606,7 +623,7 @@ def _save_history_reports(seq, data_file, initial_capital, etf_names):
                 next_rebalance="",
                 is_rebalance=True,
                 today_pnl_total=today_pnl_total,
-                today_pnl_positions=[],
+                today_pnl_positions=today_pnl_positions,
             )
             history_path = history_dir / f"{rb_date}.html"
             history_path.write_text(html, encoding="utf-8")
