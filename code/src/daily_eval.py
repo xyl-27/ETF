@@ -712,8 +712,10 @@ def _make_model_key(m):
     else:
         exp_dir = m
     parent = os.path.basename(os.path.dirname(exp_dir))
-    if parent.startswith("search_"):
-        parent = parent[7:]
+    for prefix in ["search_", "grid_", "bayes_"]:
+        if parent.startswith(prefix):
+            parent = parent[len(prefix):]
+            break
     parent = re.sub(r'_\d+_\d+', '', parent)
     name = os.path.basename(exp_dir)
     return f"{parent}_{name}"

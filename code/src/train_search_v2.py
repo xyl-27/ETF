@@ -538,7 +538,9 @@ def main(args):
     topk = config.get("top_k", 5)
     model_type = config.get("model_type", "tcn")
     file_prefix = data_file.split("_")[1].split(".")[0]
-    search_dir = f"./model/search_{model_type}_{file_prefix}_{topk}"
+    search_method = args.search_method or config.get("search_method", "bayesian")
+    method_prefix = "grid" if search_method == "grid" else "bayes"
+    search_dir = f"./model/{method_prefix}_{model_type}_{file_prefix}_{topk}"
     os.makedirs(search_dir, exist_ok=True)
 
     preprocessed_path = os.path.join(search_dir, "preprocessed_data.pkl")
@@ -549,8 +551,6 @@ def main(args):
         scaler = joblib.load(os.path.join(search_dir, "scaler.pkl"))
     else:
         preprocessed_data, scaler = preprocess_and_save(config, search_dir)
-
-    search_method = args.search_method or config.get("search_method", "bayesian")
 
     if search_method == "grid":
         # ========== 网格搜索 ==========

@@ -121,11 +121,11 @@ def main(args):
     # Get the parent dir of output_base to scan all search dirs
     base_parent = str(PROJECT_ROOT)
 
-    # Actually scan the model base dir and its parent for search_* dirs
+    # Actually scan the model base dir and its parent for search_*/grid_*/bayes_* dirs
     candidates = []
     for search_dir in sorted(os.listdir(os.path.join(base_parent, "model"))):
         full_path = os.path.join(base_parent, "model", search_dir)
-        if os.path.isdir(full_path) and search_dir.startswith("search_"):
+        if os.path.isdir(full_path) and any(search_dir.startswith(p) for p in ("search_", "grid_", "bayes_")):
             candidates.append(full_path)
 
     all_experiments = []
