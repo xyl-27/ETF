@@ -117,8 +117,7 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
             name_display = t.get('name', '')
             cnt = stock_model_count.get(t["stock"], 0)
             if cnt > 1:
-                m = total_models or cnt
-                name_display += f" ({cnt}/{m})"
+                name_display += f" ({cnt}/{total_models})" if total_models else f" ({cnt})"
             trades_rows += f"""
             <tr>
                 <td style="font-size: 11px; color: #888;">{cur_model}</td>
