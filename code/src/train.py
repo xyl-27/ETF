@@ -1318,7 +1318,9 @@ def main():
     if is_train:
         best_score = -float("inf")
         best_sliding_score = -float("inf")
+        best_ndcg = -float("inf")
         best_epoch = -1
+        best_ndcg_epoch = -1
 
         epoch_scores_file = os.path.join(output_dir, "epoch_scores.txt")
         with open(epoch_scores_file, "w") as f:
@@ -1388,6 +1390,7 @@ def main():
             # 保存最佳模型（基于weekly final score）
             current_final_score = eval_metrics.get("final_score", 0.0)
             current_sliding_score = eval_sliding_metrics.get("final_score", 0.0)
+            current_sliding_ndcg = eval_sliding_metrics.get("ndcg", 0.0)
 
             # 记录每个epoch的得分
             with open(epoch_scores_file, "a") as f:
@@ -1405,12 +1408,28 @@ def main():
                 print(
                     f"保存最佳模型 - weekly: {best_score:.4f}, sliding: {current_sliding_score:.4f}"
                 )
+
+            if current_sliding_ndcg > best_ndcg:
+                best_ndcg = current_sliding_ndcg
+                best_ndcg_epoch = epoch + 1
+                torch.save(
+                    model.state_dict(), os.path.join(output_dir, "best_model_ndcg.pth")
+                )
+                print(
+                    f"保存最佳NDCG模型 - epoch: {best_ndcg_epoch}, ndcg: {best_ndcg:.4f}"
+                )
+
+        if not os.path.exists(os.path.join(output_dir, "best_model_ndcg.pth")):
+            torch.save(
+                model.state_dict(), os.path.join(output_dir, "best_model_ndcg.pth")
+            )
+
         print(
-            f"\n训练完成！最佳 epoch: {best_epoch}, 最佳 weekly final score: {best_score:.4f}"
+            f"\n训练完成！最佳 epoch: {best_epoch}, 最佳 weekly final score: {best_score:.4f}, 最佳 ndcg: {best_ndcg:.4f} (epoch {best_ndcg_epoch})"
         )
         with open(os.path.join(output_dir, "final_score.txt"), "w") as f:
             f.write(
-                f"Best epoch: {best_epoch}\nBest weekly_final_score: {best_score:.6f}\nBest sliding_final_score: {best_sliding_score:.6f}\n"
+                f"Best epoch: {best_epoch}\nBest weekly_final_score: {best_score:.6f}\nBest sliding_final_score: {best_sliding_score:.6f}\nBest ndcg_epoch: {best_ndcg_epoch}\nBest sliding_ndcg: {best_ndcg:.6f}\n"
             )
 
         if writer:

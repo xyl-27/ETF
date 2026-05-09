@@ -23,6 +23,7 @@ config = {
     "output_base": "./model",
     "data_path": "./etf_data",
     "data_file": "etf_74_train.csv",
+    "search_metric": "ndcg",
 }
 
 MODEL_CONFIGS = {

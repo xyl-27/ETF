@@ -302,11 +302,17 @@ def run_experiment(
         total_iters=exp_config["num_epochs"],
     )
 
+    search_metric = exp_config.get("search_metric", "ndcg")
+
     best_score = -float("inf")
     best_sliding_score = -float("inf")
     best_sliding_score_all = -float("inf")
+    best_ndcg = -float("inf")
+    best_metric_val = -float("inf")
     best_epoch = -1
     best_sliding_epoch = -1
+    best_ndcg_epoch = -1
+    best_metric_epoch = -1
 
     epoch_scores_file = os.path.join(output_dir, "epoch_scores.txt")
     with open(epoch_scores_file, "w") as f:
@@ -420,11 +426,17 @@ def run_experiment(
                 epoch_preds_sliding,
             )
 
+        current_metric = eval_sliding_metrics.get(search_metric, 0.0)
+
+        if current_metric > best_metric_val:
+            best_metric_val = current_metric
+            best_metric_epoch = epoch + 1
+            torch.save(model.state_dict(), os.path.join(output_dir, "best_model.pth"))
+
         if current_score > best_score:
             best_score = current_score
             best_sliding_score = current_sliding_score
             best_epoch = epoch + 1
-            torch.save(model.state_dict(), os.path.join(output_dir, "best_model.pth"))
 
         if current_sliding_score > best_sliding_score_all:
             best_sliding_score_all = current_sliding_score
@@ -433,16 +445,31 @@ def run_experiment(
                 model.state_dict(), os.path.join(output_dir, "best_model_sliding.pth")
             )
 
+        if sliding_ndcg > best_ndcg:
+            best_ndcg = sliding_ndcg
+            best_ndcg_epoch = epoch + 1
+            torch.save(
+                model.state_dict(), os.path.join(output_dir, "best_model_ndcg.pth")
+            )
+
     if not os.path.exists(os.path.join(output_dir, "best_model_sliding.pth")):
         torch.save(
             model.state_dict(), os.path.join(output_dir, "best_model_sliding.pth")
+        )
+
+    if not os.path.exists(os.path.join(output_dir, "best_model_ndcg.pth")):
+        torch.save(
+            model.state_dict(), os.path.join(output_dir, "best_model_ndcg.pth")
         )
 
     scheduler.step()
 
     with open(os.path.join(output_dir, "final_score.txt"), "w") as f:
         f.write(
-            f"Best epoch: {best_epoch}\nBest weekly_final_score: {best_score:.6f}\nBest sliding_epoch: {best_sliding_epoch}\nBest sliding_final_score: {best_sliding_score_all:.6f}\n"
+            f"Best epoch: {best_epoch}\nBest weekly_final_score: {best_score:.6f}\n"
+            f"Best sliding_epoch: {best_sliding_epoch}\nBest sliding_final_score: {best_sliding_score_all:.6f}\n"
+            f"Best ndcg_epoch: {best_ndcg_epoch}\nBest sliding_ndcg: {best_ndcg:.6f}\n"
+            f"Best {search_metric}_epoch: {best_metric_epoch}\nBest {search_metric}: {best_metric_val:.6f}\n"
         )
 
     # 保存验证集的 targets（只保存一次）
@@ -499,7 +526,8 @@ def run_experiment(
 
     return {
         "success": True,
-        "score": best_score,
+        "score": best_metric_val,
+        "metric": search_metric,
         "sliding_score": best_sliding_score,
         "best_epoch": best_epoch,
         "params": params,
@@ -526,6 +554,8 @@ def main(args):
         config["sequence_length"] = args.sequence_length
     if args.N is not None:
         config["N"] = args.N
+    if args.search_metric is not None:
+        config["search_metric"] = args.search_metric
 
     # Clear any previous GPU memory state
     if torch.cuda.is_available():
@@ -707,7 +737,8 @@ def main(args):
                 if os.path.exists(final_score_file):
                     with open(final_score_file) as f:
                         for line in f:
-                            if "Best weekly_final_score:" in line:
+                            target_key = f"Best {config.get('search_metric', 'ndcg')}:"
+                            if target_key in line:
                                 score = float(line.split(":")[-1].strip())
                                 return score
 
@@ -791,5 +822,6 @@ if __name__ == "__main__":
     parser.add_argument("--N", type=int, default=None)
     parser.add_argument("--search-method", type=str, default="bayesian", choices=["grid", "bayesian"])
     parser.add_argument("--n-trials", type=int, default=None)
+    parser.add_argument("--search-metric", type=str, default=None)
     args = parser.parse_args()
     main(args)

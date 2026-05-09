@@ -13,7 +13,7 @@ if (Test-Path ".venv") {
 }
 
 # 要搜索的模型类型 (空格分隔)
-$SEARCH_MODEL_TYPES = @("itransformer", "gru")
+$SEARCH_MODEL_TYPES = @("itransformer")
 
 # 通用配置
 $CONFIG_NAME = "config"
@@ -23,6 +23,7 @@ $TOPK = 3
 $DATA_FILE = "etf_74_train.csv"
 $SEARCH_METHOD = "bayesian"   # "bayesian" 或 "grid"
 $N_TRIALS = 50                # 贝叶斯搜索的试验次数 (仅 bayesian 模式生效)
+$SEARCH_METRIC = "ndcg"       # 优化指标 (ndcg/mrr/excess_return/final_score)
 
 foreach ($MODEL_TYPE in $SEARCH_MODEL_TYPES) {
     Write-Host "========================================"
@@ -67,7 +68,8 @@ foreach ($MODEL_TYPE in $SEARCH_MODEL_TYPES) {
         --sequence-length $SEQUENCE_LENGTH `
         --N $N `
         --search-method $SEARCH_METHOD `
-        --n-trials $N_TRIALS
+        --n-trials $N_TRIALS `
+        --search-metric $SEARCH_METRIC
 
     $RESULTS_FILE = "$SEARCH_DIR/search_results.json"
 

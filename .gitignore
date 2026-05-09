@@ -43,8 +43,13 @@ etf_data/
 # 输出
 output/
 
-# 笔记本 (保留，但手动管理需要时单独备份)
-# notebooks/
+# 笔记本 (不自动跟踪)
+notebooks/*.ipynb
+
+# 回测缓存
+notebooks/*.pkl
+notebooks/*.csv
+*.pkl
 
 # 聚宽登录状态
 joinquant_state.json
