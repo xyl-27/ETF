@@ -49,17 +49,73 @@ def _fmt_advantage(v):
     return f"{v:+.2f}"
 
 
+def _build_model_stats_table(sequences):
+    rows = ""
+    for key, seq in sorted(sequences.items()):
+        ms = seq.get("model_stats", {})
+        m = seq.get("metrics", {})
+        if not ms:
+            continue
+        display = key.replace("search_", "").replace("_exp_", " ")
+        ret = ms.get("reb_pnl_pct", ms["last_trade_return_pct"])
+        ret_clr = "#cc0000" if ret >= 0 else "#009900"
+        l3 = ms.get("last_3_reb_avg_pct", ms["last_3_avg_return_pct"])
+        l3_clr = "#cc0000" if l3 >= 0 else "#009900"
+        ta = ms["total_avg_return_pct"]
+        ta_clr = "#cc0000" if ta >= 0 else "#009900"
+        sr = m.get("strategy_return_pct", 0)
+        sr_clr = "#cc0000" if sr >= 0 else "#009900"
+        er = m.get("excess_return_pct", 0)
+        er_clr = "#cc0000" if er >= 0 else "#009900"
+        rows += f"""
+        <tr>
+            <td style="font-size:11px;color:#555;">{display}</td>
+            <td style="text-align:right;font-weight:bold;color:{ret_clr};">{ret:+.2f}%</td>
+            <td style="text-align:right;font-weight:bold;color:{l3_clr};">{l3:+.2f}%</td>
+            <td style="text-align:right;">{ms['total_win_rate_pct']:.1f}%</td>
+            <td style="text-align:right;">{ms['total_trades']}</td>
+            <td style="text-align:right;font-weight:bold;color:{ta_clr};">{ta:+.2f}%</td>
+            <td style="text-align:right;font-weight:bold;color:{sr_clr};">{sr:+.2f}%</td>
+            <td style="text-align:right;">{m.get('sharpe_ratio', 0):.2f}</td>
+            <td style="text-align:right;">{m.get('max_drawdown_pct', 0):.2f}%</td>
+            <td style="text-align:right;font-weight:bold;color:{er_clr};">{er:+.2f}%</td>
+        </tr>"""
+    if not rows:
+        return ""
+    return f"""
+    <h3 style="font-size:14px;">模型表现</h3>
+    <table style="font-size:11px;">
+        <thead>
+            <tr>
+                <th>模型</th>
+                <th style="text-align:right;">调仓盈亏</th>
+                <th style="text-align:right;">近3次平均</th>
+                <th style="text-align:right;">总胜率</th>
+                <th style="text-align:right;">总交易</th>
+                <th style="text-align:right;">交易平均</th>
+                <th style="text-align:right;">策略收益</th>
+                <th style="text-align:right;">夏普</th>
+                <th style="text-align:right;">最大回撤</th>
+                <th style="text-align:right;">超额收益</th>
+            </tr>
+        </thead>
+        <tbody>
+            {rows}
+        </tbody>
+    </table>"""
+
+
 def build_report_html(*, date, model_display, total_value, cash, holdings,
                       trades_list, metrics, next_rebalance, is_rebalance,
                       today_pnl_total, today_pnl_positions=None,
-                      chart_data_url=None):
+                      chart_data_url=None, model_stats_section=""):
     """构建报告HTML，各组件已预先准备好"""
     # 持仓表
     pnl_by_stock = {p["stock_id"]: p for p in (today_pnl_positions or [])}
     holdings_rows = ""
     for h in holdings:
         code = h["stock_id"]
-        name = h.get("name", code)
+        name = h.get("name") or code
         shares = h["shares"]
         cost = h["cost"]
         price = h.get("price", 0)
@@ -129,27 +185,49 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
         for t in trades_list:
             cur_model = t.get('model_key', '')
             if cur_model and cur_model != prev_model:
-                model_display = re.sub(r'_\w+_exp_', ' ', cur_model)
+                section_display = re.sub(r'_\w+_exp_', ' ', cur_model)
                 trades_rows += f"""
-            <tr style="background-color: #f0f4f8;"><td colspan="7" style="padding: 4px 10px; font-size: 11px; font-weight: bold; color: #555;">▸ {model_display}</td></tr>"""
+            <tr style="background-color: #f0f4f8;"><td colspan="8" style="padding: 4px 10px; font-size: 11px; font-weight: bold; color: #555;">▸ {section_display}</td></tr>"""
                 prev_model = cur_model
-            action_color = "#cc0000" if t["action"] == "买入" else "#009900"
-            name_display = t.get('name', '')
+            if t["action"] == "买入":
+                action_color = "#cc0000"
+            elif t["action"] == "卖出":
+                action_color = "#009900"
+            else:
+                action_color = "#666"
+            name_display = t.get('name') or t['stock']
             cnt = stock_model_count.get(t["stock"], 0)
             if cnt > 1 and total_exp_models:
                 name_display += f" ({cnt}/{total_exp_models})"
+            shares_display = f"{t['shares']:,}" if t.get('shares') else "-"
+            price_display = f"{t['price']:.4f}" if t.get('price') else "-"
+            adv = t.get('advantage')
+            if adv is not None:
+                adv_style = f"color: {'#cc0000' if adv >= 0 else '#009900'};"
+                adv_display = _fmt_advantage(adv)
+            else:
+                adv_style = "color: #999;"
+                adv_display = "-"
+            reb = t.get("reb_pnl")
+            if reb is not None:
+                reb_style = f"color: {'#cc0000' if reb >= 0 else '#009900'};"
+                reb_display = f"{reb:+.2f}%"
+            else:
+                reb_style = "color: #999;"
+                reb_display = "-"
             trades_rows += f"""
             <tr>
                 <td style="font-size: 11px; color: #888;">{cur_model}</td>
                 <td><span style="color: {action_color}; font-weight: bold;">{t['action']}</span></td>
                 <td><a href="{_eastmoney_url(t['stock'])}" target="_blank" style="text-decoration: none; color: inherit;">{t['stock']}</a></td>
                 <td>{name_display}</td>
-                <td style="text-align: right;">{t['shares']:,}</td>
-                <td style="text-align: right;">{t['price']:.4f}</td>
-                <td style="text-align: right;{('color: ' + ('#cc0000' if t.get('advantage') >= 0 else '#009900') + ';') if t.get('advantage') is not None else ''}">{_fmt_advantage(t.get('advantage'))}</td>
+                <td style="text-align: right;">{shares_display}</td>
+                <td style="text-align: right;">{price_display}</td>
+                <td style="text-align: right; {reb_style}">{reb_display}</td>
+                <td style="text-align: right; {adv_style}">{adv_display}</td>
             </tr>"""
     else:
-        trades_rows = "<tr><td colspan='7' style='color: #999; text-align: center;'>无调仓操作</td></tr>"
+        trades_rows = "<tr><td colspan='8' style='color: #999; text-align: center;'>无调仓操作</td></tr>"
 
     # 指标
     mdd_detail = metrics.get("max_drawdown_details", {})
@@ -306,6 +384,8 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
             </tbody>
         </table>
 
+        {model_stats_section}
+
         <h3 style="font-size: 14px;">当前持仓 ({len(holdings)} 只)</h3>
         <table style="font-size: 12px;">
             <thead>
@@ -335,6 +415,7 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
                     <th>名称</th>
                     <th style="text-align: right;">数量</th>
                     <th style="text-align: right;">价格</th>
+                    <th style="text-align: right;">调仓盈亏</th>
                     <th style="text-align: right;">优势</th>
                 </tr>
             </thead>
@@ -392,6 +473,8 @@ def send_report(model_key=None):
     next_rebalance = report.get("next_rebalance_date", "")
     model_display = model_key.replace("_", " ").title()
 
+    model_stats_section = _build_model_stats_table(sequences)
+
     html_body = build_report_html(
         date=date,
         model_display=model_display,
@@ -404,6 +487,7 @@ def send_report(model_key=None):
         is_rebalance=is_rebalance,
         today_pnl_total=today_pnl_total,
         today_pnl_positions=today_pnl_positions,
+        model_stats_section=model_stats_section,
     )
 
     msg = MIMEMultipart()
@@ -415,14 +499,6 @@ def send_report(model_key=None):
     report_html_path = PROJECT_ROOT / "output" / "latest_report.html"
     report_html_path.parent.mkdir(parents=True, exist_ok=True)
     report_html_path.write_text(html_body, encoding="utf-8")
-
-    # 调仓日额外保存历史副本
-    if is_rebalance:
-        history_dir = PROJECT_ROOT / "output" / "history_report"
-        history_dir.mkdir(parents=True, exist_ok=True)
-        history_path = history_dir / f"{date}.html"
-        history_path.write_text(html_body, encoding="utf-8")
-        print(f"  历史报告已保存: {history_path}")
 
     msg.attach(MIMEText(html_body, "html", "utf-8"))
 
