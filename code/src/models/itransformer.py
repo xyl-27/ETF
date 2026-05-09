@@ -15,6 +15,9 @@ class RankingiTransformer(nn.Module):
         hidden_dim = config.get("d_model", 256)
         num_layers = config.get("num_layers", 3)
         nhead = config.get("nhead", 8)
+        # 校验 nhead 合法性：必须整除 d_model
+        while hidden_dim % nhead != 0 and nhead > 1:
+            nhead = nhead // 2
         dropout = config.get("dropout", 0.1)
         use_mmoe = config.get("use_mmoe", False)
         num_experts = config.get("num_experts", None)

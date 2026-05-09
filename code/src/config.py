@@ -205,20 +205,10 @@ def get_search_space(model_type):
         params["dropout"] = trial.suggest_float("dropout", 0.05, 0.4)
 
         if model_type in ("transformer",):
-            d_model = params["d_model"]
-            if d_model >= 128:
-                params["nhead"] = trial.suggest_categorical("nhead", [4, 8])
-            else:
-                params["nhead"] = 4
+            params["nhead"] = trial.suggest_categorical("nhead", [4, 8])
 
         if model_type in ("itransformer",):
-            d_model = params["d_model"]
-            if d_model >= 256:
-                params["nhead"] = trial.suggest_categorical("nhead", [4, 8, 16])
-            elif d_model >= 128:
-                params["nhead"] = trial.suggest_categorical("nhead", [4, 8])
-            else:
-                params["nhead"] = 4
+            params["nhead"] = trial.suggest_categorical("nhead", [4, 8, 16])
 
         if model_type in ("tcn",):
             params["kernel_size"] = trial.suggest_categorical("kernel_size", [3, 5, 7])
