@@ -51,7 +51,7 @@ def _fmt_advantage(v):
 
 def _build_model_stats_table(sequences):
     rows = ""
-    for key, seq in sorted(sequences.items()):
+    for key, seq in sequences.items():
         ms = seq.get("model_stats", {})
         m = seq.get("metrics", {})
         if not ms:
@@ -61,6 +61,7 @@ def _build_model_stats_table(sequences):
         ret_clr = "#cc0000" if ret >= 0 else "#009900"
         l3 = ms.get("last_3_reb_avg_pct", ms["last_3_avg_return_pct"])
         l3_clr = "#cc0000" if l3 >= 0 else "#009900"
+        l3w = ms.get("last_3_win_rate_pct", 0)
         ta = ms["total_avg_return_pct"]
         ta_clr = "#cc0000" if ta >= 0 else "#009900"
         sr = m.get("strategy_return_pct", 0)
@@ -72,6 +73,7 @@ def _build_model_stats_table(sequences):
             <td style="font-size:11px;color:#555;">{display}</td>
             <td style="text-align:right;font-weight:bold;color:{ret_clr};">{ret:+.2f}%</td>
             <td style="text-align:right;font-weight:bold;color:{l3_clr};">{l3:+.2f}%</td>
+            <td style="text-align:right;">{l3w:.1f}%</td>
             <td style="text-align:right;">{ms['total_win_rate_pct']:.1f}%</td>
             <td style="text-align:right;">{ms['total_trades']}</td>
             <td style="text-align:right;font-weight:bold;color:{ta_clr};">{ta:+.2f}%</td>
@@ -89,7 +91,8 @@ def _build_model_stats_table(sequences):
             <tr>
                 <th>模型</th>
                 <th style="text-align:right;">调仓盈亏</th>
-                <th style="text-align:right;">近3次平均</th>
+                <th style="text-align:right;">近3次平均盈亏</th>
+                <th style="text-align:right;">近3次胜率</th>
                 <th style="text-align:right;">总胜率</th>
                 <th style="text-align:right;">总交易</th>
                 <th style="text-align:right;">交易平均</th>
@@ -124,7 +127,8 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
         pnl_str = f"{pnl['pnl']:+.2f}" if pnl else ""
         pnl_color = "#cc0000" if (pnl and pnl["pnl"] >= 0) else "#009900"
         rebal_pnl = round(price * shares - cost, 2) if price else 0
-        rebal_str = f"{rebal_pnl:+.2f}"
+        rebal_pnl_pct = round((price * shares - cost) / cost * 100, 2) if cost > 0 else 0
+        rebal_str = f"{rebal_pnl:+.2f} ({rebal_pnl_pct:+.2f}%)"
         rebal_color = "#cc0000" if rebal_pnl >= 0 else "#009900"
         price_str = f"{price:.4f}" if price else "-"
         holdings_rows += f"""
@@ -209,9 +213,13 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
                 adv_style = "color: #999;"
                 adv_display = "-"
             reb = t.get("reb_pnl")
-            if reb is not None:
-                reb_style = f"color: {'#cc0000' if reb >= 0 else '#009900'};"
-                reb_display = f"{reb:+.2f}%"
+            reb_pct = t.get("reb_pnl_pct")
+            reb_amt = t.get("reb_pnl_amount")
+            if reb is not None or reb_pct is not None:
+                pct = reb if reb is not None else reb_pct
+                amt = reb_amt if reb_amt is not None else 0
+                reb_style = f"color: {'#cc0000' if pct >= 0 else '#009900'};"
+                reb_display = f"{amt:+.2f} ({pct:+.2f}%)"
             else:
                 reb_style = "color: #999;"
                 reb_display = "-"

@@ -609,7 +609,7 @@ def _history_chart_b64(all_sequences, hs300_raw, rb_date, first_date, initial_ca
     return f"data:image/png;base64,{b64}"
 
 
-def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_names):
+def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_names, model_key=""):
     """为序列的每一个调仓日保存历史报告HTML"""
     trades = seq.get("trades", [])
     equity_curve = seq.get("equity_curve", [])
@@ -664,7 +664,8 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
                             "model_key": key,
                             "name": etf_names.get(sid, ""),
                         })
-        today_trades_list.sort(key=lambda x: (x.get("model_key", ""), {"买入": 0, "卖出": 1}.get(x["action"], 2)))
+        model_order = {key: i for i, key in enumerate(all_sequences.keys())}
+        today_trades_list.sort(key=lambda x: (model_order.get(x.get("model_key", ""), 999), {"买入": 0, "卖出": 1}.get(x["action"], 2)))
 
         # 前一次调仓日
         prev_rb_date = None
@@ -689,7 +690,8 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
             else:
                 pc = prev_close_prices.get(t["stock"], 0)
                 if pc > 0 and t.get("price", 0) > 0:
-                    t["reb_pnl"] = round((t["price"] / pc - 1) * 100, 2)
+                    t["reb_pnl_pct"] = round((t["price"] / pc - 1) * 100, 2)
+                    t["reb_pnl_amount"] = round(t.get("shares", 0) * (t["price"] - pc), 2)
                 else:
                     t["reb_pnl"] = None
 
@@ -788,9 +790,12 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
         metrics["hs300_return_pct"] = round(hs300_ret, 4)
         metrics["excess_return_pct"] = round(metrics["strategy_return_pct"] - hs300_ret, 4)
 
-        # 下一个调仓日
+        # 下一个调仓日（非末尾直接用列表下一个，末尾用回测计算的投影）
         rb_idx = rebalance_dates.index(rb_date)
-        next_rb = rebalance_dates[rb_idx + 1] if rb_idx + 1 < len(rebalance_dates) else ""
+        if rb_idx + 1 < len(rebalance_dates):
+            next_rb = rebalance_dates[rb_idx + 1]
+        else:
+            next_rb = seq.get("metrics", {}).get("next_rebalance_date", "")
 
         # 构建简化版的报告HTML
         cash = today_total - sum(h["cost"] for h in holdings)
@@ -857,7 +862,7 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
         try:
             html = build_report_html(
                 date=rb_date,
-                model_display="历史调仓",
+                model_display="历史调仓" if not model_key else model_key.replace("search_", "").replace("_exp_", " "),
                 total_value=today_total,
                 cash=cash,
                 holdings=holdings,
@@ -920,6 +925,7 @@ def _compute_model_stats(trades, current_prices=None, report_date=None):
             "total_avg_return_pct": 0,
             "last_trade_return_pct": 0,
             "last_3_avg_return_pct": 0,
+            "last_3_win_rate_pct": 0,
         }
 
     total_trades = len(trade_returns)
@@ -932,6 +938,8 @@ def _compute_model_stats(trades, current_prices=None, report_date=None):
 
     last_3 = trade_returns[-3:]
     last_3_avg_return_pct = round(sum(t['return'] for t in last_3) / len(last_3) * 100, 2)
+    last_3_wins = sum(1 for t in last_3 if t['success'])
+    last_3_win_rate_pct = round(last_3_wins / len(last_3) * 100, 1)
 
     return {
         "total_trades": total_trades,
@@ -939,6 +947,7 @@ def _compute_model_stats(trades, current_prices=None, report_date=None):
         "total_avg_return_pct": total_avg_return_pct,
         "last_trade_return_pct": last_trade_return_pct,
         "last_3_avg_return_pct": last_3_avg_return_pct,
+        "last_3_win_rate_pct": last_3_win_rate_pct,
     }
 
 
@@ -1257,7 +1266,8 @@ def daily_eval(
                 else:
                     pc = prev_close_prices.get(t["stock"], 0)
                     if pc > 0 and t.get("price", 0) > 0:
-                        t["reb_pnl"] = round((t["price"] / pc - 1) * 100, 2)
+                        t["reb_pnl_pct"] = round((t["price"] / pc - 1) * 100, 2)
+                        t["reb_pnl_amount"] = round(t.get("shares", 0) * (t["price"] - pc), 2)
                     else:
                         t["reb_pnl"] = None
 
@@ -1363,7 +1373,7 @@ def daily_eval(
             if verbose:
                 print(f"\n[历史] 生成各调仓日报告...")
             _save_history_reports(
-                sequences[report_key], sequences, str(DATA_FILE), initial_capital, etf_names
+                sequences[report_key], sequences, str(DATA_FILE), initial_capital, etf_names, model_key=report_key
             )
         except Exception as e:
             if verbose:
