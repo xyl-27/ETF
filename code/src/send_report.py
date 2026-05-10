@@ -80,6 +80,10 @@ def _build_model_stats_table(sequences):
         ic = m.get("rank_ic")
         ic_str = f"{ic:+.4f}" if ic is not None else "—"
         ic_clr = "#cc0000" if ic is not None and ic >= 0 else "#009900" if ic is not None else "#999"
+        ndcg = m.get("ndcg")
+        ndcg_str = f"{ndcg:.4f}" if ndcg is not None else "—"
+        ks_p = m.get("ks_p")
+        ks_p_str = f"{ks_p:.4f}" if ks_p is not None else "—"
         rows += f"""
         <tr>
             <td style="font-size:11px;color:#555;">{display}</td>
@@ -94,6 +98,8 @@ def _build_model_stats_table(sequences):
             <td style="text-align:right;">{m.get('max_drawdown_pct', 0):.2f}%</td>
             <td style="text-align:right;font-weight:bold;color:{er_clr};">{er:+.2f}%</td>
             <td style="text-align:right;color:{ic_clr};">{ic_str}</td>
+            <td style="text-align:right;">{ndcg_str}</td>
+            <td style="text-align:right;">{ks_p_str}</td>
         </tr>"""
     if not rows:
         return ""
@@ -114,6 +120,8 @@ def _build_model_stats_table(sequences):
                 <th style="text-align:right;">最大回撤</th>
                 <th style="text-align:right;">超额收益</th>
                 <th style="text-align:right;">Rank IC</th>
+                <th style="text-align:right;">NDCG</th>
+                <th style="text-align:right;">KS-p</th>
             </tr>
         </thead>
         <tbody>
