@@ -1180,13 +1180,6 @@ def daily_eval(
                     t["advantage"] = int(stock_votes - cutoff_votes)
             sequences["voting"] = result
 
-        state = {
-            "sequences": sequences,
-            "last_updated": timestamp,
-        }
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
-        with open(STATE_PATH, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
 
         # 绘制收益曲线图
         plot_path = OUTPUT_DIR / "equity_curves.png"
@@ -1256,9 +1249,31 @@ def daily_eval(
                         })
 
         # 持久化保存最新调仓价（调仓当天的买入/保持价格）
-        report_data["metrics"]["last_trade_prices"] = {
-            t["stock"]: t["price"] for t in all_today_trades if t.get("price", 0) > 0
+        last_trade_prices = {}
+        for t in all_today_trades:
+            if t.get("price", 0) > 0:
+                last_trade_prices[t["stock"]] = t["price"]
+        # 非调仓日从最近一次调仓日推算保持价格
+        if not last_trade_prices and STATE_PATH.exists():
+            try:
+                prev_state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+                for seq in prev_state.get("sequences", {}).values():
+                    ltp = seq.get("metrics", {}).get("last_trade_prices", {})
+                    if ltp:
+                        last_trade_prices = ltp
+                        break
+            except Exception:
+                pass
+        report_data["metrics"]["last_trade_prices"] = last_trade_prices
+
+        # 重写 state（此时 latest_trade_prices 已写入 metrics）
+        state = {
+            "sequences": sequences,
+            "last_updated": timestamp,
         }
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        with open(STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
 
         # 调仓盈亏：从上次调仓日到本次调仓日的个股盈亏
         trade_dates = sorted(set(t["date"] for t in report_data["trades"]))
