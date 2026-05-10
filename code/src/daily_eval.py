@@ -968,6 +968,10 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
                 hs300_ret = (hs300_seg["close"].iloc[-1] / hs300_seg["close"].iloc[0] - 1) * 100 if len(hs300_seg) >= 2 else 0.0
                 hist_metrics["hs300_return_pct"] = round(hs300_ret, 4)
                 hist_metrics["excess_return_pct"] = round(hist_metrics["strategy_return_pct"] - hs300_ret, 4)
+                for k in ("rank_ic", "ndcg", "ks_stat", "ks_p"):
+                    v = hseq.get("metrics", {}).get(k)
+                    if v is not None:
+                        hist_metrics[k] = v
             else:
                 hist_metrics = {"strategy_return_pct": 0, "sharpe_ratio": 0, "max_drawdown_pct": 0, "hs300_return_pct": 0, "excess_return_pct": 0}
             model_stats = _compute_model_stats(hist_trades, hist_current_prices, report_date=cur_date)
