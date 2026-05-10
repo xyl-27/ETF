@@ -432,6 +432,7 @@ def run_backtest_sequence(
             "positions": positions,
             "metrics": {},
             "cash": round(engine.cash, 2),
+            "skipped_trades": engine.skipped_trades,
         }
 
     # -- HS300 对比 --
@@ -517,10 +518,11 @@ def run_backtest_sequence(
             "positions": per_position_pnl,
         }
 
-    # -- NDCG & KS 检验 --
+    # -- NDCG & KS 检验 & Rank IC --
     ndcg_list = []
     ks_stat_list = []
     ks_p_list = []
+    rank_ic_list = []
     all_dates_sorted = sorted(raw_df["日期"].unique())
     for ph in engine.predictions_history:
         rb_date = ph["date"]
@@ -582,9 +584,18 @@ def run_backtest_sequence(
             ks_stat_list.append(ks_stat)
             ks_p_list.append(ks_p)
 
+        from scipy.stats import spearmanr
+        unique_rets = len(set(forward_rets))
+        unique_scores = len(set(scores))
+        if unique_rets > 1 and unique_scores > 1:
+            ic, _ = spearmanr(scores, forward_rets)
+            if not np.isnan(ic):
+                rank_ic_list.append(ic)
+
     avg_ndcg = round(float(np.mean(ndcg_list)), 4) if ndcg_list else None
     avg_ks_stat = round(float(np.mean(ks_stat_list)), 4) if ks_stat_list else None
     avg_ks_p = round(float(np.mean(ks_p_list)), 4) if ks_p_list else None
+    avg_rank_ic = round(float(np.mean(rank_ic_list)), 4) if rank_ic_list else None
 
     # -- 整合 --
     metrics = {
@@ -598,6 +609,7 @@ def run_backtest_sequence(
         "ndcg": avg_ndcg,
         "ks_stat": avg_ks_stat,
         "ks_p": avg_ks_p,
+        "rank_ic": avg_rank_ic,
         **windows,
     }
 
@@ -608,6 +620,7 @@ def run_backtest_sequence(
         "metrics": metrics,
         "cash": round(engine.cash, 2),
         "today_pnl": today_pnl,
+        "skipped_trades": engine.skipped_trades,
     }
 
 
@@ -742,7 +755,26 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
                                 "name": etf_names.get(sid, ""),
                             })
             model_order = {key: i for i, key in enumerate(all_sequences.keys())}
-            today_trades_list.sort(key=lambda x: (model_order.get(x.get("model_key", ""), 999), {"买入": 0, "卖出": 1}.get(x["action"], 2)))
+            today_trades_list.sort(key=lambda x: (model_order.get(x.get("model_key", ""), 999), {"买入": 0, "卖出": 1, "跳过": 2}.get(x["action"], 3)))
+            # 追加因涨跌停/停牌跳过的操作
+            for key, s in all_sequences.items():
+                for st in s.get("skipped_trades", []):
+                    if st["date"] == cur_date:
+                        today_trades_list.append({
+                            "action": "跳过",
+                            "stock": st["stock"],
+                            "reason": st["reason"],
+                            "model_key": key,
+                            "name": etf_names.get(st["stock"], ""),
+                        })
+
+            # 涨停价/跌停价
+            for t in today_trades_list:
+                sub = raw_df[raw_df["股票代码"] == t["stock"]]
+                hl_s = sub.loc[sub["日期"] == today_ts, "涨停价"]
+                ll_s = sub.loc[sub["日期"] == today_ts, "跌停价"]
+                t["high_limit"] = round(float(hl_s.values[0]), 4) if not hl_s.empty else 0
+                t["low_limit"] = round(float(ll_s.values[0]), 4) if not ll_s.empty else 0
 
         # 前一次调仓日
         prev_rb_date = None
@@ -797,6 +829,8 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
             sub = raw_df[raw_df["股票代码"] == stock_id]
             tc_s = sub.loc[sub["日期"] == today_ts, "收盘"]
             yc_s = sub.loc[sub["日期"] == yesterday_ts, "收盘"]
+            hl_s = sub.loc[sub["日期"] == today_ts, "涨停价"]
+            ll_s = sub.loc[sub["日期"] == today_ts, "跌停价"]
             price = tc_s.values[0] if not tc_s.empty else 0
             yc = yc_s.values[0] if not yc_s.empty else price
             if stock_id in today_buys:
@@ -811,6 +845,8 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
                 "shares": p["shares"],
                 "cost": round(p["cost"], 2),
                 "today_pnl": pnl,
+                "high_limit": round(float(hl_s.values[0]), 4) if not hl_s.empty else 0,
+                "low_limit": round(float(ll_s.values[0]), 4) if not ll_s.empty else 0,
             })
 
         def _compute_metrics(ec_segment, init_cap):
@@ -1359,6 +1395,23 @@ def daily_eval(
                             "price": price,
                             "model_key": key,
                         })
+            # 追加今日因涨跌停/停牌跳过的操作
+            for st in seq.get("skipped_trades", []):
+                if st["date"] == latest_date_str:
+                    all_today_trades.append({
+                        "action": "跳过",
+                        "stock": st["stock"],
+                        "reason": st["reason"],
+                        "model_key": key,
+                    })
+
+        # 涨停价/跌停价
+        for t in all_today_trades:
+            sub = raw_df[raw_df["股票代码"] == t["stock"]]
+            hl_s = sub.loc[sub["日期"] == latest_date, "涨停价"]
+            ll_s = sub.loc[sub["日期"] == latest_date, "跌停价"]
+            t["high_limit"] = round(float(hl_s.values[0]), 4) if not hl_s.empty else 0
+            t["low_limit"] = round(float(ll_s.values[0]), 4) if not ll_s.empty else 0
 
         # 持久化保存最新调仓价（仅取主序列的调仓价格）
         last_trade_prices = {}
@@ -1464,6 +1517,9 @@ def daily_eval(
                 pass
         for stock_id, pos in report_data["positions"].items():
             price = pnl_positions.get(stock_id, {}).get("today_close", 0)
+            sub = raw_df[raw_df["股票代码"] == stock_id]
+            hl_s = sub.loc[sub["日期"] == latest_date, "涨停价"]
+            ll_s = sub.loc[sub["日期"] == latest_date, "跌停价"]
             holdings.append({
                 "stock_id": stock_id,
                 "name": etf_names.get(stock_id, ""),
@@ -1471,6 +1527,8 @@ def daily_eval(
                 "buy_price": round(latest_trade_prices.get(stock_id, 0), 4),
                 "shares": pos["shares"],
                 "cost": pos["cost"],
+                "high_limit": round(float(hl_s.values[0]), 4) if not hl_s.empty else 0,
+                "low_limit": round(float(ll_s.values[0]), 4) if not ll_s.empty else 0,
             })
 
         for t in today_trades:
@@ -1496,6 +1554,7 @@ def daily_eval(
                 "today_pnl": seq.get("today_pnl", {}),
                 "model_stats": model_stats,
                 "equity_curve": seq.get("equity_curve", []),
+                "skipped_trades": seq.get("skipped_trades", []),
             }
 
         next_rebalance = report_data["metrics"].get("next_rebalance_date", "")

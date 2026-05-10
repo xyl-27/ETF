@@ -23,6 +23,8 @@
         .total-bar .dtl { font-size: 12px; color: #666; text-align: right; }
         .total-bar .dtl .chg { font-weight: bold; }
         tr.section td { background: #f0f4f8; padding: 4px 10px; font-size: 11px; font-weight: bold; color: #555; }
+        tr.skipped td { background: #fafafa; color: #aaa; }
+        .skip-reason { font-size: 11px; color: #bbb; }
         .chart-wrap { margin-top: 15px; position: relative; }
         .chart-wrap canvas { max-width: 100%; max-height: 400px; }
         #chart-fallback { max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 5px; }
@@ -62,6 +64,7 @@
     <table>
         <thead><tr>
             <th>代码</th><th>名称</th><th style="text-align:right;">现价</th><th style="text-align:right;">成本价</th>
+            <th style="text-align:right;">涨停价</th><th style="text-align:right;">跌停价</th>
             <th style="text-align:right;">股数</th><th style="text-align:right;">市值</th><th style="text-align:right;">仓位</th>
             <th style="text-align:right;">今日</th><th style="text-align:right;">调仓以来</th>
         </tr></thead>

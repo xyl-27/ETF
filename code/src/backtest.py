@@ -211,6 +211,7 @@ class BacktestEngine:
         self.equity_curve = []
         self.trades = []
         self.predictions_history = []
+        self.skipped_trades = []
         self._prev_total_value = initial_capital
 
         self._log_fh = None
@@ -295,6 +296,20 @@ class BacktestEngine:
         if self.positions[stock]["shares"] == 0:
             del self.positions[stock]
 
+    def _can_buy(self, stock, price, high_limit_dict, paused_dict):
+        if paused_dict.get(stock, 0) == 1:
+            return False
+        if price >= high_limit_dict.get(stock, float("inf")):
+            return False
+        return True
+
+    def _can_sell(self, stock, price, low_limit_dict, paused_dict):
+        if paused_dict.get(stock, 0) == 1:
+            return False
+        if price <= low_limit_dict.get(stock, 0):
+            return False
+        return True
+
     def get_total_value(self, price_dict):
         pos_value = sum(
             self.positions.get(st, {}).get("shares", 0) * price_dict.get(st, 0)
@@ -331,6 +346,9 @@ class BacktestEngine:
             current_date = dates[i]
             date_data = price_data[price_data["日期"] == current_date]
             price_dict = dict(zip(date_data["股票代码"], date_data["收盘"]))
+            high_limit_dict = dict(zip(date_data["股票代码"], date_data["涨停价"]))
+            low_limit_dict = dict(zip(date_data["股票代码"], date_data["跌停价"]))
+            paused_dict = dict(zip(date_data["股票代码"], date_data["停牌"]))
             total_value = self.get_total_value(price_dict)
             self.equity_curve.append({"date": current_date, "total_value": total_value})
 
@@ -410,7 +428,7 @@ class BacktestEngine:
                 })
 
                 pred_scores = [p["score"] for p in predictions]
-                score_std = float(np.std(pred_scores)) if len(pred_scores) > 1 else 1.0
+                score_std = float(np.std(pred_scores)) if len(pred_scores) > 1 and float(np.std(pred_scores)) > 0 else 1.0
                 cutoff_idx = min(self.top_k, len(predictions) - 1)
                 score_cutoff = predictions[cutoff_idx]["score"]
                 score_map = {p["stock_id"]: p["score"] for p in predictions}
@@ -442,22 +460,42 @@ class BacktestEngine:
 
                 for stock in list(self.positions.keys()):
                     if stock not in [p["stock_id"] for p in predictions[: self.top_k]]:
+                        if not self._can_sell(stock, price_dict.get(stock, 0), low_limit_dict, paused_dict):
+                            reason = "停牌" if paused_dict.get(stock, 0) == 1 else "跌停"
+                            self.skipped_trades.append({"date": current_date, "action": "卖出", "stock": stock, "reason": reason})
+                            if self.log:
+                                self._write_log(f"  {stock}: {reason}，暂不可卖出，保留")
+                            continue
                         self.sell(stock, price_dict.get(stock, 0), 1.0, current_date)
                         if self.log:
                             self._write_log(f"卖出: {stock}")
 
-                buy_value = total_value * self.position_pct / self.top_k
                 if self.log:
                     total_pct = self.position_pct * 100
                     self._write_log(
-                        f"总仓位: {total_pct:.2f}%, 每只股票目标市值: {buy_value:.2f} ({buy_value / total_value * 100:.2f}%)"
+                        f"总仓位: {total_pct:.2f}%, 目标持仓数: {self.top_k}"
                     )
 
+                buyable_targets = []
                 for pred in predictions[: self.top_k]:
                     stock = pred["stock_id"]
                     price = price_dict.get(stock, 0)
                     if price > 0 and stock not in self.positions:
-                        self.buy(stock, price, buy_value, current_date)
+                        if not self._can_buy(stock, price, high_limit_dict, paused_dict):
+                            reason = "停牌" if paused_dict.get(stock, 0) == 1 else "涨停"
+                            self.skipped_trades.append({"date": current_date, "action": "买入", "stock": stock, "reason": reason})
+                            if self.log:
+                                self._write_log(f"  {stock}: {reason}，暂不可买入，跳过")
+                            continue
+                        buyable_targets.append((stock, price, pred))
+
+                if buyable_targets:
+                    adjusted_buy_value = total_value * self.position_pct / len(buyable_targets)
+                    self._write_log(
+                        f"每只股票目标市值: {adjusted_buy_value:.2f} (可买{len(buyable_targets)}只)"
+                    ) if self.log else None
+                    for stock, price, pred in buyable_targets:
+                        self.buy(stock, price, adjusted_buy_value, current_date)
                         if self.trades:
                             s = score_map[stock]
                             self.trades[-1]["score"] = float(s)
@@ -469,8 +507,12 @@ class BacktestEngine:
                             self._write_log(
                                 f"买入 {stock}: {shares}股 @ {price:.4f} (市值: {actual_value:.2f}, 占比: {pct:.2f}%)"
                             )
-                    elif price > 0 and stock in self.positions:
-                        if self.log:
+
+                if self.log:
+                    for pred in predictions[: self.top_k]:
+                        stock = pred["stock_id"]
+                        price = price_dict.get(stock, 0)
+                        if price > 0 and stock in self.positions:
                             shares = self.positions[stock]["shares"]
                             cost = self.positions[stock]["cost"]
                             actual_value = shares * price
