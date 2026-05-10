@@ -705,6 +705,12 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
 
         today_buys = {t["stock"] for t in trades if t["date"] == rb_date and t["action"] == "买入"}
 
+        # 每只持仓股的最新调仓价（今日买入/保持的价格）
+        buy_prices = {}
+        for t in today_trades_list:
+            if t.get("price", 0) > 0:
+                buy_prices[t["stock"]] = t["price"]
+
         for stock_id, p in positions.items():
             sub = raw_df[raw_df["股票代码"] == stock_id]
             tc_s = sub.loc[sub["日期"] == today_ts, "收盘"]
@@ -719,6 +725,7 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
                 "stock_id": stock_id,
                 "name": etf_names.get(stock_id, ""),
                 "price": round(price, 4) if price else 0,
+                "buy_price": round(buy_prices.get(stock_id, 0), 4),
                 "shares": p["shares"],
                 "cost": round(p["cost"], 2),
                 "today_pnl": pnl,
@@ -1223,6 +1230,11 @@ def daily_eval(
 
         # 收集所有序列的今日调仓（含保持）
         all_today_trades = []
+        latest_date_ts = pd.Timestamp(latest_date_str)
+        # 用调仓日后第一个交易日的收盘价作为保持价格
+        next_dates = raw_df[raw_df["日期"] > latest_date_ts]["日期"].unique()
+        hold_price_date = min(next_dates) if len(next_dates) > 0 else latest_date_ts
+
         for key, seq in sequences.items():
             seq_actual_trades = [t for t in seq.get("trades", []) if t["date"] == latest_date_str and t["action"] in ("买入", "卖出")]
             for t in seq_actual_trades:
@@ -1232,8 +1244,9 @@ def daily_eval(
                 seq_today_buys = {t["stock"] for t in seq_actual_trades if t["action"] == "买入"}
                 for sid, pos in seq.get("positions", {}).items():
                     if sid not in seq_today_buys:
-                        seq_pnl = {p["stock_id"]: p for p in seq.get("today_pnl", {}).get("positions", [])}
-                        price = seq_pnl.get(sid, {}).get("today_close", 0)
+                        sub = raw_df[raw_df["股票代码"] == sid]
+                        tc_s = sub.loc[sub["日期"] == hold_price_date, "收盘"]
+                        price = round(tc_s.values[0], 4) if not tc_s.empty else 0
                         all_today_trades.append({
                             "action": "保持",
                             "stock": sid,
@@ -1241,6 +1254,11 @@ def daily_eval(
                             "price": price,
                             "model_key": key,
                         })
+
+        # 持久化保存最新调仓价（调仓当天的买入/保持价格）
+        report_data["metrics"]["last_trade_prices"] = {
+            t["stock"]: t["price"] for t in all_today_trades if t.get("price", 0) > 0
+        }
 
         # 调仓盈亏：从上次调仓日到本次调仓日的个股盈亏
         trade_dates = sorted(set(t["date"] for t in report_data["trades"]))
@@ -1284,12 +1302,25 @@ def daily_eval(
                         etf_names[code] = name
 
         holdings = []
+        # 从持久化的调仓价取成交价，非调仓日加载上次保存的价格
+        latest_trade_prices = report_data.get("metrics", {}).get("last_trade_prices", {})
+        if not latest_trade_prices and STATE_PATH.exists():
+            try:
+                prev_state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+                for seq in prev_state.get("sequences", {}).values():
+                    ltp = seq.get("metrics", {}).get("last_trade_prices", {})
+                    if ltp:
+                        latest_trade_prices = ltp
+                        break
+            except Exception:
+                pass
         for stock_id, pos in report_data["positions"].items():
             price = pnl_positions.get(stock_id, {}).get("today_close", 0)
             holdings.append({
                 "stock_id": stock_id,
                 "name": etf_names.get(stock_id, ""),
                 "price": price,
+                "buy_price": round(latest_trade_prices.get(stock_id, 0), 4),
                 "shares": pos["shares"],
                 "cost": pos["cost"],
             })

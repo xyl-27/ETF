@@ -126,16 +126,20 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
         pnl = pnl_by_stock.get(code, {})
         pnl_str = f"{pnl['pnl']:+.2f}" if pnl else ""
         pnl_color = "#cc0000" if (pnl and pnl["pnl"] >= 0) else "#009900"
-        rebal_pnl = round(price * shares - cost, 2) if price else 0
-        rebal_pnl_pct = round((price * shares - cost) / cost * 100, 2) if cost > 0 else 0
+        price_str = f"{price:.4f}" if price else "-"
+        buy_price = h.get("buy_price", 0)
+        buy_price_str = f"{buy_price:.4f}" if buy_price else "-"
+        rebal_pnl = round(shares * (price - buy_price), 2) if price and buy_price else 0
+        rebal_cost = buy_price * shares
+        rebal_pnl_pct = round(rebal_pnl / rebal_cost * 100, 2) if rebal_cost > 0 else 0
         rebal_str = f"{rebal_pnl:+.2f} ({rebal_pnl_pct:+.2f}%)"
         rebal_color = "#cc0000" if rebal_pnl >= 0 else "#009900"
-        price_str = f"{price:.4f}" if price else "-"
         holdings_rows += f"""
         <tr>
             <td><a href="{_eastmoney_url(code)}" target="_blank" style="text-decoration: none; color: inherit;">{code}</a></td>
             <td>{name}</td>
             <td style="text-align: right;">{price_str}</td>
+            <td style="text-align: right;">{buy_price_str}</td>
             <td style="text-align: right;">{shares:,}</td>
             <td style="text-align: right;">{cost:,.2f}</td>
             <td style="text-align: right; font-weight: bold;">{weight:.2f}%</td>
@@ -151,6 +155,7 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
         <td>未投资资金</td>
         <td style="text-align: right;">-</td>
         <td style="text-align: right;">-</td>
+        <td style="text-align: right;">-</td>
         <td style="text-align: right;">{cash:,.2f}</td>
         <td style="text-align: right;">{cash_weight:.2f}%</td>
         <td style="text-align: right;">-</td>
@@ -159,13 +164,15 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
     """
 
     pnl_total_color = "#cc0000" if today_pnl_total >= 0 else "#009900"
-    total_rebal_pnl = sum(round(h["price"] * h["shares"] - h["cost"], 2) for h in holdings if h.get("price"))
+    total_rebal_pnl = sum(round(h["shares"] * (h["price"] - h.get("buy_price", 0)), 2) for h in holdings if h.get("price") and h.get("buy_price"))
+    total_rebal_cost = sum(h.get("buy_price", 0) * h["shares"] for h in holdings if h.get("price") and h.get("buy_price"))
+    total_rebal_pnl_pct = round(total_rebal_pnl / total_rebal_cost * 100, 2) if total_rebal_cost > 0 else 0
     rebal_total_color = "#cc0000" if total_rebal_pnl >= 0 else "#009900"
     holdings_rows += f"""
     <tr style="font-weight: bold; border-top: 2px solid #333;">
-        <td colspan="6" style="text-align: right;">总计盈亏</td>
+        <td colspan="7" style="text-align: right;">总计盈亏</td>
         <td style="text-align: right; color: {pnl_total_color};">{today_pnl_total:+.2f}</td>
-        <td style="text-align: right; color: {rebal_total_color};">{total_rebal_pnl:+.2f}</td>
+        <td style="text-align: right; color: {rebal_total_color};">{total_rebal_pnl:+.2f} ({total_rebal_pnl_pct:+.2f}%)</td>
     </tr>
     """
 
@@ -401,6 +408,7 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
                     <th>代码</th>
                     <th>名称</th>
                     <th style="text-align: right;">价格</th>
+                    <th style="text-align: right;">成交价</th>
                     <th style="text-align: right;">股数</th>
                     <th style="text-align: right;">成本</th>
                     <th style="text-align: right;">仓位</th>
