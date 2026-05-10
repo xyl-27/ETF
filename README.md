@@ -181,3 +181,16 @@ uv sync
 ├── *.ps1                     # PowerShell 脚本
 └── pyproject.toml            # 项目配置
 ```
+
+
+# TODO
+
+日报中的模型预热
+
+模型失效预警
+
+日报的交易曲线的HTML可视化
+
+围绕NDCG建模
+
+今日调仓的优化需要更直观

@@ -30,11 +30,11 @@ EMAIL_FROM = os.environ.get("EMAIL_FROM", SMTP_USER)
 EMAIL_TO = os.environ.get("EMAIL_TO", "1280745039@qq.com")
 
 
-def _eastmoney_url(stock_id):
+def _xueqiu_url(stock_id):
     code = stock_id.split(".")[0]
     exchange = stock_id.split(".")[1] if "." in stock_id else ""
-    prefix = "sh" if exchange == "XSHG" else "sz"
-    return f"https://quote.eastmoney.com/{prefix}{code}.html"
+    prefix = "SH" if exchange == "XSHG" else "SZ"
+    return f"https://xueqiu.com/S/{prefix}{code}"
 
 
 def _pct(v, suffix="%"):
@@ -122,7 +122,7 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
         shares = h["shares"]
         cost = h["cost"]
         price = h.get("price", 0)
-        weight = (cost / total_value * 100) if total_value > 0 else 0
+        weight = (shares * price / total_value * 100) if total_value > 0 and price else 0
         pnl = pnl_by_stock.get(code, {})
         pnl_str = f"{pnl['pnl']:+.2f}" if pnl else ""
         pnl_color = "#cc0000" if (pnl and pnl["pnl"] >= 0) else "#009900"
@@ -136,7 +136,7 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
         rebal_color = "#cc0000" if rebal_pnl >= 0 else "#009900"
         holdings_rows += f"""
         <tr>
-            <td><a href="{_eastmoney_url(code)}" target="_blank" style="text-decoration: none; color: inherit;">{code}</a></td>
+            <td><a href="{_xueqiu_url(code)}" target="_blank" style="text-decoration: none; color: inherit;">{code}</a></td>
             <td>{name}</td>
             <td style="text-align: right;">{price_str}</td>
             <td style="text-align: right;">{buy_price_str}</td>
@@ -234,7 +234,7 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
             <tr>
                 <td style="font-size: 11px; color: #888;">{cur_model}</td>
                 <td><span style="color: {action_color}; font-weight: bold;">{t['action']}</span></td>
-                <td><a href="{_eastmoney_url(t['stock'])}" target="_blank" style="text-decoration: none; color: inherit;">{t['stock']}</a></td>
+                <td><a href="{_xueqiu_url(t['stock'])}" target="_blank" style="text-decoration: none; color: inherit;">{t['stock']}</a></td>
                 <td>{name_display}</td>
                 <td style="text-align: right;">{shares_display}</td>
                 <td style="text-align: right;">{price_display}</td>
@@ -257,9 +257,9 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
                 <td>{dp['start']}</td>
                 <td>{dp['trough']}</td>
                 <td>{recovery}</td>
-                <td style="text-align: right;">{_pct(dp['depth_pct'])}</td>
+                <td style="text-align: right;">{dp['depth_pct']:.2f}%</td>
                 <td style="text-align: right;">{dp['duration_days']}天</td>
-                <td style="text-align: right;">{dp.get('recovery_days', '-')}天</td>
+                <td style="text-align: right;">{dp.get('recovery_days') or '-'}天</td>
             </tr>"""
     if not dd_rows:
         dd_rows = "<tr><td colspan='6' style='color: #999; text-align: center;'>暂无回撤</td></tr>"
@@ -283,7 +283,7 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
                 <td style="text-align: right; color: {'#cc0000' if w_ret >= 0 else '#009900'}; font-weight: bold;">{_pct(w_ret)}</td>
                 <td style="text-align: right;">{_pct(w_ann)}</td>
                 <td style="text-align: right;">{w_win_str}</td>
-                <td style="text-align: right;">{_pct(w_dd)}</td>
+                <td style="text-align: right;">{w_dd:.2f}%</td>
             </tr>"""
 
     return f"""
@@ -360,11 +360,6 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
                 <div class="label">索提诺</div>
                 <div class="value">{metrics.get('sortino_ratio', 0):.2f}</div>
             </div>
-            <div class="metric-box">
-                <div class="label">账户总值</div>
-                <div class="value">{total_value:,.2f}</div>
-            </div>
-        </div>
 
         <h3 style="font-size: 14px;">近期表现</h3>
         <table style="font-size: 12px;">
@@ -487,7 +482,7 @@ def send_report(model_key=None):
     today_pnl_positions = today_pnl_data.get("positions", [])
 
     next_rebalance = report.get("next_rebalance_date", "")
-    model_display = model_key.replace("_", " ").title()
+    model_display = model_key.replace("search_", "").replace("_exp_", " ")
 
     model_stats_section = _build_model_stats_table(sequences)
 
