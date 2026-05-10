@@ -961,6 +961,13 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
                 "metrics": hist_metrics,
             }
         model_stats_section = _build_model_stats_table(hist_sequences)
+        hist_equity = {}
+        for hkey, hseq in all_sequences.items():
+            ec = hseq.get("equity_curve", [])
+            ec_seg = [e for e in ec if e["date"] <= rb_date]
+            if ec_seg:
+                disp = hkey.replace("search_", "").replace("_exp_", " ")
+                hist_equity[disp] = ec_seg
         try:
             html = build_report_html(
                 date=rb_date,
@@ -976,6 +983,7 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
                 today_pnl_positions=today_pnl_positions,
                 chart_data_url=chart_data_url,
                 model_stats_section=model_stats_section,
+                equity_data=hist_equity,
             )
             history_path = history_dir / f"{rb_date}.html"
             history_path.write_text(html, encoding="utf-8")
@@ -1478,6 +1486,7 @@ def daily_eval(
                 "trades": seq["trades"],
                 "today_pnl": seq.get("today_pnl", {}),
                 "model_stats": model_stats,
+                "equity_curve": seq.get("equity_curve", []),
             }
 
         next_rebalance = report_data["metrics"].get("next_rebalance_date", "")

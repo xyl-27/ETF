@@ -11,8 +11,6 @@
         th { background: #f8f9fa; font-weight: 600; white-space: nowrap; }
         .pos { color: #cc0000; }
         .neg { color: #009900; }
-        .chart { margin-top: 15px; text-align: center; }
-        .chart img { max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 5px; }
         .footer { margin-top: 20px; padding: 10px; border-top: 1px solid #eee; font-size: 11px; color: #999; text-align: center; }
         h3 { margin: 14px 0 6px; font-size: 13px; }
         .metrics { margin-bottom: 12px; }
@@ -25,7 +23,12 @@
         .total-bar .dtl { font-size: 12px; color: #666; text-align: right; }
         .total-bar .dtl .chg { font-weight: bold; }
         tr.section td { background: #f0f4f8; padding: 4px 10px; font-size: 11px; font-weight: bold; color: #555; }
+        .chart-wrap { margin-top: 15px; position: relative; }
+        .chart-wrap canvas { max-width: 100%; max-height: 400px; }
+        #chart-fallback { max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 5px; }
     </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 </head>
 <body>
     <div class="header">
@@ -67,9 +70,98 @@
 
     {{TRADES_SECTION}}
 
-    <div class="chart">
-        <img src="{{CHART_SRC}}" alt="收益曲线">
+    <h3>收益曲线</h3>
+    <div class="chart-wrap">
+        <img id="chart-fallback" src="{{CHART_SRC}}" alt="收益曲线" style="max-width:100%;height:auto;border:1px solid #ddd;border-radius:5px;">
+        <canvas id="chart-canvas" style="display:none;max-width:100%;max-height:400px;"></canvas>
     </div>
+
+    <script id="equity-data" type="application/json">{{EQUITY_DATA}}</script>
+    <script>
+    (function() {
+        var dataEl = document.getElementById('equity-data');
+        if (!dataEl) return;
+        var allCurves;
+        try { allCurves = JSON.parse(dataEl.textContent); } catch(e) { return; }
+        if (!allCurves || Object.keys(allCurves).length === 0) return;
+
+        var fallback = document.getElementById('chart-fallback');
+        var canvas = document.getElementById('chart-canvas');
+        if (!canvas) return;
+
+        fallback.style.display = 'none';
+        canvas.style.display = 'block';
+
+        var ctx = canvas.getContext('2d');
+        var colors = ['#e74c3c','#e67e22','#2ecc71','#3498db','#9b59b6','#f39c12','#1abc9c'];
+
+        var datasets = [];
+        var idx = 0;
+        var allDates = [];
+        for (var key in allCurves) {
+            var pts = allCurves[key];
+            if (!pts || pts.length < 2) continue;
+            var color = colors[idx % colors.length];
+            var data = pts.map(function(p) {
+                var d = new Date(p.date);
+                allDates.push(d);
+                return {x: d, y: p.total_value / 10000};
+            });
+            var ret = (pts[pts.length-1].total_value / pts[0].total_value - 1) * 100;
+            datasets.push({
+                label: key + ' (' + (ret >= 0 ? '+' : '') + ret.toFixed(2) + '%)',
+                data: data,
+                borderColor: color,
+                backgroundColor: color + '20',
+                borderWidth: key === 'average' || key === 'voting' ? 2.5 : 1.5,
+                borderDash: key === 'average' || key === 'voting' ? [6, 3] : [],
+                pointRadius: 0,
+                fill: false,
+            });
+            idx++;
+        }
+
+        if (datasets.length === 0) return;
+
+        var minDate = new Date(Math.min.apply(null, allDates));
+        var maxDate = new Date(Math.max.apply(null, allDates));
+
+        new Chart(ctx, {
+            type: 'line',
+            data: { datasets: datasets },
+            options: {
+                responsive: true,
+                maintainAspectRatio: true,
+                interaction: { mode: 'nearest', intersect: false },
+                plugins: {
+                    legend: { position: 'top', labels: { boxWidth: 12, padding: 8, font: { size: 11 } } },
+                    tooltip: {
+                        callbacks: {
+                            label: function(ctx) {
+                                return ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(2) + '万';
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        type: 'time',
+                        time: { unit: 'day', displayFormats: { day: 'MM-dd' } },
+                        min: minDate,
+                        max: maxDate,
+                        ticks: { font: { size: 10 } }
+                    },
+                    y: {
+                        ticks: {
+                            font: { size: 10 },
+                            callback: function(v) { return v.toFixed(1) + '万'; }
+                        }
+                    }
+                }
+            }
+        });
+    })();
+    </script>
 
     <div class="footer">
         由 ETF 每日测评系统自动生成 | {{GENERATED_TIME}}

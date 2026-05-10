@@ -120,7 +120,8 @@ def _build_model_stats_table(sequences):
 def build_report_html(*, date, model_display, total_value, cash, holdings,
                       trades_list, metrics, next_rebalance, is_rebalance,
                       today_pnl_total, today_pnl_positions=None,
-                      chart_data_url=None, model_stats_section=""):
+                      chart_data_url=None, model_stats_section="",
+                      equity_data=None):
     """构建报告HTML，各组件已预先准备好"""
     # 持仓表
     pnl_by_stock = {p["stock_id"]: p for p in (today_pnl_positions or [])}
@@ -285,6 +286,7 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
     html = html.replace("{{HOLDINGS_ROWS}}", holdings_rows)
     html = html.replace("{{TRADES_SECTION}}", trades_section)
     html = html.replace("{{CHART_SRC}}", chart_data_url or "cid:chart_img")
+    html = html.replace("{{EQUITY_DATA}}", json.dumps(equity_data) if equity_data else "{}")
     html = html.replace("{{GENERATED_TIME}}", datetime.now().strftime("%Y-%m-%d %H:%M"))
     return html
 
@@ -328,6 +330,13 @@ def send_report(model_key=None):
 
     model_stats_section = _build_model_stats_table(sequences)
 
+    equity_data = {}
+    for key, seq in sequences.items():
+        ec = seq.get("equity_curve", [])
+        if ec:
+            display = key.replace("search_", "").replace("_exp_", " ")
+            equity_data[display] = ec
+
     html_body = build_report_html(
         date=date,
         model_display=model_display,
@@ -341,6 +350,7 @@ def send_report(model_key=None):
         today_pnl_total=today_pnl_total,
         today_pnl_positions=today_pnl_positions,
         model_stats_section=model_stats_section,
+        equity_data=equity_data,
     )
 
     msg = MIMEMultipart()
