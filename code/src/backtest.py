@@ -191,6 +191,7 @@ class BacktestEngine:
         self,
         initial_capital=1000000,
         commission=0.0003,
+        slippage=0.001,
         top_k=5,
         position_pct=0.95,
         log=False,
@@ -198,6 +199,7 @@ class BacktestEngine:
     ):
         self.initial_capital = initial_capital
         self.commission = commission
+        self.slippage = slippage
         self.top_k = top_k
         self.position_pct = position_pct
         self.log = log
@@ -227,15 +229,16 @@ class BacktestEngine:
             self._log_fh = None
 
     def buy(self, stock, price, value, date):
-        shares = int(value / price / 100) * 100
+        exec_price = price * (1 + self.slippage)
+        shares = int(value / exec_price / 100) * 100
         if shares == 0:
             return
-        cost = shares * price * (1 + self.commission)
+        cost = shares * exec_price * (1 + self.commission)
         if cost > self.cash:
-            shares = int(self.cash / price / (1 + self.commission) / 100) * 100
+            shares = int(self.cash / exec_price / (1 + self.commission) / 100) * 100
             if shares == 0:
                 return
-            cost = shares * price * (1 + self.commission)
+            cost = shares * exec_price * (1 + self.commission)
         self.cash -= cost
 
         if stock not in self.positions:
@@ -248,14 +251,16 @@ class BacktestEngine:
 
         self.positions[stock] = {"shares": new_shares, "cost": new_cost}
 
+        trade_cost = round(cost - shares * price, 2)
         self.trades.append(
             {
                 "date": date,
                 "action": "买入",
                 "stock": stock,
-                "price": price,
+                "price": round(exec_price, 4),
                 "shares": shares,
                 "amount": cost,
+                "trade_cost": trade_cost,
             }
         )
 
@@ -265,17 +270,20 @@ class BacktestEngine:
         shares = int(self.positions[stock]["shares"] * percent / 100) * 100
         if shares == 0:
             return
-        revenue = shares * price * (1 - self.commission)
+        exec_price = price * (1 - self.slippage)
+        revenue = shares * exec_price * (1 - self.commission)
         self.cash += revenue
 
+        trade_cost = round(shares * price - revenue, 2)
         self.trades.append(
             {
                 "date": date,
                 "action": "卖出",
                 "stock": stock,
-                "price": price,
+                "price": round(exec_price, 4),
                 "shares": shares,
                 "amount": revenue,
+                "trade_cost": trade_cost,
             }
         )
 
@@ -732,6 +740,7 @@ class ETFBacktester:
         position_pct: float = 0.95,
         initial_capital: float = 1000000,
         commission: float = 0.0003,
+        slippage: float = 0.001,
         first_rebalance_date: str = None,
         log: bool = False,
     ) -> BacktestResult:
@@ -782,6 +791,7 @@ class ETFBacktester:
         engine = BacktestEngine(
             initial_capital=initial_capital,
             commission=commission,
+            slippage=slippage,
             top_k=top_k,
             position_pct=position_pct,
             log=log,
@@ -877,6 +887,7 @@ def run_backtest(
     position_pct: float = 0.95,
     initial_capital: float = 1000000,
     commission: float = 0.0003,
+    slippage: float = 0.001,
     first_rebalance_date: str = None,
     device: str = "cuda",
     model_file: str = "best_model_sliding.pth",
@@ -949,6 +960,7 @@ def run_backtest(
         position_pct=position_pct,
         initial_capital=initial_capital,
         commission=commission,
+        slippage=slippage,
         first_rebalance_date=first_rebalance_date,
         log=log,
     )

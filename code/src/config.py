@@ -24,6 +24,9 @@ config = {
     "data_path": "./etf_data",
     "data_file": "etf_74_train.csv",
     "search_metric": "ndcg",
+    # 回测参数
+    "commission": 0.0003,   # 手续费率 (万分之三)
+    "slippage": 0.001,      # 滑点 (千分之一)
 }
 
 MODEL_CONFIGS = {

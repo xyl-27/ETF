@@ -179,7 +179,7 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
             cur_model = t.get('model_key', '')
             if cur_model and cur_model != prev_model:
                 section_display = re.sub(r'_\w+_exp_', ' ', cur_model)
-                trades_rows += f"""<tr class="section"><td colspan="8">▸ {section_display}</td></tr>"""
+                trades_rows += f"""<tr class="section"><td colspan="9">▸ {section_display}</td></tr>"""
                 prev_model = cur_model
             if t["action"] == "买入":
                 action_color = "#cc0000"
@@ -193,6 +193,13 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
                 name_display += f" ({cnt}/{total_exp_models})"
             shares_display = f"{t['shares']:,}" if t.get('shares') else "-"
             price_display = f"{t['price']:.3f}" if t.get('price') else "-"
+            tc = t.get('trade_cost')
+            if tc is not None and tc != 0:
+                tc_display = f"{tc:.0f}"
+                tc_style = "color: #cc0000;"
+            else:
+                tc_style = "color: #999;"
+                tc_display = "-"
             adv = t.get('advantage')
             if adv is not None:
                 adv_style = f"color: {'#cc0000' if adv >= 0 else '#009900'};"
@@ -211,8 +218,8 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
             else:
                 reb_style = "color: #999;"
                 reb_display = "-"
-            trades_rows += f"""<tr><td style="color:#888;">{cur_model}</td><td><span style="color:{action_color};font-weight:bold;">{t['action']}</span></td><td><a href="{_xueqiu_url(t['stock'])}" target="_blank" style="text-decoration:none;color:inherit;">{t['stock']}</a></td><td>{name_display}</td><td style="text-align:right;">{shares_display}</td><td style="text-align:right;">{price_display}</td><td style="text-align:right;{reb_style}">{reb_display}</td><td style="text-align:right;{adv_style}">{adv_display}</td></tr>"""
-        trades_section = f"""<h3>今日调仓</h3><table><thead><tr><th style="font-size:11px;">模型</th><th>操作</th><th>代码</th><th>名称</th><th style="text-align:right;">数量</th><th style="text-align:right;">价格</th><th style="text-align:right;">盈亏</th><th style="text-align:right;">优势</th></tr></thead><tbody>{trades_rows}</tbody></table>"""
+            trades_rows += f"""<tr><td style="color:#888;">{cur_model}</td><td><span style="color:{action_color};font-weight:bold;">{t['action']}</span></td><td><a href="{_xueqiu_url(t['stock'])}" target="_blank" style="text-decoration:none;color:inherit;">{t['stock']}</a></td><td>{name_display}</td><td style="text-align:right;">{shares_display}</td><td style="text-align:right;">{price_display}</td><td style="text-align:right;{tc_style}">{tc_display}</td><td style="text-align:right;{reb_style}">{reb_display}</td><td style="text-align:right;{adv_style}">{adv_display}</td></tr>"""
+        trades_section = f"""<h3>今日调仓</h3><table><thead><tr><th style="font-size:11px;">模型</th><th>操作</th><th>代码</th><th>名称</th><th style="text-align:right;">数量</th><th style="text-align:right;">价格</th><th style="text-align:right;">交易成本</th><th style="text-align:right;">盈亏</th><th style="text-align:right;">优势</th></tr></thead><tbody>{trades_rows}</tbody></table>"""
 
     # 指标
     mdd_detail = metrics.get("max_drawdown_details", {})
@@ -336,6 +343,9 @@ def send_report(model_key=None):
         if ec:
             display = key.replace("search_", "").replace("_exp_", " ")
             equity_data[display] = ec
+    hs300 = report.get("hs300_curve", [])
+    if hs300:
+        equity_data["沪深300"] = hs300
 
     html_body = build_report_html(
         date=date,

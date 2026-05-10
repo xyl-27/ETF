@@ -12,7 +12,7 @@ import base64
 import traceback
 import subprocess
 from datetime import datetime
-from typing import Optional, Dict, List, Any, Tuple
+from typing import Optional, Dict, List, Any, Tuple, Callable
 from pathlib import Path
 
 import torch
@@ -288,14 +288,16 @@ def _extract_drawdowns(vals, dates, max_periods=5):
 
 
 def run_backtest_sequence(
-    predictions_func,
     data_file: str,
     start_date: str,
     end_date: str,
+    predictions_func: Callable,
     top_k: int,
     rebalance_days: int,
     position_pct: float,
     initial_capital: float = 1000000,
+    commission: float = 0.0003,
+    slippage: float = 0.001,
 ) -> Dict[str, Any]:
     raw_df = pd.read_csv(data_file, dtype={"股票代码": str})
     raw_df["股票代码"] = raw_df["股票代码"].astype(str).str.zfill(6)
@@ -309,7 +311,8 @@ def run_backtest_sequence(
 
     engine = BacktestEngine(
         initial_capital=initial_capital,
-        commission=0.0003,
+        commission=commission,
+        slippage=slippage,
         top_k=top_k,
         position_pct=position_pct,
         log=False,
@@ -344,6 +347,8 @@ def run_backtest_sequence(
             trade["score"] = t["score"]
         if "advantage" in t:
             trade["advantage"] = t["advantage"]
+        if "trade_cost" in t:
+            trade["trade_cost"] = t["trade_cost"]
         trades.append(trade)
 
     positions = {}
@@ -701,56 +706,55 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
     history_dir = PROJECT_ROOT / "output" / "history_report"
     history_dir.mkdir(parents=True, exist_ok=True)
 
-    for rb_date in rebalance_dates:
-        ec_seg = [e for e in equity_curve if e["date"] <= rb_date]
+    for cur_date in sorted_dates:
+        ec_seg = [e for e in equity_curve if e["date"] <= cur_date]
         if len(ec_seg) < 1:
             continue
 
+        is_rebalance = cur_date in rebalance_dates
         today_total = ec_seg[-1]["total_value"]
         yesterday_total = ec_seg[-2]["total_value"] if len(ec_seg) >= 2 else today_total
-
-        today_ts = pd.Timestamp(rb_date)
-        # 用调仓日后第一个交易日的收盘价作为当前价
-        next_dates = raw_df[raw_df["日期"] > today_ts]["日期"].unique()
-        price_date = min(next_dates) if len(next_dates) > 0 else today_ts
+        today_ts = pd.Timestamp(cur_date)
 
         today_trades_list = []
-        for key, s in all_sequences.items():
-            seq_actual = [t for t in s.get("trades", []) if t["date"] == rb_date and t["action"] in ("买入", "卖出")]
-            for t in seq_actual:
-                t = {**t, "model_key": key, "name": etf_names.get(t["stock"], "")}
-                today_trades_list.append(t)
-            if seq_actual:
-                seq_buys = {t["stock"] for t in seq_actual if t["action"] == "买入"}
-                hist_positions = _rebuild_positions(s.get("trades", []), rb_date)
-                for sid, sp in hist_positions.items():
-                    if sid not in seq_buys:
-                        sub = raw_df[raw_df["股票代码"] == sid]
-                        tc_s = sub.loc[sub["日期"] == price_date, "收盘"]
-                        price = tc_s.values[0] if not tc_s.empty else 0
-                        today_trades_list.append({
-                            "action": "保持",
-                            "stock": sid,
-                            "shares": sp["shares"],
-                            "price": round(price, 4),
-                            "model_key": key,
-                            "name": etf_names.get(sid, ""),
-                        })
-        model_order = {key: i for i, key in enumerate(all_sequences.keys())}
-        today_trades_list.sort(key=lambda x: (model_order.get(x.get("model_key", ""), 999), {"买入": 0, "卖出": 1}.get(x["action"], 2)))
+        if is_rebalance:
+            next_dates = raw_df[raw_df["日期"] > today_ts]["日期"].unique()
+            price_date = min(next_dates) if len(next_dates) > 0 else today_ts
+            for key, s in all_sequences.items():
+                seq_actual = [t for t in s.get("trades", []) if t["date"] == cur_date and t["action"] in ("买入", "卖出")]
+                for t in seq_actual:
+                    t = {**t, "model_key": key, "name": etf_names.get(t["stock"], "")}
+                    today_trades_list.append(t)
+                if seq_actual:
+                    seq_buys = {t["stock"] for t in seq_actual if t["action"] == "买入"}
+                    hist_positions = _rebuild_positions(s.get("trades", []), cur_date)
+                    for sid, sp in hist_positions.items():
+                        if sid not in seq_buys:
+                            sub = raw_df[raw_df["股票代码"] == sid]
+                            tc_s = sub.loc[sub["日期"] == price_date, "收盘"]
+                            price = tc_s.values[0] if not tc_s.empty else 0
+                            today_trades_list.append({
+                                "action": "保持",
+                                "stock": sid,
+                                "shares": sp["shares"],
+                                "price": round(price, 4),
+                                "model_key": key,
+                                "name": etf_names.get(sid, ""),
+                            })
+            model_order = {key: i for i, key in enumerate(all_sequences.keys())}
+            today_trades_list.sort(key=lambda x: (model_order.get(x.get("model_key", ""), 999), {"买入": 0, "卖出": 1}.get(x["action"], 2)))
 
         # 前一次调仓日
         prev_rb_date = None
-        idx = rebalance_dates.index(rb_date)
-        if idx > 0:
-            prev_rb_date = rebalance_dates[idx - 1]
+        for rd in reversed(rebalance_dates):
+            if rd < cur_date:
+                prev_rb_date = rd
+                break
 
-        # 当前持仓 = 调仓前的持仓（日报在收盘后运行，展示调仓前仓位供次日决策）
         positions = _rebuild_positions(trades, prev_rb_date) if prev_rb_date else {}
 
-        # 调仓盈亏：从上次调仓日到本次调仓日的个股盈亏
         prev_close_prices = {}
-        if prev_rb_date:
+        if prev_rb_date and is_rebalance:
             prev_ts = pd.Timestamp(prev_rb_date)
             for sid in set(t["stock"] for t in today_trades_list):
                 sub = raw_df[raw_df["股票代码"] == sid]
@@ -768,25 +772,22 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
                     t["reb_pnl"] = None
 
         holdings = []
-        # 找前一个交易日：优先用 equity curve 的前一天，否则从行情数据取
-        if rb_date in sorted_dates and sorted_dates.index(rb_date) > 0:
-            yesterday_ts = pd.Timestamp(sorted_dates[sorted_dates.index(rb_date) - 1])
+        if cur_date in sorted_dates and sorted_dates.index(cur_date) > 0:
+            yesterday_ts = pd.Timestamp(sorted_dates[sorted_dates.index(cur_date) - 1])
         else:
             prev_dates = raw_df[raw_df["日期"] < today_ts]["日期"].unique()
             yesterday_ts = pd.Timestamp(max(prev_dates)) if len(prev_dates) > 0 else today_ts
 
-        today_buys = {t["stock"] for t in trades if t["date"] == rb_date and t["action"] == "买入"}
+        today_buys = {t["stock"] for t in trades if t["date"] == cur_date and t["action"] == "买入"}
 
-        # 每只持仓股的最新调仓价（优先取主序列今日买入/保持价）
         buy_prices = {}
         for t in today_trades_list:
             if t.get("model_key") == model_key and t["action"] in ("买入", "保持") and t.get("price", 0) > 0:
                 buy_prices[t["stock"]] = t["price"]
-        # 今日未交易的持仓（已被卖出或无操作），从历史交易中取最近一次买入/保持价
         for sid in list(positions.keys()):
             if sid not in buy_prices:
                 hist_trades = sorted(
-                    [t for t in trades if t["stock"] == sid and t["action"] == "买入" and t["date"] < rb_date],
+                    [t for t in trades if t["stock"] == sid and t["action"] == "买入" and t["date"] < cur_date],
                     key=lambda x: x["date"], reverse=True
                 )
                 if hist_trades:
@@ -856,20 +857,18 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
 
         metrics = _compute_metrics(ec_seg, initial_capital)
 
-        # 窗口指标 (5d, 1m)
         ec_by_dict = {e["date"]: e for e in ec_seg}
-        ec_sorted = sorted(ec_by_dict.keys())
-        today_dt = pd.Timestamp(rb_date)
+        ec_sorted_dates = sorted(ec_by_dict.keys())
+        today_dt = pd.Timestamp(cur_date)
         for wlabel, wdays in [("5d", 5), ("1m", 30)]:
             wcut = (today_dt - pd.Timedelta(days=wdays)).strftime("%Y-%m-%d")
-            wseg = [ec_by_dict[d] for d in ec_sorted if d >= wcut]
+            wseg = [ec_by_dict[d] for d in ec_sorted_dates if d >= wcut]
             if len(wseg) >= 2:
                 base = initial_capital if wseg[0]["date"] == ec_seg[0]["date"] else wseg[0]["total_value"]
                 wm = _compute_metrics(wseg, base)
                 if wm:
                     metrics[f"window_{wlabel}"] = wm
 
-        # 沪深300收益
         hs300_seg = hs300_raw[(hs300_raw["date"] >= pd.Timestamp(sorted_dates[0])) & (hs300_raw["date"] <= today_ts)]
         if len(hs300_seg) >= 2:
             hs300_ret = (hs300_seg["close"].iloc[-1] / hs300_seg["close"].iloc[0] - 1) * 100
@@ -878,59 +877,55 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
         metrics["hs300_return_pct"] = round(hs300_ret, 4)
         metrics["excess_return_pct"] = round(metrics["strategy_return_pct"] - hs300_ret, 4)
 
-        # 下一个调仓日（非末尾直接用列表下一个，末尾用交易日历计算）
-        rb_idx = rebalance_dates.index(rb_date)
-        if rb_idx + 1 < len(rebalance_dates):
-            next_rb = rebalance_dates[rb_idx + 1]
-        else:
+        next_rb = ""
+        for rd in rebalance_dates:
+            if rd > cur_date:
+                next_rb = rd
+                break
+        if not next_rb:
             next_rb = seq.get("metrics", {}).get("next_rebalance_date", "")
             if not next_rb:
                 try:
                     import pandas_market_calendars as mcal
                     xshg = mcal.get_calendar("XSHG")
                     start_ts = pd.Timestamp(rebalance_dates[0])
-                    look_end = pd.Timestamp(rb_date) + pd.Timedelta(days=365)
+                    look_end = pd.Timestamp(cur_date) + pd.Timedelta(days=365)
                     cal_dates = xshg.valid_days(start_date=start_ts, end_date=look_end, tz=None)
                     start_pos = cal_dates.get_loc(start_ts.normalize())
-                    current_pos = cal_dates.get_loc(pd.Timestamp(rb_date).normalize())
+                    current_pos = cal_dates.get_loc(pd.Timestamp(cur_date).normalize())
                     n_periods = (current_pos - start_pos) // rebalance_days
                     next_pos = start_pos + (n_periods + 1) * rebalance_days
                     next_rb = cal_dates[next_pos].strftime("%Y-%m-%d") if next_pos < len(cal_dates) else ""
                 except Exception:
                     next_rb = ""
 
-        # 构建简化版的报告HTML
         cash = today_total - sum(h["cost"] for h in holdings)
-
         today_pnl_total = round(sum(h["today_pnl"] for h in holdings), 2)
-
         today_pnl_positions = [
             {"stock_id": h["stock_id"], "shares": h["shares"], "pnl": h["today_pnl"]}
             for h in holdings
         ]
 
-        # 生成截止到该调仓日的收益曲线（绘制所有序列）
-        chart_data_url = _history_chart_b64(all_sequences, hs300_raw, rb_date, sorted_dates[0], initial_capital)
+        chart_data_url = _history_chart_b64(all_sequences, hs300_raw, cur_date, sorted_dates[0], initial_capital)
 
         from send_report import build_report_html, _build_model_stats_table
         hist_sequences = {}
         for hkey, hseq in all_sequences.items():
-            hist_trades = [t for t in hseq.get("trades", []) if t["date"] <= rb_date]
-            hist_positions = _rebuild_positions(hseq.get("trades", []), rb_date)
-            # 当日买入的用当日收盘价（浮盈0%），此前买入的用次日收盘价（避免浮盈0%）
+            hist_trades = [t for t in hseq.get("trades", []) if t["date"] <= cur_date]
+            hist_positions = _rebuild_positions(hseq.get("trades", []), cur_date)
             next_dates = raw_df[raw_df["日期"] > today_ts]["日期"].unique()
             price_date = min(next_dates) if len(next_dates) > 0 else today_ts
-            today_buys = {t["stock"] for t in hist_trades if t["date"] == rb_date and t["action"] == "买入"}
+            today_buys_hist = {t["stock"] for t in hist_trades if t["date"] == cur_date and t["action"] == "买入"}
             hist_current_prices = {}
             for sid, sp in hist_positions.items():
                 sub = raw_df[raw_df["股票代码"] == sid]
-                if sid in today_buys:
+                if sid in today_buys_hist:
                     tc_s = sub.loc[sub["日期"] == today_ts, "收盘"]
                 else:
                     tc_s = sub.loc[sub["日期"] == price_date, "收盘"]
                 if not tc_s.empty:
                     hist_current_prices[sid] = tc_s.values[0]
-            hist_ec = [e for e in hseq.get("equity_curve", []) if e["date"] <= rb_date]
+            hist_ec = [e for e in hseq.get("equity_curve", []) if e["date"] <= cur_date]
             if len(hist_ec) >= 2:
                 hist_metrics = _compute_metrics(hist_ec, initial_capital)
                 hs300_seg = hs300_raw[(hs300_raw["date"] >= pd.Timestamp(sorted_dates[0])) & (hs300_raw["date"] <= today_ts)]
@@ -939,12 +934,11 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
                 hist_metrics["excess_return_pct"] = round(hist_metrics["strategy_return_pct"] - hs300_ret, 4)
             else:
                 hist_metrics = {"strategy_return_pct": 0, "sharpe_ratio": 0, "max_drawdown_pct": 0, "hs300_return_pct": 0, "excess_return_pct": 0}
-            model_stats = _compute_model_stats(hist_trades, hist_current_prices, report_date=rb_date)
+            model_stats = _compute_model_stats(hist_trades, hist_current_prices, report_date=cur_date)
             ec_dict = {e["date"]: e["total_value"] for e in hseq.get("equity_curve", [])}
-            # 所有调仓期收益率（含当前期），从 equity curve 计算
             reb_period_rets = []
             for i, rd in enumerate(rebalance_dates):
-                if rd > rb_date:
+                if rd > cur_date:
                     break
                 cur_v = ec_dict.get(rd, 0)
                 if i == 0:
@@ -962,15 +956,22 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
             }
         model_stats_section = _build_model_stats_table(hist_sequences)
         hist_equity = {}
+        hs300_period = hs300_raw[(hs300_raw["date"] >= pd.Timestamp(sorted_dates[0])) & (hs300_raw["date"] <= pd.Timestamp(cur_date))]
+        if not hs300_period.empty:
+            hs300_init = float(hs300_period["close"].iloc[0])
+            hist_equity["沪深300"] = [
+                {"date": row["date"].strftime("%Y-%m-%d"), "total_value": round(float(row["close"]) / hs300_init * initial_capital, 2)}
+                for _, row in hs300_period.iterrows()
+            ]
         for hkey, hseq in all_sequences.items():
             ec = hseq.get("equity_curve", [])
-            ec_seg = [e for e in ec if e["date"] <= rb_date]
-            if ec_seg:
+            ec_seg_f = [e for e in ec if e["date"] <= cur_date]
+            if ec_seg_f:
                 disp = hkey.replace("search_", "").replace("_exp_", " ")
-                hist_equity[disp] = ec_seg
+                hist_equity[disp] = ec_seg_f
         try:
             html = build_report_html(
-                date=rb_date,
+                date=cur_date,
                 model_display="历史调仓" if not model_key else model_key.replace("search_", "").replace("_exp_", " "),
                 total_value=today_total,
                 cash=cash,
@@ -978,17 +979,18 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
                 trades_list=today_trades_list,
                 metrics=metrics,
                 next_rebalance=next_rb,
-                is_rebalance=True,
+                is_rebalance=is_rebalance,
                 today_pnl_total=today_pnl_total,
                 today_pnl_positions=today_pnl_positions,
                 chart_data_url=chart_data_url,
                 model_stats_section=model_stats_section,
                 equity_data=hist_equity,
             )
-            history_path = history_dir / f"{rb_date}.html"
+            suffix = "(调仓日)" if is_rebalance else ""
+            history_path = history_dir / f"{cur_date}{suffix}.html"
             history_path.write_text(html, encoding="utf-8")
         except Exception as e:
-            print(f"  [历史报告] {rb_date} 保存失败: {e}")
+            print(f"  [历史报告] {cur_date} 保存失败: {e}")
 
 
 def _compute_model_stats(trades, current_prices=None, report_date=None):
@@ -1113,6 +1115,7 @@ def daily_eval(
         single_models = []
         average_enabled = False
         voting_enabled = False
+        config = {"slippage": 0.001, "commission": 0.0003}
         if os.path.exists(str(MODEL_SELECTION_PATH)):
             single_models, master, average_enabled, voting_enabled = load_model_selection(str(MODEL_SELECTION_PATH))
             enabled_models = [m for m in single_models if m.get("enabled", True)]
@@ -1189,6 +1192,8 @@ def daily_eval(
                 rebalance_days=rebalance_days,
                 position_pct=position_pct,
                 initial_capital=initial_capital,
+                commission=config.get("commission", 0.0003),
+                slippage=config.get("slippage", 0.001),
             )
             sequences[model_key] = result
 
@@ -1219,6 +1224,8 @@ def daily_eval(
                 rebalance_days=rebalance_days,
                 position_pct=position_pct,
                 initial_capital=initial_capital,
+                commission=config.get("commission", 0.0003),
+                slippage=config.get("slippage", 0.001),
             )
             sequences["average"] = result
 
@@ -1271,6 +1278,8 @@ def daily_eval(
                 rebalance_days=rebalance_days,
                 position_pct=position_pct,
                 initial_capital=initial_capital,
+                commission=config.get("commission", 0.0003),
+                slippage=config.get("slippage", 0.001),
             )
             for t in result.get("trades", []):
                 if t.get("action") == "买入" and t["date"] in voting_pred_cache:
@@ -1491,6 +1500,18 @@ def daily_eval(
 
         next_rebalance = report_data["metrics"].get("next_rebalance_date", "")
 
+        hs300_curve = []
+        hs300_raw = raw_df[raw_df["股票代码"] == "510300.XSHG"].sort_values("日期")
+        if not hs300_raw.empty:
+            hs300_period = hs300_raw[(hs300_raw["日期"] >= pd.Timestamp(start_date)) & (hs300_raw["日期"] < pd.Timestamp(end_date))]
+            if not hs300_period.empty:
+                hs300_start_price = float(hs300_period["收盘"].iloc[0])
+                for _, row in hs300_period.iterrows():
+                    hs300_curve.append({
+                        "date": row["日期"].strftime("%Y-%m-%d"),
+                        "total_value": round(float(row["收盘"]) / hs300_start_price * initial_capital, 2),
+                    })
+
         report = {
             "date": latest_date_str,
             "is_rebalance_day": is_rebalance_day,
@@ -1502,6 +1523,7 @@ def daily_eval(
             "cash": report_data["cash"],
             "total_value": report_data["metrics"]["latest_value"],
             "sequences": sequences_summary,
+            "hs300_curve": hs300_curve,
         }
 
         # 计算持仓变动（相对上一次调仓）

@@ -101,7 +101,8 @@
         for (var key in allCurves) {
             var pts = allCurves[key];
             if (!pts || pts.length < 2) continue;
-            var color = colors[idx % colors.length];
+            var isHS = key.indexOf('300') >= 0;
+            var color = isHS ? '#7f8c8d' : colors[idx % colors.length];
             var data = pts.map(function(p) {
                 var d = new Date(p.date);
                 allDates.push(d);
@@ -113,12 +114,12 @@
                 data: data,
                 borderColor: color,
                 backgroundColor: color + '20',
-                borderWidth: key === 'average' || key === 'voting' ? 2.5 : 1.5,
-                borderDash: key === 'average' || key === 'voting' ? [6, 3] : [],
+                borderWidth: isHS ? 2 : (key === 'average' || key === 'voting' ? 2.5 : 1.5),
+                borderDash: isHS ? [4, 4] : (key === 'average' || key === 'voting' ? [6, 3] : []),
                 pointRadius: 0,
                 fill: false,
             });
-            idx++;
+            if (!isHS) idx++;
         }
 
         if (datasets.length === 0) return;
