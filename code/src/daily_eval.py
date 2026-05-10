@@ -512,6 +512,75 @@ def run_backtest_sequence(
             "positions": per_position_pnl,
         }
 
+    # -- NDCG & KS 检验 --
+    ndcg_list = []
+    ks_stat_list = []
+    ks_p_list = []
+    all_dates_sorted = sorted(raw_df["日期"].unique())
+    for ph in engine.predictions_history:
+        rb_date = ph["date"]
+        preds = ph["predictions"]
+        stock_ids = [p["stock_id"] for p in preds]
+        scores = [p["score"] for p in preds]
+
+        rb_ts = pd.Timestamp(rb_date)
+        next_rb = None
+        for ph2 in engine.predictions_history:
+            if ph2["date"] > rb_date:
+                next_rb = ph2["date"]
+                break
+
+        forward_rets = []
+        for sid in stock_ids:
+            sub = raw_df[raw_df["股票代码"] == sid]
+            close_rb = sub.loc[sub["日期"] == rb_ts, "收盘"]
+            if close_rb.empty:
+                forward_rets.append(0.0)
+                continue
+            close_rb_val = float(close_rb.values[0])
+            if next_rb:
+                next_ts = pd.Timestamp(next_rb)
+                close_next = sub.loc[sub["日期"] == next_ts, "收盘"]
+
+                if not close_next.empty:
+                    fwd = (float(close_next.values[0]) / close_rb_val - 1) * 100
+                else:
+                    fwd = 0.0
+            else:
+                idx = all_dates_sorted.index(rb_ts) if rb_ts in all_dates_sorted else -1
+                if idx >= 0 and idx + 5 < len(all_dates_sorted):
+                    end_ts = all_dates_sorted[idx + 5]
+                    close_end = sub.loc[sub["日期"] == end_ts, "收盘"]
+                    if not close_end.empty:
+                        fwd = (float(close_end.values[0]) / close_rb_val - 1) * 100
+                    else:
+                        fwd = 0.0
+                else:
+                    fwd = 0.0
+            forward_rets.append(fwd)
+
+        median_ret = float(np.median(forward_rets)) if forward_rets else 0.0
+        rel = [1 if r > median_ret else 0 for r in forward_rets]
+
+        k = min(top_k, len(preds))
+        if k > 0:
+            dcg = sum(rel[i] / np.log2(i + 2) for i in range(k))
+            ideal_rel = sorted(rel, reverse=True)
+            idcg = sum(ideal_rel[i] / np.log2(i + 2) for i in range(k))
+            ndcg_list.append(dcg / idcg if idcg > 0 else 0.0)
+
+        good_scores = [scores[i] for i in range(len(scores)) if forward_rets[i] > median_ret]
+        bad_scores = [scores[i] for i in range(len(scores)) if forward_rets[i] <= median_ret]
+        if len(good_scores) > 1 and len(bad_scores) > 1:
+            from scipy.stats import ks_2samp
+            ks_stat, ks_p = ks_2samp(good_scores, bad_scores)
+            ks_stat_list.append(ks_stat)
+            ks_p_list.append(ks_p)
+
+    avg_ndcg = round(float(np.mean(ndcg_list)), 4) if ndcg_list else None
+    avg_ks_stat = round(float(np.mean(ks_stat_list)), 4) if ks_stat_list else None
+    avg_ks_p = round(float(np.mean(ks_p_list)), 4) if ks_p_list else None
+
     # -- 整合 --
     metrics = {
         **overall,
@@ -521,6 +590,9 @@ def run_backtest_sequence(
         "end_date": end_date,
         "next_rebalance_date": next_rebalance_date,
         "total_trades": n_trades,
+        "ndcg": avg_ndcg,
+        "ks_stat": avg_ks_stat,
+        "ks_p": avg_ks_p,
         **windows,
     }
 
@@ -1171,16 +1243,16 @@ def daily_eval(
                 ranked = sorted(freq.items(), key=lambda x: (-x[1], -avg_score.get(x[0], 0)))
                 result = [{"rank": i+1, "stock_id": sid, "score": float(freq)} for i, (sid, freq) in enumerate(ranked)]
                 voting_pred_cache[date] = {"ranked": ranked, "top_k": top_k}
-                if len(result) < top_k:
+                if len(result) < top_k * 2:
                     first_picks = [p["stock_id"] for p in all_preds[0]]
                     existing = {r["stock_id"] for r in result}
                     for sid in first_picks:
                         if sid not in existing:
-                            result.append({"rank": len(result)+1, "stock_id": sid, "score": 0})
+                            result.append({"rank": len(result)+1, "stock_id": sid, "score": 0.0})
                             existing.add(sid)
-                        if len(result) >= top_k:
+                        if len(result) >= top_k * 2:
                             break
-                return result[:top_k]
+                return result
 
             result = run_backtest_sequence(
                 predictions_func=voting_pred_func,

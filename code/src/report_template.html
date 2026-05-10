@@ -1,0 +1,78 @@
+<html>
+<head>
+    <meta charset="utf-8">
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, sans-serif; color: #333; margin: 0; padding: 0; }
+        .header { background: #f8f9fa; padding: 10px 15px; border-bottom: 2px solid #007bff; }
+        .header h2 { margin: 0; font-size: 16px; color: #007bff; }
+        .header .m { font-size: 11px; color: #666; margin-top: 3px; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 5px 7px; border-bottom: 1px solid #eee; text-align: left; font-size: 12px; }
+        th { background: #f8f9fa; font-weight: 600; white-space: nowrap; }
+        .pos { color: #cc0000; }
+        .neg { color: #009900; }
+        .chart { margin-top: 15px; text-align: center; }
+        .chart img { max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 5px; }
+        .footer { margin-top: 20px; padding: 10px; border-top: 1px solid #eee; font-size: 11px; color: #999; text-align: center; }
+        h3 { margin: 14px 0 6px; font-size: 13px; }
+        .metrics { margin-bottom: 12px; }
+        .metrics table { width: 100%; }
+        .metrics td { width: 25%; text-align: center; padding: 6px; border: 1px solid #eee; background: #fafafa; }
+        .metrics .l { font-size: 11px; color: #888; }
+        .metrics .v { font-size: 14px; font-weight: bold; }
+        .total-bar { background: #e8f4fd; border: 1px solid #b8d4f0; border-radius: 6px; padding: 10px 15px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
+        .total-bar .amt { font-size: 22px; font-weight: bold; color: #007bff; }
+        .total-bar .dtl { font-size: 12px; color: #666; text-align: right; }
+        .total-bar .dtl .chg { font-weight: bold; }
+        tr.section td { background: #f0f4f8; padding: 4px 10px; font-size: 11px; font-weight: bold; color: #555; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h2>ETF 每日测评报告</h2>
+        <div class="m">{{MODEL_INFO}}</div>
+    </div>
+
+    {{TOTAL_BAR}}
+
+    <div class="metrics">
+        <table>
+            {{METRICS_ROWS}}
+        </table>
+    </div>
+
+    <h3>近期表现</h3>
+    <table>
+        <thead><tr><th>区间</th><th style="text-align:right;">收益</th><th style="text-align:right;">年化</th><th style="text-align:right;">日胜率</th><th style="text-align:right;">最大回撤</th></tr></thead>
+        <tbody>{{WINDOW_ROWS}}</tbody>
+    </table>
+
+    <h3>回撤区间</h3>
+    <table>
+        <thead><tr><th>开始</th><th>谷底</th><th>恢复</th><th style="text-align:right;">最大回撤</th><th style="text-align:right;">持续</th><th style="text-align:right;">恢复</th></tr></thead>
+        <tbody>{{DD_ROWS}}</tbody>
+    </table>
+
+    {{MODEL_STATS_SECTION}}
+
+    <h3>{{HOLDINGS_TITLE}}</h3>
+    <table>
+        <thead><tr>
+            <th>代码</th><th>名称</th><th style="text-align:right;">现价</th><th style="text-align:right;">成本价</th>
+            <th style="text-align:right;">股数</th><th style="text-align:right;">市值</th><th style="text-align:right;">仓位</th>
+            <th style="text-align:right;">今日</th><th style="text-align:right;">调仓以来</th>
+        </tr></thead>
+        <tbody>{{HOLDINGS_ROWS}}</tbody>
+    </table>
+
+    {{TRADES_SECTION}}
+
+    <div class="chart">
+        <img src="{{CHART_SRC}}" alt="收益曲线">
+    </div>
+
+    <div class="footer">
+        由 ETF 每日测评系统自动生成 | {{GENERATED_TIME}}
+    </div>
+</body>
+</html>

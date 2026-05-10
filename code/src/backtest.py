@@ -208,6 +208,7 @@ class BacktestEngine:
         self.positions_prev = {}
         self.equity_curve = []
         self.trades = []
+        self.predictions_history = []
         self._prev_total_value = initial_capital
 
         self._log_fh = None
@@ -394,6 +395,11 @@ class BacktestEngine:
                     if self.log:
                         self._write_log("预测失败，跳过调仓")
                     continue
+
+                self.predictions_history.append({
+                    "date": current_date.strftime("%Y-%m-%d"),
+                    "predictions": predictions,
+                })
 
                 pred_scores = [p["score"] for p in predictions]
                 score_std = float(np.std(pred_scores)) if len(pred_scores) > 1 else 1.0

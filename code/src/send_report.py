@@ -30,6 +30,9 @@ EMAIL_FROM = os.environ.get("EMAIL_FROM", SMTP_USER)
 EMAIL_TO = os.environ.get("EMAIL_TO", "1280745039@qq.com")
 
 
+TEMPLATE_PATH = PROJECT_ROOT / "code" / "src" / "report_template.html"
+
+
 def _xueqiu_url(stock_id):
     code = stock_id.split(".")[0]
     exchange = stock_id.split(".")[1] if "." in stock_id else ""
@@ -47,6 +50,12 @@ def _fmt_advantage(v):
     if isinstance(v, int):
         return f"{v:+d}"
     return f"{v:+.2f}"
+
+
+def _load_template():
+    if TEMPLATE_PATH.exists():
+        return TEMPLATE_PATH.read_text(encoding="utf-8")
+    return ""
 
 
 def _build_model_stats_table(sequences):
@@ -123,62 +132,33 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
         cost = h["cost"]
         price = h.get("price", 0)
         weight = (shares * price / total_value * 100) if total_value > 0 and price else 0
+        mkt_val = shares * price
         pnl = pnl_by_stock.get(code, {})
-        pnl_str = f"{pnl['pnl']:+.2f}" if pnl else ""
+        pnl_str = f"{pnl['pnl']:+.0f}" if pnl else ""
         pnl_color = "#cc0000" if (pnl and pnl["pnl"] >= 0) else "#009900"
-        price_str = f"{price:.4f}" if price else "-"
+        price_str = f"{price:.3f}" if price else "-"
         buy_price = h.get("buy_price", 0)
-        buy_price_str = f"{buy_price:.4f}" if buy_price else "-"
+        buy_price_str = f"{buy_price:.3f}" if buy_price else "-"
         rebal_pnl = round(shares * (price - buy_price), 2) if price and buy_price else 0
         rebal_cost = buy_price * shares
         rebal_pnl_pct = round(rebal_pnl / rebal_cost * 100, 2) if rebal_cost > 0 else 0
-        rebal_str = f"{rebal_pnl:+.2f} ({rebal_pnl_pct:+.2f}%)"
+        rebal_str = f"{rebal_pnl:+.0f} ({rebal_pnl_pct:+.2f}%)"
         rebal_color = "#cc0000" if rebal_pnl >= 0 else "#009900"
-        holdings_rows += f"""
-        <tr>
-            <td><a href="{_xueqiu_url(code)}" target="_blank" style="text-decoration: none; color: inherit;">{code}</a></td>
-            <td>{name}</td>
-            <td style="text-align: right;">{price_str}</td>
-            <td style="text-align: right;">{buy_price_str}</td>
-            <td style="text-align: right;">{shares:,}</td>
-            <td style="text-align: right;">{cost:,.2f}</td>
-            <td style="text-align: right; font-weight: bold;">{weight:.2f}%</td>
-        <td style="text-align: right; color: {pnl_color}; font-weight: bold;">{pnl_str}</td>
-        <td style="text-align: right; font-weight: bold; color: {rebal_color};">{rebal_str}</td>
-    </tr>
-    """
+        holdings_rows += f"""<tr><td><a href="{_xueqiu_url(code)}" target="_blank" style="text-decoration:none;color:inherit;">{code}</a></td><td>{name}</td><td style="text-align:right;">{price_str}</td><td style="text-align:right;">{buy_price_str}</td><td style="text-align:right;">{shares:,}</td><td style="text-align:right;">{mkt_val:,.0f}</td><td style="text-align:right;font-weight:bold;">{weight:.2f}%</td><td style="text-align:right;color:{pnl_color};font-weight:bold;">{pnl_str}</td><td style="text-align:right;font-weight:bold;color:{rebal_color};">{rebal_str}</td></tr>"""
 
     cash_weight = (cash / total_value * 100) if total_value > 0 else 0
-    holdings_rows += f"""
-    <tr style="color: #999;">
-        <td>现金</td>
-        <td>未投资资金</td>
-        <td style="text-align: right;">-</td>
-        <td style="text-align: right;">-</td>
-        <td style="text-align: right;">-</td>
-        <td style="text-align: right;">{cash:,.2f}</td>
-        <td style="text-align: right;">{cash_weight:.2f}%</td>
-        <td style="text-align: right;">-</td>
-        <td style="text-align: right;">-</td>
-    </tr>
-    """
+    holdings_rows += f"""<tr style="color:#999;"><td>现金</td><td>未投资资金</td><td style="text-align:right;">-</td><td style="text-align:right;">-</td><td style="text-align:right;">-</td><td style="text-align:right;">{cash:,.0f}</td><td style="text-align:right;">{cash_weight:.2f}%</td><td style="text-align:right;">-</td><td style="text-align:right;">-</td></tr>"""
 
     pnl_total_color = "#cc0000" if today_pnl_total >= 0 else "#009900"
     total_rebal_pnl = sum(round(h["shares"] * (h["price"] - h.get("buy_price", 0)), 2) for h in holdings if h.get("price") and h.get("buy_price"))
     total_rebal_cost = sum(h.get("buy_price", 0) * h["shares"] for h in holdings if h.get("price") and h.get("buy_price"))
     total_rebal_pnl_pct = round(total_rebal_pnl / total_rebal_cost * 100, 2) if total_rebal_cost > 0 else 0
     rebal_total_color = "#cc0000" if total_rebal_pnl >= 0 else "#009900"
-    holdings_rows += f"""
-    <tr style="font-weight: bold; border-top: 2px solid #333;">
-        <td colspan="7" style="text-align: right;">总计盈亏</td>
-        <td style="text-align: right; color: {pnl_total_color};">{today_pnl_total:+.2f}</td>
-        <td style="text-align: right; color: {rebal_total_color};">{total_rebal_pnl:+.2f} ({total_rebal_pnl_pct:+.2f}%)</td>
-    </tr>
-    """
+    holdings_rows += f"""<tr style="font-weight:bold;border-top:2px solid #333;"><td colspan="6" style="text-align:right;">合计</td><td style="text-align:right;font-weight:bold;">{(total_value - cash) / total_value * 100:.2f}%</td><td style="text-align:right;color:{pnl_total_color};">{today_pnl_total:+.0f}</td><td style="text-align:right;color:{rebal_total_color};">{total_rebal_pnl:+.0f} ({total_rebal_pnl_pct:+.2f}%)</td></tr>"""
 
     # 交易表
-    trades_rows = ""
-    if trades_list:
+    trades_section = ""
+    if trades_list and any(t["action"] in ("买入", "卖出") for t in trades_list):
         stock_model_count = {}
         exp_models = set()
         for t in trades_list:
@@ -192,13 +172,13 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
         stock_model_count = {s: len(ms) for s, ms in stock_model_count.items()}
         total_exp_models = len(exp_models)
 
+        trades_rows = ""
         prev_model = None
         for t in trades_list:
             cur_model = t.get('model_key', '')
             if cur_model and cur_model != prev_model:
                 section_display = re.sub(r'_\w+_exp_', ' ', cur_model)
-                trades_rows += f"""
-            <tr style="background-color: #f0f4f8;"><td colspan="8" style="padding: 4px 10px; font-size: 11px; font-weight: bold; color: #555;">▸ {section_display}</td></tr>"""
+                trades_rows += f"""<tr class="section"><td colspan="8">▸ {section_display}</td></tr>"""
                 prev_model = cur_model
             if t["action"] == "买入":
                 action_color = "#cc0000"
@@ -211,7 +191,7 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
             if cnt > 1 and total_exp_models:
                 name_display += f" ({cnt}/{total_exp_models})"
             shares_display = f"{t['shares']:,}" if t.get('shares') else "-"
-            price_display = f"{t['price']:.4f}" if t.get('price') else "-"
+            price_display = f"{t['price']:.3f}" if t.get('price') else "-"
             adv = t.get('advantage')
             if adv is not None:
                 adv_style = f"color: {'#cc0000' if adv >= 0 else '#009900'};"
@@ -226,23 +206,12 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
                 pct = reb if reb is not None else reb_pct
                 amt = reb_amt if reb_amt is not None else 0
                 reb_style = f"color: {'#cc0000' if pct >= 0 else '#009900'};"
-                reb_display = f"{amt:+.2f} ({pct:+.2f}%)"
+                reb_display = f"{amt:+.0f} ({pct:+.2f}%)"
             else:
                 reb_style = "color: #999;"
                 reb_display = "-"
-            trades_rows += f"""
-            <tr>
-                <td style="font-size: 11px; color: #888;">{cur_model}</td>
-                <td><span style="color: {action_color}; font-weight: bold;">{t['action']}</span></td>
-                <td><a href="{_xueqiu_url(t['stock'])}" target="_blank" style="text-decoration: none; color: inherit;">{t['stock']}</a></td>
-                <td>{name_display}</td>
-                <td style="text-align: right;">{shares_display}</td>
-                <td style="text-align: right;">{price_display}</td>
-                <td style="text-align: right; {reb_style}">{reb_display}</td>
-                <td style="text-align: right; {adv_style}">{adv_display}</td>
-            </tr>"""
-    else:
-        trades_rows = "<tr><td colspan='8' style='color: #999; text-align: center;'>无调仓操作</td></tr>"
+            trades_rows += f"""<tr><td style="color:#888;">{cur_model}</td><td><span style="color:{action_color};font-weight:bold;">{t['action']}</span></td><td><a href="{_xueqiu_url(t['stock'])}" target="_blank" style="text-decoration:none;color:inherit;">{t['stock']}</a></td><td>{name_display}</td><td style="text-align:right;">{shares_display}</td><td style="text-align:right;">{price_display}</td><td style="text-align:right;{reb_style}">{reb_display}</td><td style="text-align:right;{adv_style}">{adv_display}</td></tr>"""
+        trades_section = f"""<h3>今日调仓</h3><table><thead><tr><th style="font-size:11px;">模型</th><th>操作</th><th>代码</th><th>名称</th><th style="text-align:right;">数量</th><th style="text-align:right;">价格</th><th style="text-align:right;">盈亏</th><th style="text-align:right;">优势</th></tr></thead><tbody>{trades_rows}</tbody></table>"""
 
     # 指标
     mdd_detail = metrics.get("max_drawdown_details", {})
@@ -252,17 +221,9 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
     dd_rows = ""
     for dp in dd_periods:
         recovery = dp.get("recovery") or "进行中"
-        dd_rows += f"""
-            <tr>
-                <td>{dp['start']}</td>
-                <td>{dp['trough']}</td>
-                <td>{recovery}</td>
-                <td style="text-align: right;">{dp['depth_pct']:.2f}%</td>
-                <td style="text-align: right;">{dp['duration_days']}天</td>
-                <td style="text-align: right;">{dp.get('recovery_days') or '-'}天</td>
-            </tr>"""
+        dd_rows += f"""<tr><td>{dp['start']}</td><td>{dp['trough']}</td><td>{recovery}</td><td style="text-align:right;">{dp['depth_pct']:.2f}%</td><td style="text-align:right;">{dp['duration_days']}天</td><td style="text-align:right;">{dp.get('recovery_days') or '-'}天</td></tr>"""
     if not dd_rows:
-        dd_rows = "<tr><td colspan='6' style='color: #999; text-align: center;'>暂无回撤</td></tr>"
+        dd_rows = "<tr><td colspan='6' style='color:#999;text-align:center;'>暂无回撤</td></tr>"
 
     win_rate = metrics.get("daily_win_rate")
     win_rate_str = f"{win_rate*100:.1f}%" if isinstance(win_rate, (int, float)) else ""
@@ -277,174 +238,55 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
             w_win = w.get("daily_win_rate", 0)
             w_win_str = f"{w_win*100:.1f}%" if isinstance(w_win, (int, float)) else ""
             w_dd = w.get("max_drawdown_pct", 0)
-            window_rows += f"""
-            <tr>
-                <td>{window_labels.get(wkey, wkey)}</td>
-                <td style="text-align: right; color: {'#cc0000' if w_ret >= 0 else '#009900'}; font-weight: bold;">{_pct(w_ret)}</td>
-                <td style="text-align: right;">{_pct(w_ann)}</td>
-                <td style="text-align: right;">{w_win_str}</td>
-                <td style="text-align: right;">{w_dd:.2f}%</td>
-            </tr>"""
+            window_rows += f"""<tr><td>{window_labels.get(wkey, wkey)}</td><td style="text-align:right;color:{'#cc0000' if w_ret >= 0 else '#009900'};font-weight:bold;">{_pct(w_ret)}</td><td style="text-align:right;">{_pct(w_ann)}</td><td style="text-align:right;">{w_win_str}</td><td style="text-align:right;">{w_dd:.2f}%</td></tr>"""
 
-    return f"""
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <style>
-            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; }}
-            .header {{ background-color: #f8f9fa; padding: 15px; border-bottom: 2px solid #007bff; margin-bottom: 20px; }}
-            .header h2 {{ margin: 0; color: #007bff; }}
-            .header .model {{ font-size: 0.9em; color: #666; margin-top: 5px; }}
-            .metrics {{ display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 20px; }}
-            .metric-box {{ flex: 1; min-width: 100px; padding: 10px; background: #fff; border: 1px solid #ddd; border-radius: 5px; text-align: center; }}
-            .metric-box .label {{ font-size: 0.85em; color: #666; }}
-            .metric-box .value {{ font-size: 1.1em; font-weight: bold; color: #333; }}
-            .value.pos {{ color: #cc0000; }}
-            .value.neg {{ color: #009900; }}
-            table {{ width: 100%; border-collapse: collapse; margin-bottom: 20px; }}
-            th, td {{ padding: 8px 10px; border-bottom: 1px solid #eee; text-align: left; }}
-            th {{ background-color: #f8f9fa; font-weight: 600; }}
-            .chart {{ margin-top: 20px; text-align: center; }}
-            .chart img {{ max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 5px; }}
-            .footer {{ margin-top: 30px; padding-top: 15px; border-top: 1px solid #eee; font-size: 0.85em; color: #999; text-align: center; }}
-        </style>
-    </head>
-    <body>
-        <div class="header">
-            <h2>ETF 每日测评报告</h2>
-            <div class="model">模型: {model_display} | 日期: {date} | 下个调仓日: {next_rebalance}</div>
-        </div>
+    # 账户总值栏
+    sr = metrics.get("strategy_return_pct", 0)
+    total_pnl_color = "#cc0000" if sr >= 0 else "#009900"
+    today_pnl_color = "#cc0000" if today_pnl_total >= 0 else "#009900"
+    today_pnl_pct = round(today_pnl_total / (total_value - today_pnl_total) * 100, 2) if (total_value - today_pnl_total) > 0 else 0
+    init_cap = total_value / (1 + sr / 100) if sr != -100 else total_value
+    total_pnl_abs = round(total_value - init_cap, 2)
+    total_bar = f"""<div class="total-bar"><div><div style="font-size:12px;color:#666;">账户总值</div><div class="amt">¥{total_value:,.2f}</div></div><div class="dtl"><div>今日 <span class="chg {today_pnl_color}">{today_pnl_total:+.0f} ({today_pnl_pct:+.2f}%)</span></div><div style="font-size:11px;">累计收益 <span class="chg {total_pnl_color}">{total_pnl_abs:+,.0f} ({sr:+.2f}%)</span></div></div></div>"""
 
-        <div class="metrics">
-            <div class="metric-box">
-                <div class="label">策略收益</div>
-                <div class="value {'pos' if metrics['strategy_return_pct'] >= 0 else 'neg'}">
-                    {metrics['strategy_return_pct']:+.2f}%
-                </div>
-            </div>
-            <div class="metric-box">
-                <div class="label">年化收益</div>
-                <div class="value {'pos' if metrics.get('annualized_return_pct', 0) >= 0 else 'neg'}">
-                    {_pct(metrics.get('annualized_return_pct', 0))}
-                </div>
-            </div>
-            <div class="metric-box">
-                <div class="label">沪深300</div>
-                <div class="value {'pos' if metrics.get('hs300_return_pct', 0) >= 0 else 'neg'}">
-                    {_pct(metrics.get('hs300_return_pct', 0))}
-                </div>
-            </div>
-            <div class="metric-box">
-                <div class="label">超额收益</div>
-                <div class="value {'pos' if metrics.get('excess_return_pct', 0) >= 0 else 'neg'}">
-                    {_pct(metrics.get('excess_return_pct', 0))}
-                </div>
-            </div>
-            <div class="metric-box">
-                <div class="label">日胜率</div>
-                <div class="value">{win_rate_str}</div>
-            </div>
-            <div class="metric-box">
-                <div class="label">最大回撤</div>
-                <div class="value">{metrics.get('max_drawdown_pct', 0):.2f}%</div>
-            </div>
-            <div class="metric-box">
-                <div class="label">夏普比率</div>
-                <div class="value">{metrics.get('sharpe_ratio', 0):.2f}</div>
-            </div>
-            <div class="metric-box">
-                <div class="label">卡玛比率</div>
-                <div class="value">{metrics.get('calmar_ratio', 0):.2f}</div>
-            </div>
-            <div class="metric-box">
-                <div class="label">索提诺</div>
-                <div class="value">{metrics.get('sortino_ratio', 0):.2f}</div>
-            </div>
+    # 指标 3x4 表格
+    sr_v = _pct(metrics.get("strategy_return_pct", 0))
+    ar_v = _pct(metrics.get("annualized_return_pct", 0))
+    hs_v = _pct(metrics.get("hs300_return_pct", 0))
+    er_v = _pct(metrics.get("excess_return_pct", 0))
+    wr_v = win_rate_str
+    md_v = f"{metrics.get('max_drawdown_pct', 0):.2f}%"
+    sh_v = f"{metrics.get('sharpe_ratio', 0):.2f}"
+    ca_v = f"{metrics.get('calmar_ratio', 0):.2f}"
+    so_v = f"{metrics.get('sortino_ratio', 0):.2f}"
+    av_v = f"{metrics.get('annualized_volatility_pct', 0):.2f}%"
+    td_v = str(metrics.get("total_days", 0))
+    cs_v = f"¥{cash:,.0f}"
+    def _cell(label, val, clr="#333"):
+        return f"<td><div class=\"l\">{label}</div><div class=\"v\" style=\"color:{clr};\">{val}</div></td>"
+    def _clr(v):
+        if v.startswith("+"): return "#cc0000"
+        if v.startswith("-"): return "#009900"
+        return "#333"
+    r1 = _cell("策略收益", sr_v, _clr(sr_v)) + _cell("年化收益", ar_v, _clr(ar_v)) + _cell("沪深300", hs_v, _clr(hs_v)) + _cell("超额收益", er_v, _clr(er_v))
+    r2 = _cell("日胜率", wr_v) + _cell("最大回撤", md_v) + _cell("夏普比率", sh_v) + _cell("卡玛比率", ca_v)
+    r3 = _cell("索提诺", so_v) + _cell("年化波动", av_v) + _cell("总交易日", td_v) + _cell("现金", cs_v)
+    metrics_rows = f"<tr>{r1}</tr><tr>{r2}</tr><tr>{r3}</tr>"
 
-        <h3 style="font-size: 14px;">近期表现</h3>
-        <table style="font-size: 12px;">
-            <thead>
-                <tr>
-                    <th>区间</th>
-                    <th style="text-align: right;">收益</th>
-                    <th style="text-align: right;">年化</th>
-                    <th style="text-align: right;">日胜率</th>
-                    <th style="text-align: right;">最大回撤</th>
-                </tr>
-            </thead>
-            <tbody>
-                {window_rows}
-            </tbody>
-        </table>
-
-        <h3 style="font-size: 14px;">回撤区间</h3>
-        <table style="font-size: 12px;">
-            <thead>
-                <tr>
-                    <th>开始</th>
-                    <th>谷底</th>
-                    <th>恢复</th>
-                    <th style="text-align: right;">最大回撤</th>
-                    <th style="text-align: right;">持续时间</th>
-                    <th style="text-align: right;">恢复天数</th>
-                </tr>
-            </thead>
-            <tbody>
-                {dd_rows}
-            </tbody>
-        </table>
-
-        {model_stats_section}
-
-        <h3 style="font-size: 14px;">当前持仓 ({len(holdings)} 只)</h3>
-        <table style="font-size: 12px;">
-            <thead>
-                <tr>
-                    <th>代码</th>
-                    <th>名称</th>
-                    <th style="text-align: right;">价格</th>
-                    <th style="text-align: right;">成交价</th>
-                    <th style="text-align: right;">股数</th>
-                    <th style="text-align: right;">成本</th>
-                    <th style="text-align: right;">仓位</th>
-                    <th style="text-align: right;">今日盈亏</th>
-                    <th style="text-align: right;">调仓盈亏</th>
-                </tr>
-            </thead>
-            <tbody>
-                {holdings_rows}
-            </tbody>
-        </table>
-
-        <h3 style="font-size: 14px;">今日调仓</h3>
-        <table style="font-size: 12px;">
-            <thead>
-                <tr>
-                    <th style="font-size: 11px;">模型</th>
-                    <th>操作</th>
-                    <th>代码</th>
-                    <th>名称</th>
-                    <th style="text-align: right;">数量</th>
-                    <th style="text-align: right;">价格</th>
-                    <th style="text-align: right;">调仓盈亏</th>
-                    <th style="text-align: right;">优势</th>
-                </tr>
-            </thead>
-            <tbody>
-                {trades_rows}
-            </tbody>
-        </table>
-
-        <div class="chart">
-            <img src="{chart_data_url or 'cid:chart_img'}" alt="收益曲线">
-        </div>
-
-        <div class="footer">
-            由 ETF 每日测评系统自动生成 | {datetime.now().strftime("%Y-%m-%d %H:%M")}
-        </div>
-    </body>
-    </html>
-    """
+    # 填充模板
+    html = _load_template()
+    html = html.replace("{{MODEL_INFO}}", f"模型: {model_display} | 日期: {date} | 下个调仓日: {next_rebalance}")
+    html = html.replace("{{TOTAL_BAR}}", total_bar)
+    html = html.replace("{{METRICS_ROWS}}", metrics_rows)
+    html = html.replace("{{WINDOW_ROWS}}", window_rows)
+    html = html.replace("{{DD_ROWS}}", dd_rows)
+    html = html.replace("{{MODEL_STATS_SECTION}}", model_stats_section)
+    html = html.replace("{{HOLDINGS_TITLE}}", f"当前持仓 ({len(holdings)} 只)")
+    html = html.replace("{{HOLDINGS_ROWS}}", holdings_rows)
+    html = html.replace("{{TRADES_SECTION}}", trades_section)
+    html = html.replace("{{CHART_SRC}}", chart_data_url or "cid:chart_img")
+    html = html.replace("{{GENERATED_TIME}}", datetime.now().strftime("%Y-%m-%d %H:%M"))
+    return html
 
 
 def send_report(model_key=None):
