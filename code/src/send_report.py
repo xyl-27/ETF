@@ -307,12 +307,47 @@ def _compute_health_score(model_data):
     }
 
 
+def _build_pred_signals_table(seq_data, report_date):
+    """从 predictions_history 构建预测信号表"""
+    ph_list = seq_data.get("predictions_history", [])
+    if not ph_list:
+        return ""
+
+    # 找最新的调仓日预测
+    latest_ph = None
+    for ph in reversed(ph_list):
+        if ph.get("predictions"):
+            latest_ph = ph
+            break
+    if not latest_ph:
+        return ""
+
+    preds = latest_ph["predictions"]
+    ph_date = latest_ph["date"]
+    cutoff_idx = min(3, len(preds) - 1) if preds else 0
+    cutoff_score = preds[cutoff_idx]["score"] if preds and cutoff_idx >= 0 else 0
+    score_std = max(np.std([p["score"] for p in preds]), 1e-12) if len(preds) > 1 else 1.0
+
+    rows = ""
+    for p in preds:
+        rank = p["rank"]
+        code = p["stock_id"]
+        score = p["score"]
+        advantage = (score - cutoff_score) / score_std
+        adv_str = f"{advantage:+.4f}"
+        adv_clr = "#cc0000" if advantage >= 0 else "#009900"
+        score_str = f"{score:.4f}"
+        rows += f"""<tr><td style="text-align:right;font-weight:bold;">{rank}</td><td><a href="{_xueqiu_url(code)}" target="_blank" style="text-decoration:none;color:inherit;">{code}</a></td><td style="text-align:right;font-family:monospace;">{score_str}</td><td style="text-align:right;font-family:monospace;color:{adv_clr};font-weight:bold;">{adv_str}</td></tr>"""
+
+    return f"""<h3>预测信号 ({ph_date})</h3><table><thead><tr><th style="text-align:right;">排名</th><th>代码</th><th style="text-align:right;">Score</th><th style="text-align:right;">优势</th></tr></thead><tbody>{rows}</tbody></table>"""
+
+
 def build_report_html(*, date, model_display, total_value, cash, holdings,
                       trades_list, metrics, next_rebalance, is_rebalance,
                       today_pnl_total, today_pnl_positions=None,
                       chart_data_url=None, model_stats_section="",
-                      equity_data=None, scatter_section="", health_section="",
-                      trade_mode="open"):
+                       equity_data=None, scatter_section="", health_section="",
+                       trade_mode="open", pred_signals_section=""):
     """构建报告HTML，各组件已预先准备好"""
     # 持仓表
     pnl_by_stock = {p["stock_id"]: p for p in (today_pnl_positions or [])}
@@ -512,6 +547,7 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
     html = html.replace("{{TRADES_SECTION}}", trades_section)
     html = html.replace("{{CHART_SRC}}", chart_data_url or "cid:chart_img")
     html = html.replace("{{SCATTER_SECTION}}", scatter_section)
+    html = html.replace("{{PRED_SIGNALS_SECTION}}", pred_signals_section)
     html = html.replace("{{EQUITY_DATA}}", json.dumps(equity_data) if equity_data else "{}")
     html = html.replace("{{GENERATED_TIME}}", datetime.now().strftime("%Y-%m-%d %H:%M"))
     return html
@@ -575,6 +611,9 @@ def send_report(model_key=None):
 
     trade_mode = report.get("trade_mode", "open")
 
+    # 预测信号表
+    pred_signals_section = _build_pred_signals_table(seq_data, date)
+
     html_body = build_report_html(
         date=date,
         model_display=model_display,
@@ -591,6 +630,7 @@ def send_report(model_key=None):
         equity_data=equity_data,
         health_section=health_section,
         trade_mode=trade_mode,
+        pred_signals_section=pred_signals_section,
     )
 
     msg = MIMEMultipart()

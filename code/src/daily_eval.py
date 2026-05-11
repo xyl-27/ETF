@@ -798,58 +798,7 @@ def _build_scatter_section(scatter_data, cur_date):
     plt.close(fig)
     b64 = base64.b64encode(buf.getvalue()).decode()
 
-    # -- 多元线性回归 --
-    import statsmodels.api as sm
-    reg_rows = ""
-    var_keys = ["ksp", "ic", "ndcg", "mrr"]
-    var_labels = ["KS-p", "Rank IC", "NDCG", "MRR"]
-    for ai, m in enumerate(models):
-        p = pairs.get(m)
-        if not p or len(p["ret"]) < len(var_keys) + 2:
-            reg_rows += f"<tr><td>{labels[ai]}</td><td colspan='8'>数据不足</td></tr>"
-            continue
-        X = np.column_stack([np.array(p[k]) for k in var_keys])
-        y = np.array(p["ret"])
-        mask = ~np.isnan(X).any(axis=1) & ~np.isnan(y)
-        X, y = X[mask], y[mask]
-        if len(y) < len(var_keys) + 2:
-            reg_rows += f"<tr><td>{labels[ai]}</td><td colspan='8'>数据不足</td></tr>"
-            continue
-        Xc = sm.add_constant(X)
-        model = sm.OLS(y, Xc).fit()
-        def _p_star(pv):
-            if pv < 0.001: return '***'
-            if pv < 0.01: return '**'
-            if pv < 0.05: return '*'
-            return ''
-        f_p = model.f_pvalue
-        coef_cells = ""
-        for j, vl in enumerate(var_labels):
-            c = model.params[j + 1]
-            cp = model.pvalues[j + 1]
-            s = _p_star(cp)
-            coef_cells += f"<td style='text-align:right;font-size:11px;'>{c:+.4f}{s}<br/><span style='font-size:9px;color:#888;'>p={_fmt_p(cp)}</span></td>"
-        reg_rows += f"<tr><td style='font-size:11px;'>{labels[ai]}</td>"
-        reg_rows += f"<td style='text-align:right;font-size:11px;'>{model.rsquared:.4f}</td>"
-        reg_rows += f"<td style='text-align:right;font-size:11px;'>{model.rsquared_adj:.4f}</td>"
-        reg_rows += f"<td style='text-align:right;font-size:11px;'>F={model.fvalue:.3f}<br/><span style='font-size:9px;color:#888;'>p={_fmt_p(f_p)}</span>{_p_star(f_p)}</td>"
-        reg_rows += coef_cells + "</tr>"
-    var_headers = "".join(f"<th style='text-align:right;font-size:11px;'>{vl}</th>" for vl in var_labels)
-    reg_table = f"""
-    <h3 style='margin-top:18px;font-size:13px;'>多元线性回归（策略收益 ~ KS-p + Rank IC + NDCG + MRR）</h3>
-    <table style='width:100%;border-collapse:collapse;font-size:11px;'>
-        <thead><tr>
-            <th style='text-align:left;font-size:11px;'>模型</th>
-            <th style='text-align:right;font-size:11px;'>R²</th>
-            <th style='text-align:right;font-size:11px;'>调整 R²</th>
-            <th style='text-align:right;font-size:11px;'>F 检验</th>
-            {var_headers}
-        </tr></thead>
-        <tbody>{reg_rows}</tbody>
-    </table>
-    <p style='font-size:10px;color:#888;'>*=p&lt;0.05 &nbsp; **=p&lt;0.01 &nbsp; ***=p&lt;0.001</p>
-    """
-    return f'<h3>相关性分析</h3><div class="scatter-section"><img src="data:image/png;base64,{b64}" style="max-width:100%;height:auto;border:1px solid #ddd;border-radius:5px;" /></div>{reg_table}'
+    return f'<h3>相关性分析</h3><div class="scatter-section"><img src="data:image/png;base64,{b64}" style="max-width:100%;height:auto;border:1px solid #ddd;border-radius:5px;" /></div>'
 
 
 BEST_CONFIG = [
@@ -1907,6 +1856,7 @@ def daily_eval(
                 "model_stats": model_stats,
                 "equity_curve": seq.get("equity_curve", []),
                 "skipped_trades": seq.get("skipped_trades", []),
+                "predictions_history": seq.get("predictions_history", []),
             }
 
         next_rebalance = report_data["metrics"].get("next_rebalance_date", "")
@@ -2426,6 +2376,7 @@ def run_from_predictions(
                 "model_stats": model_stats,
                 "equity_curve": seq.get("equity_curve", []),
                 "skipped_trades": seq.get("skipped_trades", []),
+                "predictions_history": seq.get("predictions_history", []),
             }
 
         today_pnl_data = report_data.get("today_pnl", {})
@@ -2598,6 +2549,7 @@ def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capit
                 "model_stats": model_stats,
                 "equity_curve": seq.get("equity_curve", []),
                 "skipped_trades": seq.get("skipped_trades", []),
+                "predictions_history": seq.get("predictions_history", []),
             }
 
         # HS300 基准曲线
