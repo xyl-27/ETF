@@ -518,84 +518,79 @@ def run_backtest_sequence(
             "positions": per_position_pnl,
         }
 
-    # -- NDCG & KS 检验 & Rank IC --
+        # -- NDCG & KS 检验 & Rank IC --
     ndcg_list = []
+    mrr_list = []
     ks_stat_list = []
     ks_p_list = []
-    rank_ic_list = []
+    rank_ic_raw = []
     all_dates_sorted = sorted(raw_df["日期"].unique())
+    scores_by_rb = {}
+
     for ph in engine.predictions_history:
         rb_date = ph["date"]
         preds = ph["predictions"]
         stock_ids = [p["stock_id"] for p in preds]
         scores = [p["score"] for p in preds]
+        scores_by_rb[rb_date] = (stock_ids, scores)
 
-        rb_ts = pd.Timestamp(rb_date)
-        next_rb = None
-        for ph2 in engine.predictions_history:
-            if ph2["date"] > rb_date:
-                next_rb = ph2["date"]
-                break
-
-        forward_rets = []
-        for sid in stock_ids:
+    active_stock_ids = None
+    active_scores = None
+    active_rb_str = None
+    from scipy.stats import spearmanr, ks_2samp
+    for d in all_dates_sorted:
+        d_str = d.strftime("%Y-%m-%d")
+        if d_str in scores_by_rb:
+            active_stock_ids, active_scores = scores_by_rb[d_str]
+            active_rb_str = d_str
+        if active_scores is None or len(set(active_scores)) < 5:
+            continue
+        cum_rets = []
+        for sid in active_stock_ids:
             sub = raw_df[raw_df["股票代码"] == sid]
-            close_rb = sub.loc[sub["日期"] == rb_ts, "收盘"]
-            if close_rb.empty:
-                forward_rets.append(0.0)
-                continue
-            close_rb_val = float(close_rb.values[0])
-            if next_rb:
-                next_ts = pd.Timestamp(next_rb)
-                close_next = sub.loc[sub["日期"] == next_ts, "收盘"]
-
-                if not close_next.empty:
-                    fwd = (float(close_next.values[0]) / close_rb_val - 1) * 100
-                else:
-                    fwd = 0.0
+            close_rb = sub.loc[sub["日期"] == pd.Timestamp(active_rb_str), "收盘"]
+            close_d = sub.loc[sub["日期"] == d, "收盘"]
+            if not close_rb.empty and not close_d.empty:
+                cum_rets.append((float(close_d.values[0]) / float(close_rb.values[0]) - 1) * 100)
             else:
-                idx = all_dates_sorted.index(rb_ts) if rb_ts in all_dates_sorted else -1
-                if idx >= 0 and idx + 5 < len(all_dates_sorted):
-                    end_ts = all_dates_sorted[idx + 5]
-                    close_end = sub.loc[sub["日期"] == end_ts, "收盘"]
-                    if not close_end.empty:
-                        fwd = (float(close_end.values[0]) / close_rb_val - 1) * 100
-                    else:
-                        fwd = 0.0
-                else:
-                    fwd = 0.0
-            forward_rets.append(fwd)
+                cum_rets.append(0.0)
 
-        median_ret = float(np.median(forward_rets)) if forward_rets else 0.0
-        rel = [1 if r > median_ret else 0 for r in forward_rets]
-
-        k = min(top_k, len(preds))
-        if k > 0:
-            dcg = sum(rel[i] / np.log2(i + 2) for i in range(k))
-            ideal_rel = sorted(rel, reverse=True)
-            idcg = sum(ideal_rel[i] / np.log2(i + 2) for i in range(k))
-            ndcg_list.append(dcg / idcg if idcg > 0 else 0.0)
-
-        good_scores = [scores[i] for i in range(len(scores)) if forward_rets[i] > median_ret]
-        bad_scores = [scores[i] for i in range(len(scores)) if forward_rets[i] <= median_ret]
-        if len(good_scores) > 1 and len(bad_scores) > 1:
-            from scipy.stats import ks_2samp
-            ks_stat, ks_p = ks_2samp(good_scores, bad_scores)
-            ks_stat_list.append(ks_stat)
-            ks_p_list.append(ks_p)
-
-        from scipy.stats import spearmanr
-        unique_rets = len(set(forward_rets))
-        unique_scores = len(set(scores))
-        if unique_rets > 1 and unique_scores > 1:
-            ic, _ = spearmanr(scores, forward_rets)
+        unique_cum = len(set(cum_rets))
+        if unique_cum > 1:
+            ic, _ = spearmanr(active_scores, cum_rets)
             if not np.isnan(ic):
-                rank_ic_list.append(ic)
+                rank_ic_raw.append({"date": d_str, "value": ic})
 
-    avg_ndcg = round(float(np.mean(ndcg_list)), 4) if ndcg_list else None
-    avg_ks_stat = round(float(np.mean(ks_stat_list)), 4) if ks_stat_list else None
-    avg_ks_p = round(float(np.mean(ks_p_list)), 4) if ks_p_list else None
-    avg_rank_ic = round(float(np.mean(rank_ic_list)), 4) if rank_ic_list else None
+            k = min(top_k, len(active_scores))
+            if k > 0:
+                sorted_idx = np.argsort(active_scores)[::-1][:k]
+                sorted_cum = [cum_rets[i] for i in sorted_idx]
+                dcg = sum(sorted_cum[i] / np.log2(i + 2) for i in range(k))
+                ideal_cum = sorted(cum_rets, reverse=True)[:k]
+                idcg = sum(ideal_cum[i] / np.log2(i + 2) for i in range(k))
+                ndcg_list.append({"date": d_str, "value": dcg / (idcg + 1e-12)})
+
+                mrr_d = sum(sorted_cum[i] / (i + 1) for i in range(k))
+                mrr_id = sum(ideal_cum[i] / (i + 1) for i in range(k))
+                mrr_list.append({"date": d_str, "value": mrr_d / (mrr_id + 1e-12)})
+
+            median_cum = float(np.median(cum_rets))
+            good_scores = [active_scores[i] for i in range(len(active_scores)) if cum_rets[i] > median_cum]
+            bad_scores = [active_scores[i] for i in range(len(active_scores)) if cum_rets[i] <= median_cum]
+            if len(good_scores) > 1 and len(bad_scores) > 1:
+                ks_stat, ks_p = ks_2samp(good_scores, bad_scores)
+                ks_stat_list.append({"date": d_str, "value": ks_stat})
+                ks_p_list.append({"date": d_str, "value": ks_p})
+
+    def _avg_vals(lst):
+        vals = [e["value"] for e in lst]
+        return round(float(np.mean(vals)), 4) if vals else None
+
+    avg_ndcg = _avg_vals(ndcg_list)
+    avg_mrr = _avg_vals(mrr_list)
+    avg_ks_stat = _avg_vals(ks_stat_list)
+    avg_ks_p = _avg_vals(ks_p_list)
+    avg_rank_ic = _avg_vals(rank_ic_raw)
 
     # -- 整合 --
     metrics = {
@@ -607,9 +602,15 @@ def run_backtest_sequence(
         "next_rebalance_date": next_rebalance_date,
         "total_trades": n_trades,
         "ndcg": avg_ndcg,
+        "mrr": avg_mrr,
         "ks_stat": avg_ks_stat,
         "ks_p": avg_ks_p,
         "rank_ic": avg_rank_ic,
+        "_rank_ic_raw": rank_ic_raw,
+        "_ndcg_raw": ndcg_list,
+        "_mrr_raw": mrr_list,
+        "_ks_stat_raw": ks_stat_list,
+        "_ks_p_raw": ks_p_list,
         **windows,
     }
 
@@ -699,6 +700,215 @@ def _history_chart_b64(all_sequences, hs300_raw, rb_date, first_date, initial_ca
     return f"data:image/png;base64,{b64}"
 
 
+def _build_scatter_section(scatter_data, cur_date):
+    """从历史数据生成 KS-p/Rank IC/NDCG/MRR vs 策略收益 散点图，返回带 base64 图片的 HTML 片段"""
+    import io
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from scipy.stats import pearsonr, spearmanr, t as t_dist
+
+    models = ['search_itransformer_exp_54', 'search_itransformer_exp_64', 'search_itransformer_exp_6']
+    labels = ['itransformer 54', 'itransformer 64', 'itransformer 6']
+    colors = ['#E24A33', '#348ABD', '#988ED5']
+    metrics_cfg = [
+        ("ksp", "KS-p"),
+        ("ic", "Rank IC"),
+        ("ndcg", "NDCG"),
+        ("mrr", "MRR"),
+    ]
+
+    pairs = {}
+    for date in sorted(scatter_data.keys()):
+        if date > cur_date:
+            break
+        for m in models:
+            d = scatter_data[date].get(m, {})
+            ret = d.get("ret")
+            if ret is None:
+                continue
+            pairs.setdefault(m, {"ret": [], "ksp": [], "ic": [], "ndcg": [], "mrr": [], "dates": []})
+            pairs[m]["ret"].append(ret)
+            pairs[m]["dates"].append(date)
+            for key, _ in metrics_cfg:
+                v = d.get(key)
+                pairs[m][key].append(v if v is not None else np.nan)
+
+    fig, axes = plt.subplots(4, 3, figsize=(14, 16))
+    fig.suptitle(f'相关性分析（截至 {cur_date}）', fontsize=14, fontweight='bold')
+
+    def _fmt_p(pv):
+        return f'{pv:.3f}' if pv >= 0.001 else f'{pv:.1e}'
+
+    def _plot_one(ax, xvals, yvals, xlabel, title, color):
+        mask = ~(np.isnan(xvals) | np.isnan(yvals))
+        xv = np.array(xvals)[mask]
+        yv = np.array(yvals)[mask]
+        n = len(xv)
+        ax.scatter(xv, yv, c=color, s=50, zorder=3, edgecolors='k', linewidths=0.5, alpha=0.5, label='历史')
+        if n >= 3:
+            try:
+                p_val, p_p = pearsonr(yv, xv)
+                s_val, s_p = spearmanr(yv, xv)
+                xa, ya = xv, yv
+                z = np.polyfit(xa, ya, 1)
+                y_pred = np.polyval(z, xa)
+                mse = np.sum((ya - y_pred) ** 2) / (n - 2)
+                x_mean = np.mean(xa)
+                xx = np.linspace(xa.min(), xa.max(), 100)
+                se = np.sqrt(mse * (1 / n + (xx - x_mean) ** 2 / np.sum((xa - x_mean) ** 2)))
+                t_val = t_dist.ppf(0.975, n - 2)
+                ci = t_val * se
+                ax.fill_between(xx, np.polyval(z, xx) - ci, np.polyval(z, xx) + ci,
+                                color=color, alpha=0.15, label='95% CI')
+                ax.plot(xx, np.polyval(z, xx), '--', color=color, alpha=0.7, linewidth=1.5)
+                label = f'n={n}  r={p_val:.3f}(p={_fmt_p(p_p)})  ρ={s_val:.3f}(p={_fmt_p(s_p)})'
+            except Exception:
+                label = f'n={n}'
+        else:
+            label = f'n={n}'
+        if n >= 1:
+            ax.scatter(xv[-1], yv[-1], c='#cc0000', s=120, zorder=4, edgecolors='k', linewidths=1, marker='*', label='最新')
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel('策略收益 (%)')
+        ax.set_title(title)
+        ax.legend(fontsize=7, loc='lower right')
+        ax.text(0.05, 0.95, label, transform=ax.transAxes, fontsize=8, va='top',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        ax.grid(True, alpha=0.3)
+
+    for ri, (key, xlabel) in enumerate(metrics_cfg):
+        for ai, m in enumerate(models):
+            ax = axes[ri][ai]
+            p = pairs.get(m)
+            if p and len(p["ret"]) > 0:
+                _plot_one(ax, p[key], p["ret"], xlabel, labels[ai], colors[ai])
+            else:
+                ax.text(0.5, 0.5, '无数据', ha='center', va='center', transform=ax.transAxes, fontsize=10, color='gray')
+                ax.set_title(labels[ai])
+
+    plt.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=120, bbox_inches='tight')
+    plt.close(fig)
+    b64 = base64.b64encode(buf.getvalue()).decode()
+
+    # -- 多元线性回归 --
+    import statsmodels.api as sm
+    reg_rows = ""
+    var_keys = ["ksp", "ic", "ndcg", "mrr"]
+    var_labels = ["KS-p", "Rank IC", "NDCG", "MRR"]
+    for ai, m in enumerate(models):
+        p = pairs.get(m)
+        if not p or len(p["ret"]) < len(var_keys) + 2:
+            reg_rows += f"<tr><td>{labels[ai]}</td><td colspan='8'>数据不足</td></tr>"
+            continue
+        X = np.column_stack([np.array(p[k]) for k in var_keys])
+        y = np.array(p["ret"])
+        mask = ~np.isnan(X).any(axis=1) & ~np.isnan(y)
+        X, y = X[mask], y[mask]
+        if len(y) < len(var_keys) + 2:
+            reg_rows += f"<tr><td>{labels[ai]}</td><td colspan='8'>数据不足</td></tr>"
+            continue
+        Xc = sm.add_constant(X)
+        model = sm.OLS(y, Xc).fit()
+        def _p_star(pv):
+            if pv < 0.001: return '***'
+            if pv < 0.01: return '**'
+            if pv < 0.05: return '*'
+            return ''
+        f_p = model.f_pvalue
+        coef_cells = ""
+        for j, vl in enumerate(var_labels):
+            c = model.params[j + 1]
+            cp = model.pvalues[j + 1]
+            s = _p_star(cp)
+            coef_cells += f"<td style='text-align:right;font-size:11px;'>{c:+.4f}{s}<br/><span style='font-size:9px;color:#888;'>p={_fmt_p(cp)}</span></td>"
+        reg_rows += f"<tr><td style='font-size:11px;'>{labels[ai]}</td>"
+        reg_rows += f"<td style='text-align:right;font-size:11px;'>{model.rsquared:.4f}</td>"
+        reg_rows += f"<td style='text-align:right;font-size:11px;'>{model.rsquared_adj:.4f}</td>"
+        reg_rows += f"<td style='text-align:right;font-size:11px;'>F={model.fvalue:.3f}<br/><span style='font-size:9px;color:#888;'>p={_fmt_p(f_p)}</span>{_p_star(f_p)}</td>"
+        reg_rows += coef_cells + "</tr>"
+    var_headers = "".join(f"<th style='text-align:right;font-size:11px;'>{vl}</th>" for vl in var_labels)
+    reg_table = f"""
+    <h3 style='margin-top:18px;font-size:13px;'>多元线性回归（策略收益 ~ KS-p + Rank IC + NDCG + MRR）</h3>
+    <table style='width:100%;border-collapse:collapse;font-size:11px;'>
+        <thead><tr>
+            <th style='text-align:left;font-size:11px;'>模型</th>
+            <th style='text-align:right;font-size:11px;'>R²</th>
+            <th style='text-align:right;font-size:11px;'>调整 R²</th>
+            <th style='text-align:right;font-size:11px;'>F 检验</th>
+            {var_headers}
+        </tr></thead>
+        <tbody>{reg_rows}</tbody>
+    </table>
+    <p style='font-size:10px;color:#888;'>*=p&lt;0.05 &nbsp; **=p&lt;0.01 &nbsp; ***=p&lt;0.001</p>
+    """
+    return f'<h3>相关性分析</h3><div class="scatter-section"><img src="data:image/png;base64,{b64}" style="max-width:100%;height:auto;border:1px solid #ddd;border-radius:5px;" /></div>{reg_table}'
+
+
+BEST_CONFIG = [
+    ('avgret', 3, 0.514, 1),
+    ('dd', 5, 0.909, -1),
+    ('wr', 10, 1.175, 1),
+    ('vol', 3, 1.946, -1),
+]
+
+
+def _compute_health_score(model_data):
+    """Compute universal health score (0-100) for a model from its equity curve."""
+    ec = model_data.get("equity_curve", [])
+    if len(ec) < 2:
+        return 50.0
+    values = [e["total_value"] for e in ec]
+    daily_rets = [(values[i] / values[i - 1] - 1) * 100 for i in range(1, len(values))]
+    df = pd.DataFrame({"ret": daily_rets})
+    df["cummax"] = values[1:]
+    raw = {}
+    for name, window, weight, direction in BEST_CONFIG:
+        if name == "avgret":
+            raw[name] = df["ret"].rolling(window).mean().fillna(0)
+        elif name == "dd":
+            running_max = np.maximum.accumulate(df["cummax"].values)
+            dd_vals = (df["cummax"].values - running_max) / running_max * 100
+            df_tmp = pd.DataFrame({"dd": dd_vals})
+            raw[name] = df_tmp["dd"].rolling(window).min().fillna(0)
+        elif name == "wr":
+            raw[name] = (df["ret"] > 0).rolling(window).mean().fillna(0.5)
+        elif name == "vol":
+            raw[name] = df["ret"].rolling(window).std().fillna(0)
+    latest = {k: float(v.iloc[-1]) for k, v in raw.items()}
+    all_hist = {k: v.values for k, v in raw.items()}
+    scores = []
+    for name, window, weight, direction in BEST_CONFIG:
+        h = all_hist[name]
+        v = latest[name]
+        lo, hi = float(np.min(h)), float(np.max(h))
+        if hi - lo < 1e-12:
+            norm = 0.5
+        else:
+            norm = (v - lo) / (hi - lo)
+            norm = max(0.0, min(1.0, norm))
+        if direction == -1:
+            norm = 1.0 - norm
+        scores.append(norm * weight)
+    raw_score = sum(scores)
+    total_weight = sum(w for _, _, w, _ in BEST_CONFIG)
+    score_01 = raw_score / total_weight if total_weight > 0 else 0.5
+    return round(max(0.0, min(100.0, score_01 * 100)), 1)
+
+
+def _health_color(score):
+    if score >= 80:
+        return "green"
+    if score >= 60:
+        return "goldenrod"
+    if score >= 40:
+        return "darkorange"
+    return "red"
+
+
 def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_names, model_key="", rebalance_days=5):
     """为序列的每一个调仓日保存历史报告HTML"""
     trades = seq.get("trades", [])
@@ -718,7 +928,7 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
     rebalance_dates = sorted(set(t["date"] for t in trades))
     history_dir = PROJECT_ROOT / "output" / "history_report"
     history_dir.mkdir(parents=True, exist_ok=True)
-
+    scatter_data = {}
     for cur_date in sorted_dates:
         ec_seg = [e for e in equity_curve if e["date"] <= cur_date]
         if len(ec_seg) < 1:
@@ -944,7 +1154,7 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
 
         chart_data_url = _history_chart_b64(all_sequences, hs300_raw, cur_date, sorted_dates[0], initial_capital)
 
-        from send_report import build_report_html, _build_model_stats_table
+        from send_report import build_report_html, _build_model_stats_table, _build_health_table
         hist_sequences = {}
         for hkey, hseq in all_sequences.items():
             hist_trades = [t for t in hseq.get("trades", []) if t["date"] <= cur_date]
@@ -968,12 +1178,8 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
                 hs300_ret = (hs300_seg["close"].iloc[-1] / hs300_seg["close"].iloc[0] - 1) * 100 if len(hs300_seg) >= 2 else 0.0
                 hist_metrics["hs300_return_pct"] = round(hs300_ret, 4)
                 hist_metrics["excess_return_pct"] = round(hist_metrics["strategy_return_pct"] - hs300_ret, 4)
-                for k in ("rank_ic", "ndcg", "ks_stat", "ks_p"):
-                    v = hseq.get("metrics", {}).get(k)
-                    if v is not None:
-                        hist_metrics[k] = v
             else:
-                hist_metrics = {"strategy_return_pct": 0, "sharpe_ratio": 0, "max_drawdown_pct": 0, "hs300_return_pct": 0, "excess_return_pct": 0}
+                hist_metrics = {"strategy_return_pct": 0, "sharpe_ratio": 0, "calmar_ratio": 0, "sortino_ratio": 0, "max_drawdown_pct": 0, "hs300_return_pct": 0, "excess_return_pct": 0}
             model_stats = _compute_model_stats(hist_trades, hist_current_prices, report_date=cur_date)
             ec_dict = {e["date"]: e["total_value"] for e in hseq.get("equity_curve", [])}
             reb_period_rets = []
@@ -990,11 +1196,41 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
             model_stats["reb_pnl_pct"] = round(reb_period_rets[-1], 2) if reb_period_rets else 0.0
             last_3 = reb_period_rets[-3:]
             model_stats["last_3_reb_avg_pct"] = round(sum(last_3) / len(last_3), 2) if last_3 else 0.0
+
+            n_periods = sum(1 for d in rebalance_dates if d <= cur_date)
+            if n_periods > 0:
+                raw_ic = hseq.get("metrics", {}).get("_rank_ic_raw", [])
+                ic_vals = [e["value"] for e in raw_ic if e["date"] <= cur_date]
+                if ic_vals:
+                    hist_metrics["rank_ic"] = round(float(np.mean(ic_vals)), 4)
+                for key, lst_name in [("ndcg", "_ndcg_raw"), ("mrr", "_mrr_raw"), ("ks_stat", "_ks_stat_raw"), ("ks_p", "_ks_p_raw")]:
+                    raw = hseq.get("metrics", {}).get(lst_name, [])
+                    vals = [e["value"] for e in raw if e["date"] <= cur_date]
+                    if vals:
+                        hist_metrics[key] = round(float(np.mean(vals)), 4)
             hist_sequences[hkey] = {
                 "model_stats": model_stats,
                 "metrics": hist_metrics,
             }
+        health_scores = {}
+        for hkey in all_sequences:
+            health_scores[hkey] = _compute_health_score(all_sequences[hkey])
+        health_section = _build_health_table(health_scores)
+
         model_stats_section = _build_model_stats_table(hist_sequences)
+
+        scatter_data.setdefault(cur_date, {})
+        for hkey in all_sequences:
+            hm = hist_sequences.get(hkey, {}).get("metrics", {})
+            scatter_data[cur_date][hkey] = {
+                "ret": hm.get("strategy_return_pct"),
+                "ic": hm.get("rank_ic"),
+                "ndcg": hm.get("ndcg"),
+                "mrr": hm.get("mrr"),
+                "ksp": hm.get("ks_p"),
+            }
+        scatter_section = _build_scatter_section(scatter_data, cur_date)
+
         hist_equity = {}
         hs300_period = hs300_raw[(hs300_raw["date"] >= pd.Timestamp(sorted_dates[0])) & (hs300_raw["date"] <= pd.Timestamp(cur_date))]
         if not hs300_period.empty:
@@ -1025,6 +1261,8 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
                 chart_data_url=chart_data_url,
                 model_stats_section=model_stats_section,
                 equity_data=hist_equity,
+                scatter_section=scatter_section,
+                health_section=health_section,
             )
             suffix = "(调仓日)" if is_rebalance else ""
             history_path = history_dir / f"{cur_date}{suffix}.html"

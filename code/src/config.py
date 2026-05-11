@@ -5,7 +5,6 @@ model_type = "tcn"
 val_months = 3
 topk = 3
 N = 74
-
 config = {
     "sequence_length": sequence_length,
     "batch_size": 4,

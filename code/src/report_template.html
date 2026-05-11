@@ -28,6 +28,11 @@
         .chart-wrap { margin-top: 15px; position: relative; }
         .chart-wrap canvas { max-width: 100%; max-height: 400px; }
         #chart-fallback { max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 5px; }
+        .scatter-section { margin-top: 15px; }
+        .scatter-section img { max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 5px; }
+        .health-table { margin-bottom: 12px; }
+        .health-table table { width: auto; min-width: 200px; }
+        .health-table td { padding: 4px 12px; }
     </style>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
@@ -57,6 +62,8 @@
         <thead><tr><th>开始</th><th>谷底</th><th>恢复</th><th style="text-align:right;">最大回撤</th><th style="text-align:right;">持续</th><th style="text-align:right;">恢复</th></tr></thead>
         <tbody>{{DD_ROWS}}</tbody>
     </table>
+
+    {{HEALTH_SECTION}}
 
     {{MODEL_STATS_SECTION}}
 
@@ -166,6 +173,8 @@
         });
     })();
     </script>
+
+    {{SCATTER_SECTION}}
 
     <div class="footer">
         由 ETF 每日测评系统自动生成 | {{GENERATED_TIME}}

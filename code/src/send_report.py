@@ -15,6 +15,9 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 REPORT_PATH = PROJECT_ROOT / "output" / "latest_report.json"
 CHART_PATH = PROJECT_ROOT / "output" / "equity_curves.png"
@@ -82,8 +85,12 @@ def _build_model_stats_table(sequences):
         ic_clr = "#cc0000" if ic is not None and ic >= 0 else "#009900" if ic is not None else "#999"
         ndcg = m.get("ndcg")
         ndcg_str = f"{ndcg:.4f}" if ndcg is not None else "—"
+        mrr = m.get("mrr")
+        mrr_str = f"{mrr:.4f}" if mrr is not None else "—"
         ks_p = m.get("ks_p")
         ks_p_str = f"{ks_p:.4f}" if ks_p is not None else "—"
+        calmar = m.get("calmar_ratio", 0)
+        sortino = m.get("sortino_ratio", 0)
         rows += f"""
         <tr>
             <td style="font-size:11px;color:#555;">{display}</td>
@@ -95,10 +102,13 @@ def _build_model_stats_table(sequences):
             <td style="text-align:right;font-weight:bold;color:{ta_clr};">{ta:+.2f}%</td>
             <td style="text-align:right;font-weight:bold;color:{sr_clr};">{sr:+.2f}%</td>
             <td style="text-align:right;">{m.get('sharpe_ratio', 0):.2f}</td>
+            <td style="text-align:right;">{calmar:.2f}</td>
+            <td style="text-align:right;">{sortino:.2f}</td>
             <td style="text-align:right;">{m.get('max_drawdown_pct', 0):.2f}%</td>
             <td style="text-align:right;font-weight:bold;color:{er_clr};">{er:+.2f}%</td>
             <td style="text-align:right;color:{ic_clr};">{ic_str}</td>
             <td style="text-align:right;">{ndcg_str}</td>
+            <td style="text-align:right;">{mrr_str}</td>
             <td style="text-align:right;">{ks_p_str}</td>
         </tr>"""
     if not rows:
@@ -117,11 +127,14 @@ def _build_model_stats_table(sequences):
                 <th style="text-align:right;">交易平均</th>
                 <th style="text-align:right;">策略收益</th>
                 <th style="text-align:right;">夏普</th>
+                <th style="text-align:right;">卡玛</th>
+                <th style="text-align:right;">索提诺</th>
                 <th style="text-align:right;">最大回撤</th>
                 <th style="text-align:right;">超额收益</th>
                 <th style="text-align:right;">Rank IC</th>
-                <th style="text-align:right;">NDCG</th>
-                <th style="text-align:right;">KS-p</th>
+            <th style="text-align:right;">NDCG</th>
+            <th style="text-align:right;">MRR</th>
+            <th style="text-align:right;">KS-p</th>
             </tr>
         </thead>
         <tbody>
@@ -130,11 +143,175 @@ def _build_model_stats_table(sequences):
     </table>"""
 
 
+def _build_health_table(health_scores):
+    rows = ""
+    model_labels = {
+        "search_itransformer_exp_54": "i54", "search_itransformer_exp_64": "i64",
+        "search_itransformer_exp_6": "i6", "average": "avg", "voting": "vote",
+    }
+    for key, h in sorted(health_scores.items()):
+        label = model_labels.get(key, key)
+        score = h["score"]
+        color = _health_color(score)
+        details = h.get("details", {})
+        corr = h.get("corr")
+        detail_cells = ""
+        for k in ["wr", "avgret", "dd", "vol"]:
+            v = details.get(k, "")
+            if v != "":
+                detail_cells += f'<td style="text-align:right;font-size:10px;">{v}</td>'
+            else:
+                detail_cells += '<td style="text-align:right;font-size:10px;color:#999;">—</td>'
+        if corr:
+            r = corr["r"]
+            p = corr["p"]
+            sig = "***" if p<0.001 else ("**" if p<0.01 else ("*" if p<0.05 else ""))
+            corr_str = f'r={r:+.3f}{sig}'
+        else:
+            corr_str = "—"
+        rows += f"""<tr>
+            <td style="font-size:11px;color:#555;">{label}</td>
+            <td style="text-align:right;font-weight:bold;color:{color};">{score:.1f}</td>
+            {detail_cells}
+            <td style="text-align:right;font-size:10px;">{corr_str}</td>
+        </tr>"""
+    if not rows:
+        return ""
+    return f"""
+    <h3 style="font-size:14px;">健康评分</h3>
+    <div class="health-table">
+    <table style="font-size:11px;">
+        <thead><tr>
+            <th>模型</th>
+            <th style="text-align:right;">评分</th>
+            <th style="text-align:right;font-weight:normal;">近{10}日胜率</th>
+            <th style="text-align:right;font-weight:normal;">近{3}日收益</th>
+            <th style="text-align:right;font-weight:normal;">近{5}日回撤</th>
+            <th style="text-align:right;font-weight:normal;">近{3}日波动</th>
+            <th style="text-align:right;font-weight:normal;">近14日r</th>
+        </tr></thead>
+        <tbody>{rows}</tbody>
+    </table>
+    <p style="font-size:10px;color:#888;margin-top:4px;">
+        评分 ≥80🟢 ≥60🟡 ≥40🟠 &lt;40🔴 &nbsp;&nbsp; r=健康度与未来5日收益的Pearson相关系数 *=p&lt;0.05 **=p&lt;0.01 ***=p&lt;0.001
+    </p>
+    </div>"""
+
+
+def _health_color(score):
+    if score >= 80:
+        return "green"
+    if score >= 60:
+        return "goldenrod"
+    if score >= 40:
+        return "darkorange"
+    return "red"
+
+
+BEST_CONFIG = [
+    ('avgret', 3, 0.514, 1),
+    ('dd', 5, 0.909, -1),
+    ('wr', 10, 1.175, 1),
+    ('vol', 3, 1.946, -1),
+]
+
+
+def _compute_health_score(model_data):
+    ec = model_data.get("equity_curve", [])
+    if len(ec) < 2:
+        return {"score": 50.0, "details": {}, "corr": None}
+    values = [e["total_value"] for e in ec]
+    daily_rets = [(values[i] / values[i - 1] - 1) * 100 for i in range(1, len(values))]
+    df = pd.DataFrame({"ret": daily_rets})
+    df["cummax"] = values[1:]
+    raw = {}
+    for name, window, weight, direction in BEST_CONFIG:
+        if name == "avgret":
+            s = df["ret"].rolling(window).mean()
+            raw[name] = s.fillna(0)
+        elif name == "dd":
+            running_max = np.maximum.accumulate(df["cummax"].values)
+            dd_vals = (df["cummax"].values - running_max) / running_max * 100
+            raw[name] = pd.Series(dd_vals).rolling(window).min().fillna(0)
+        elif name == "wr":
+            raw[name] = (df["ret"] > 0).rolling(window).mean().fillna(0.5)
+        elif name == "vol":
+            raw[name] = df["ret"].rolling(window).std().fillna(0)
+    latest = {k: float(v.iloc[-1]) for k, v in raw.items()}
+    all_hist = {k: v.values for k, v in raw.items()}
+    scores = []
+    details = {}
+    for name, window, weight, direction in BEST_CONFIG:
+        h = all_hist[name]
+        v = latest[name]
+        lo, hi = float(np.min(h)), float(np.max(h))
+        if hi - lo < 1e-12:
+            norm = 0.5
+        else:
+            norm = (v - lo) / (hi - lo)
+            norm = max(0.0, min(1.0, norm))
+        if direction == -1:
+            norm = 1.0 - norm
+        scores.append(norm * weight)
+        if name == "wr":
+            details["wr"] = f"{v*100:.0f}%"
+        elif name == "avgret":
+            details["avgret"] = f"{v:+.2f}%"
+        elif name == "dd":
+            details["dd"] = f"{v:.1f}%"
+        elif name == "vol":
+            details["vol"] = f"{v:.2f}%"
+    raw_score = sum(scores)
+    total_weight = sum(w for _, _, w, _ in BEST_CONFIG)
+    score_01 = raw_score / total_weight if total_weight > 0 else 0.5
+    
+    # Compute health score time series for forward-return validation
+    all_scores = []
+    for i in range(len(daily_rets)):
+        s = []
+        for name, window, weight, direction in BEST_CONFIG:
+            h = all_hist[name]
+            v_i = float(raw[name].iloc[i])
+            lo_i, hi_i = float(np.min(h[:i+1])), float(np.max(h[:i+1]))
+            if hi_i - lo_i < 1e-12:
+                n = 0.5
+            else:
+                n = (v_i - lo_i) / (hi_i - lo_i)
+                n = max(0.0, min(1.0, n))
+            if direction == -1:
+                n = 1.0 - n
+            s.append(n * weight)
+        rs = sum(s) / total_weight if total_weight > 0 else 0.5
+        all_scores.append(rs)
+    all_scores = np.array(all_scores)
+    
+    # Forward returns (next 5 days)
+    fwd_ret = []
+    for i in range(len(daily_rets)):
+        end = min(i + 5, len(daily_rets))
+        fwd_ret.append(sum(daily_rets[i:end]))
+    fwd_ret = np.array(fwd_ret)
+    
+    # Rolling correlation (last 14 days)
+    corr_val = None
+    window_corr = 14
+    if len(all_scores) >= window_corr and np.std(all_scores[-window_corr:]) > 0 and np.std(fwd_ret[-window_corr:]) > 0:
+        from scipy.stats import pearsonr
+        r, p = pearsonr(all_scores[-window_corr:], fwd_ret[-window_corr:])
+        corr_val = {"r": round(r, 3), "p": round(p, 4), "n": window_corr}
+    
+    return {
+        "score": round(max(0.0, min(100.0, score_01 * 100)), 1),
+        "details": details,
+        "corr": corr_val,
+    }
+
+
 def build_report_html(*, date, model_display, total_value, cash, holdings,
                       trades_list, metrics, next_rebalance, is_rebalance,
                       today_pnl_total, today_pnl_positions=None,
                       chart_data_url=None, model_stats_section="",
-                      equity_data=None):
+                      equity_data=None, scatter_section="", health_section=""):
     """构建报告HTML，各组件已预先准备好"""
     # 持仓表
     pnl_by_stock = {p["stock_id"]: p for p in (today_pnl_positions or [])}
@@ -327,10 +504,12 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
     html = html.replace("{{WINDOW_ROWS}}", window_rows)
     html = html.replace("{{DD_ROWS}}", dd_rows)
     html = html.replace("{{MODEL_STATS_SECTION}}", model_stats_section)
+    html = html.replace("{{HEALTH_SECTION}}", health_section)
     html = html.replace("{{HOLDINGS_TITLE}}", f"当前持仓 ({len(holdings)} 只)")
     html = html.replace("{{HOLDINGS_ROWS}}", holdings_rows)
     html = html.replace("{{TRADES_SECTION}}", trades_section)
     html = html.replace("{{CHART_SRC}}", chart_data_url or "cid:chart_img")
+    html = html.replace("{{SCATTER_SECTION}}", scatter_section)
     html = html.replace("{{EQUITY_DATA}}", json.dumps(equity_data) if equity_data else "{}")
     html = html.replace("{{GENERATED_TIME}}", datetime.now().strftime("%Y-%m-%d %H:%M"))
     return html
@@ -375,6 +554,13 @@ def send_report(model_key=None):
 
     model_stats_section = _build_model_stats_table(sequences)
 
+    health_scores = {}
+    for key, seq in sequences.items():
+        ec = seq.get("equity_curve", [])
+        if ec:
+            health_scores[key] = _compute_health_score(seq)
+    health_section = _build_health_table(health_scores)
+
     equity_data = {}
     for key, seq in sequences.items():
         ec = seq.get("equity_curve", [])
@@ -399,6 +585,7 @@ def send_report(model_key=None):
         today_pnl_positions=today_pnl_positions,
         model_stats_section=model_stats_section,
         equity_data=equity_data,
+        health_section=health_section,
     )
 
     msg = MIMEMultipart()
