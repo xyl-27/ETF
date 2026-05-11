@@ -10,7 +10,7 @@ import os
 '''
 
 STATE_PATH = r"C:\Users\xyl\Desktop\ETF\output\backtest_state.json"
-MODEL_KEY = "average"
+MODEL_KEY = "search_itransformer_exp_54"
 
 # ETF代码转换
 def to_gm_symbol(stock_id):
@@ -26,7 +26,7 @@ def load_trades_by_date():
     with open(STATE_PATH, "r", encoding="utf-8") as f:
         state = json.load(f)
     seqs = state.get("sequences", state)
-    model = seqs.get(MODEL_KEY, seqs.get("average", {}))
+    model = seqs.get(MODEL_KEY, {})
     trades = model.get("trades", [])
 
     by_date = {}
