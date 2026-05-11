@@ -141,6 +141,7 @@ OUTPUT_DIR = PROJECT_ROOT / "output"
 STATE_PATH = OUTPUT_DIR / "backtest_state.json"
 REPORT_PATH = OUTPUT_DIR / "latest_report.json"
 PORTFOLIO_PATH = OUTPUT_DIR / "portfolio.json"
+PREDICTIONS_PATH = OUTPUT_DIR / "predictions.json"
 MODEL_SELECTION_PATH = OUTPUT_DIR / "model_selection.yaml"
 DATA_FILE = PROJECT_ROOT / "etf_data" / "etf_74.csv"
 
@@ -298,6 +299,7 @@ def run_backtest_sequence(
     initial_capital: float = 1000000,
     commission: float = 0.0003,
     slippage: float = 0.001,
+    trade_mode: str = "open",
 ) -> Dict[str, Any]:
     raw_df = pd.read_csv(data_file, dtype={"股票代码": str})
     raw_df["股票代码"] = raw_df["股票代码"].astype(str).str.zfill(6)
@@ -324,6 +326,7 @@ def run_backtest_sequence(
         predictions_func=predictions_func,
         rebalance_days=rebalance_days,
         first_rebalance_date=start_ts,
+        trade_mode=trade_mode,
     )
 
     equity_curve = []
@@ -622,6 +625,7 @@ def run_backtest_sequence(
         "cash": round(engine.cash, 2),
         "today_pnl": today_pnl,
         "skipped_trades": engine.skipped_trades,
+        "predictions_history": engine.predictions_history,
     }
 
 
@@ -1399,6 +1403,56 @@ def _make_model_key(m):
     return f"{parent}_{name}"
 
 
+def _resolve_report_key(sequences):
+    """从 model_selection.yaml 确定主序列，兼容 master: first / average / voting 等设置。"""
+    if os.path.exists(str(MODEL_SELECTION_PATH)):
+        try:
+            import yaml
+            with open(MODEL_SELECTION_PATH, "r", encoding="utf-8") as f:
+                sel = yaml.safe_load(f)
+            master = sel.get("master", "")
+        except Exception:
+            master = ""
+        if master == "first":
+            return list(sequences.keys())[0] if sequences else None
+        if master and master in sequences:
+            return master
+    # 兜底：优先 average → voting → 第一个
+    for pref in ["average", "voting"]:
+        if pref in sequences:
+            return pref
+    return list(sequences.keys())[0] if sequences else None
+
+
+def _save_predictions(sequences, path=None):
+    """Save per-model predictions_history to JSON."""
+    path = path or PREDICTIONS_PATH
+    preds = {}
+    for key, seq in sequences.items():
+        ph = seq.get("predictions_history", [])
+        preds[key] = {entry["date"]: entry["predictions"] for entry in ph}
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(preds, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
+    return preds
+
+
+def _load_predictions(path=None):
+    """Load predictions from JSON, return {model_key: {date_str: [preds]}}."""
+    path = path or PREDICTIONS_PATH
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    data.pop("_meta", None)
+    return data
+
+
+def _make_predictions_func_from_saved(preds_dict):
+    """Build predictions_func callable from a saved {date_str: [preds]} dict."""
+    def pred_func(date):
+        d_str = date.strftime("%Y-%m-%d") if hasattr(date, "strftime") else str(date)
+        return preds_dict.get(d_str)
+    return pred_func
+
+
 def daily_eval(
     config_name: str = "config",
     update_data: bool = True,
@@ -1408,6 +1462,7 @@ def daily_eval(
     rebalance_days: int = 5,
     position_pct: float = 0.95,
     initial_capital: float = 100000,
+    trade_mode: str = "open",
 ):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -1516,6 +1571,7 @@ def daily_eval(
                 initial_capital=initial_capital,
                 commission=config.get("commission", 0.0003),
                 slippage=config.get("slippage", 0.001),
+                trade_mode=trade_mode,
             )
             sequences[model_key] = result
 
@@ -1548,6 +1604,7 @@ def daily_eval(
                 initial_capital=initial_capital,
                 commission=config.get("commission", 0.0003),
                 slippage=config.get("slippage", 0.001),
+                trade_mode=trade_mode,
             )
             sequences["average"] = result
 
@@ -1602,6 +1659,7 @@ def daily_eval(
                 initial_capital=initial_capital,
                 commission=config.get("commission", 0.0003),
                 slippage=config.get("slippage", 0.001),
+                trade_mode=trade_mode,
             )
             for t in result.get("trades", []):
                 if t.get("action") == "买入" and t["date"] in voting_pred_cache:
@@ -1743,6 +1801,13 @@ def daily_eval(
             "sequences": sequences,
             "last_updated": timestamp,
         }
+
+        # 额外保存模型预测信号（供日报复用，无需重跑模型）
+        try:
+            _save_predictions(sequences)
+        except Exception as e:
+            if verbose:
+                print(f"  [预测] 保存失败: {e}")
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         with open(STATE_PATH, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
@@ -1806,11 +1871,12 @@ def daily_eval(
             sub = raw_df[raw_df["股票代码"] == stock_id]
             hl_s = sub.loc[sub["日期"] == latest_date, "涨停价"]
             ll_s = sub.loc[sub["日期"] == latest_date, "跌停价"]
+            buy_price = pos.get("buy_price", 0) or report_data.get("metrics", {}).get("last_trade_prices", {}).get(stock_id, 0)
             holdings.append({
                 "stock_id": stock_id,
                 "name": etf_names.get(stock_id, ""),
                 "price": price,
-                "buy_price": round(latest_trade_prices.get(stock_id, 0), 4),
+                "buy_price": round(buy_price, 4),
                 "shares": pos["shares"],
                 "cost": pos["cost"],
                 "high_limit": round(float(hl_s.values[0]), 4) if not hl_s.empty else 0,
@@ -1869,6 +1935,7 @@ def daily_eval(
             "total_value": report_data["metrics"]["latest_value"],
             "sequences": sequences_summary,
             "hs300_curve": hs300_curve,
+            "trade_mode": trade_mode,
         }
 
         # 计算持仓变动（相对上一次调仓）
@@ -1976,6 +2043,616 @@ def daily_eval(
         return None
 
 
+# ============================================================
+# 模式1: 仅生成预测信号（不执行回测）
+# ============================================================
+
+def generate_predictions_only(
+    config_name: str = "config",
+    update_data: bool = True,
+    top_k: int = 3,
+    verbose: bool = True,
+    start_date: str = "2026-04-01",
+    rebalance_days: int = 5,
+    position_pct: float = 0.95,
+    initial_capital: float = 100000,
+):
+    """模式1: 仅保存模型预测信号，不执行回测和生成日报"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if verbose:
+        print(f"\n{'='*60}")
+        print(f"[{timestamp}] 仅生成预测信号")
+        print(f"{'='*60}")
+
+    try:
+        if update_data:
+            if verbose:
+                print("[1/4] 获取最新ETF数据...")
+            update_etf_data(verbose=verbose)
+
+        raw_df = pd.read_csv(DATA_FILE, dtype={"股票代码": str})
+        raw_df["股票代码"] = raw_df["股票代码"].astype(str).str.zfill(6)
+        raw_df["日期"] = pd.to_datetime(raw_df["日期"])
+        latest_date = raw_df["日期"].max()
+        end_date = (latest_date + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+        start_ts = pd.Timestamp(start_date)
+        end_ts = pd.Timestamp(end_date)
+        all_dates = sorted(raw_df["日期"].unique())
+        backtest_dates = [d for d in all_dates if start_ts <= d < end_ts]
+
+        if verbose:
+            print(f"\n[数据] 交易日: {len(backtest_dates)}天 ({start_date} ~ {end_date})")
+            print(f"\n[2/4] 加载模型...")
+
+        single_models = []
+        average_enabled = False
+        voting_enabled = False
+        if os.path.exists(str(MODEL_SELECTION_PATH)):
+            single_models, master, average_enabled, voting_enabled = load_model_selection(str(MODEL_SELECTION_PATH))
+            enabled_models = [m for m in single_models if m.get("enabled", True)]
+            if verbose:
+                print(f"  平均: {'开' if average_enabled else '关'}, 投票: {'开' if voting_enabled else '关'}, 模型数: {len(enabled_models)}")
+            single_models = enabled_models
+        else:
+            config_module = __import__(config_name, fromlist=["config"])
+            config = config_module.config.copy()
+            output_dir = config.get("output_dir", "./model/default")
+            model_info = find_best_model(output_dir)
+            if not model_info:
+                print("错误: 未找到可用模型")
+                return None
+            exp_dir, model_file, score = model_info
+            single_models = [{"exp_dir": exp_dir, "model_file": model_file, "enabled": True}]
+            average_enabled = False
+            voting_enabled = False
+            if verbose:
+                print(f"  单模型: {_make_model_key((exp_dir,))} (score={score:.4f})")
+
+        if not single_models:
+            print("错误: 无可用模型")
+            return None
+
+        if verbose:
+            print(f"\n[3/4] 加载数据并缓存...")
+        first_model = single_models[0]
+        scaler_path = os.path.join(first_model["exp_dir"], "scaler.pkl")
+        config_path = os.path.join(first_model["exp_dir"], "config.json")
+        with open(config_path, "r") as f:
+            first_config = json.load(f)
+        feature_num = first_config["feature_num"]
+
+        cached_data, cached_features = ETFBacktester.load_data_once(
+            data_path=str(DATA_FILE), scaler_path=scaler_path, feature_num=feature_num, verbose=False,
+        )
+
+        single_backtesters = []
+        for m in single_models:
+            bt = ETFBacktester.from_cached_data(
+                model_dir=m["exp_dir"], cached_data=cached_data, cached_features=cached_features,
+                device=device, model_file=m["model_file"], verbose=False,
+            )
+            single_backtesters.append((m, bt))
+
+        if verbose:
+            print(f"\n[4/4] 生成预测信号...")
+
+        all_predictions = {}
+
+        # 生成所有特征日的预测，按特征日日期存储
+        # BacktestEngine 根据 trade_mode 决定查哪天的预测:
+        #   "open": 调仓日 D 查 D-1（前日特征）; "close": 调仓日 D 查 D（当日特征）
+        backtest_dates_str_set = {d.strftime("%Y-%m-%d") for d in backtest_dates}
+        seed_dates = set(backtest_dates)
+        prev_idx = all_dates.index(backtest_dates[0]) - 1
+        if prev_idx >= 0:
+            seed_dates.add(all_dates[prev_idx])
+
+        # 单模型预测
+        for m, bt in single_backtesters:
+            model_key = _make_model_key(m)
+            if verbose:
+                print(f"  预测: {model_key}...")
+            preds_for_model = {}
+            for d in sorted(seed_dates):
+                preds = bt._get_predictions(d)
+                if preds:
+                    preds_for_model[d.strftime("%Y-%m-%d")] = preds
+            all_predictions[model_key] = preds_for_model
+            if verbose:
+                only_rebalance = [k for k in preds_for_model if k in backtest_dates_str_set]
+                print(f"    → {len(preds_for_model)} 日预测 ({len(only_rebalance)} 调仓日)")
+
+        # 平均模型预测
+        if average_enabled and len(single_backtesters) >= 2:
+            if verbose:
+                print(f"  预测: average ({len(single_backtesters)}个模型)...")
+            avg_preds = {}
+            for d in sorted(seed_dates):
+                d_str = d.strftime("%Y-%m-%d")
+                all_scores = []
+                for _, bt in single_backtesters:
+                    preds = bt._get_predictions(d)
+                    if preds is None:
+                        all_scores = None
+                        break
+                    all_scores.append({p["stock_id"]: p["score"] for p in preds})
+                if all_scores:
+                    avg_map = {}
+                    for sid in all_scores[0].keys():
+                        scores = [sd[sid] for sd in all_scores]
+                        avg_map[sid] = float(np.mean(scores))
+                    sorted_stocks = sorted(avg_map.items(), key=lambda x: x[1], reverse=True)
+                    avg_preds[d_str] = [{"rank": i+1, "stock_id": sid, "score": sc} for i, (sid, sc) in enumerate(sorted_stocks)]
+            all_predictions["average"] = avg_preds
+            if verbose:
+                print(f"    → {len(avg_preds)} 个交易日")
+
+        # 投票模型预测
+        if voting_enabled and len(single_backtesters) >= 2:
+            if verbose:
+                print(f"  预测: voting ({len(single_backtesters)}个模型)...")
+            vote_preds = {}
+            for d in sorted(seed_dates):
+                d_str = d.strftime("%Y-%m-%d")
+                all_preds = []
+                for _, bt in single_backtesters:
+                    preds = bt._get_predictions(d)
+                    if preds is None:
+                        all_preds = None
+                        break
+                    all_preds.append(preds)
+                if all_preds:
+                    freq = {}
+                    avg_score = {}
+                    for preds in all_preds:
+                        for i, p in enumerate(preds):
+                            if i >= top_k:
+                                break
+                            sid = p["stock_id"]
+                            freq[sid] = freq.get(sid, 0) + 1
+                            avg_score[sid] = avg_score.get(sid, 0) + p["score"]
+                    for sid in avg_score:
+                        avg_score[sid] /= freq.get(sid, 1)
+                    ranked = sorted(freq.items(), key=lambda x: (-x[1], -avg_score.get(x[0], 0)))
+                    result = [{"rank": i+1, "stock_id": sid, "score": float(freq)} for i, (sid, freq) in enumerate(ranked)]
+                    if len(result) < top_k * 2:
+                        first_picks = [p["stock_id"] for p in all_preds[0]]
+                        existing = {r["stock_id"] for r in result}
+                        for sid in first_picks:
+                            if sid not in existing:
+                                result.append({"rank": len(result)+1, "stock_id": sid, "score": 0.0})
+                                existing.add(sid)
+                            if len(result) >= top_k * 2:
+                                break
+                    vote_preds[d_str] = result
+            all_predictions["voting"] = vote_preds
+            if verbose:
+                print(f"    → {len(vote_preds)} 个交易日")
+
+        # 保存（附带交易日历元信息，供掘金策略对齐调仓日）
+        all_predictions["_meta"] = {
+            "start_date": start_date,
+            "backtest_dates": [d.strftime("%Y-%m-%d") for d in backtest_dates],
+        }
+        with open(PREDICTIONS_PATH, "w", encoding="utf-8") as f:
+            json.dump(all_predictions, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
+
+        if verbose:
+            total = sum(len(v) for v in all_predictions.values())
+            print(f"\n[完成] 预测信号已保存至 {PREDICTIONS_PATH}")
+            print(f"  模型数: {len(all_predictions)}, 总预测条目: {total}")
+            print(f"{'='*60}")
+
+        return all_predictions
+
+    except Exception as e:
+        print(f"\n[错误] 生成预测失败: {e}")
+        traceback.print_exc()
+        return None
+
+
+# ============================================================
+# 模式2: 从已保存的预测信号运行回测并生成日报（无需加载模型）
+# ============================================================
+
+def run_from_predictions(
+    update_data: bool = True,
+    top_k: int = 3,
+    verbose: bool = True,
+    start_date: str = "2026-04-01",
+    rebalance_days: int = 5,
+    position_pct: float = 0.95,
+    initial_capital: float = 100000,
+    config_name: str = "config",
+    trade_mode: str = "open",
+):
+    """模式2: 读取已保存的 predictions.json，跳过模型推理直接回测+日报"""
+    from send_report import build_report_html, send_report
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    if verbose:
+        print(f"\n{'='*60}")
+        print(f"[{timestamp}] 从已保存预测信号生成日报")
+        print(f"{'='*60}")
+
+    if not PREDICTIONS_PATH.exists():
+        print(f"错误: 未找到预测信号文件 {PREDICTIONS_PATH}")
+        print("请先运行 daily_eval --predictions-only 或完整的 daily_eval")
+        return None
+
+    try:
+        # 1. 加载预测信号
+        if verbose:
+            print(f"[1/4] 加载预测信号...")
+        all_predictions = _load_predictions()
+        for key in all_predictions:
+            if verbose:
+                print(f"  {key}: {len(all_predictions[key])} 个日期")
+
+        # 2. 更新数据
+        if update_data:
+            if verbose:
+                print(f"[2/4] 获取最新ETF数据...")
+            update_etf_data(verbose=verbose)
+
+        raw_df = pd.read_csv(DATA_FILE, dtype={"股票代码": str})
+        raw_df["股票代码"] = raw_df["股票代码"].astype(str).str.zfill(6)
+        raw_df["日期"] = pd.to_datetime(raw_df["日期"])
+        latest_date = raw_df["日期"].max()
+        end_date = (latest_date + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+        if verbose:
+            print(f"[3/4] 运行回测...")
+
+        sequences = {}
+        config = {"slippage": 0.001, "commission": 0.0003}
+
+        for model_key, preds_dict in all_predictions.items():
+            if verbose:
+                print(f"  回测: {model_key}...")
+            pred_func = _make_predictions_func_from_saved(preds_dict)
+            result = run_backtest_sequence(
+                predictions_func=pred_func,
+                data_file=str(DATA_FILE),
+                start_date=start_date,
+                end_date=end_date,
+                top_k=top_k,
+                rebalance_days=rebalance_days,
+                position_pct=position_pct,
+                initial_capital=initial_capital,
+                commission=config.get("commission", 0.0003),
+                slippage=config.get("slippage", 0.001),
+                trade_mode=trade_mode,
+            )
+            sequences[model_key] = result
+
+        if not sequences:
+            print("错误: 回测未产生任何结果")
+            return None
+
+        # 选取主序列（遵循 model_selection.yaml 的 master 设置）
+        report_key = _resolve_report_key(sequences)
+        if not report_key:
+            print("错误: 无法确定主序列")
+            return None
+        report_data = sequences[report_key]
+        latest_date_str = latest_date.strftime("%Y-%m-%d")
+
+        if verbose:
+            print(f"[4/4] 生成并发送日报...")
+
+        # 绘图
+        plot_path = OUTPUT_DIR / "equity_curves.png"
+        try:
+            plot_equity_curves(sequences, str(DATA_FILE), initial_capital, str(plot_path))
+        except Exception as e:
+            if verbose:
+                print(f"  [图表] 保存失败: {e}")
+
+        # 当前价格
+        today_actual_trades = [t for t in report_data["trades"] if t["date"] == latest_date_str and t["action"] in ("买入", "卖出")]
+        is_rebalance_day = len(today_actual_trades) > 0
+        pnl_positions = {p["stock_id"]: p for p in report_data.get("today_pnl", {}).get("positions", [])}
+
+        # 加载 ETF 名称
+        etf_names = {}
+        etf_list_path = PROJECT_ROOT / "etf_data" / "etf_list_before_2022_74.csv"
+        if etf_list_path.exists():
+            import csv
+            with open(etf_list_path, "r", encoding="utf-8-sig") as f:
+                for row in csv.DictReader(f):
+                    code = row.get("代码", "").strip()
+                    name = row.get("名称", "").strip()
+                    if code and name:
+                        etf_names[code] = name
+
+        # 构造持仓
+        holdings = []
+        for stock_id, pos in report_data["positions"].items():
+            price = pnl_positions.get(stock_id, {}).get("today_close", 0)
+            sub = raw_df[raw_df["股票代码"] == stock_id]
+            hl_s = sub.loc[sub["日期"] == latest_date, "涨停价"]
+            ll_s = sub.loc[sub["日期"] == latest_date, "跌停价"]
+            buy_price = pos.get("buy_price", 0) or report_data.get("metrics", {}).get("last_trade_prices", {}).get(stock_id, 0)
+            holdings.append({
+                "stock_id": stock_id,
+                "name": etf_names.get(stock_id, ""),
+                "price": price,
+                "buy_price": round(buy_price, 4),
+                "shares": pos["shares"],
+                "cost": pos["cost"],
+                "high_limit": round(float(hl_s.values[0]), 4) if not hl_s.empty else 0,
+                "low_limit": round(float(ll_s.values[0]), 4) if not hl_s.empty else 0,
+            })
+
+        # 今日调仓（全部序列）
+        all_today_trades = []
+        for key, seq in sequences.items():
+            for t in seq.get("trades", []):
+                if t["date"] == latest_date_str and t["action"] in ("买入", "卖出"):
+                    t["model_key"] = key
+                    all_today_trades.append(t)
+
+        # 构造 report JSON
+        hs300_raw = raw_df[raw_df["股票代码"] == "510300.XSHG"].sort_values("日期")
+        hs300_curve = []
+        if not hs300_raw.empty:
+            hs300_period = hs300_raw[(hs300_raw["日期"] >= pd.Timestamp(start_date)) & (hs300_raw["日期"] < pd.Timestamp(end_date))]
+            if not hs300_period.empty:
+                hs300_start_price = float(hs300_period["收盘"].iloc[0])
+                for _, row in hs300_period.iterrows():
+                    hs300_curve.append({
+                        "date": row["日期"].strftime("%Y-%m-%d"),
+                        "total_value": round(float(row["收盘"]) / hs300_start_price * initial_capital, 2),
+                    })
+
+        sequences_summary = {}
+        for key, seq in sequences.items():
+            seq_pnl = {p["stock_id"]: p for p in seq.get("today_pnl", {}).get("positions", [])}
+            seq_current_prices = {sid: p["today_close"] for sid, p in seq_pnl.items() if p.get("today_close", 0) > 0}
+            model_stats = _compute_model_stats(seq["trades"], seq_current_prices, report_date=latest_date_str)
+            seq["model_stats"] = model_stats
+            sequences_summary[key] = {
+                "metrics": seq["metrics"],
+                "cash": seq["cash"],
+                "positions_count": len(seq["positions"]),
+                "trades_count": len(seq["trades"]),
+                "trades": seq["trades"],
+                "today_pnl": seq.get("today_pnl", {}),
+                "model_stats": model_stats,
+                "equity_curve": seq.get("equity_curve", []),
+                "skipped_trades": seq.get("skipped_trades", []),
+            }
+
+        today_pnl_data = report_data.get("today_pnl", {})
+        report = {
+            "date": latest_date_str,
+            "is_rebalance_day": is_rebalance_day,
+            "next_rebalance_date": report_data["metrics"].get("next_rebalance_date", ""),
+            "today_trades": today_actual_trades,
+            "all_today_trades": all_today_trades,
+            "metrics": report_data["metrics"],
+            "holdings": holdings,
+            "cash": report_data["cash"],
+            "total_value": report_data["metrics"]["latest_value"],
+            "sequences": sequences_summary,
+            "hs300_curve": hs300_curve,
+            "trade_mode": trade_mode,
+        }
+
+        with open(REPORT_PATH, "w", encoding="utf-8") as f:
+            json.dump(report, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
+
+        # 保存 state
+        state = {
+            "sequences": sequences,
+            "last_updated": timestamp,
+        }
+        with open(STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
+
+        # 发送邮件
+        try:
+            if verbose:
+                model_display = report_key.replace("search_", "").replace("_exp_", " ")
+                print(f"\n[邮件] 发送报告: {model_display}...")
+            send_report(model_key=report_key)
+        except Exception as e:
+            if verbose:
+                print(f"\n[邮件] 发送失败: {e}")
+
+        # 历史报告
+        try:
+            _save_history_reports(sequences[report_key], sequences, str(DATA_FILE), initial_capital, etf_names, model_key=report_key, rebalance_days=rebalance_days)
+        except Exception as e:
+            if verbose:
+                print(f"\n[历史] 生成失败: {e}")
+
+        if verbose:
+            m = report_data["metrics"]
+            print(f"\n{'='*60}")
+            print(f"  日报 ({latest_date_str}) [序列: {report_key}]")
+            print(f"  今日盈亏: {today_pnl_data.get('total_pnl', 0):+.2f}")
+            print(f"  累计收益: {m['strategy_return_pct']:+.2f}%")
+            print(f"  账户总值: {m['latest_value']:,.2f}")
+            print(f"{'='*60}")
+
+        return state
+
+    except Exception as e:
+        print(f"\n[错误] 从预测信号生成日报失败: {e}")
+        traceback.print_exc()
+        return None
+
+
+# ============================================================
+# 模式3: 从已保存的 backtest_state.json 生成日报（无模型无回测）
+# ============================================================
+
+def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capital=100000, trade_mode="open"):
+    """读取 backtest_state.json 直接生成日报，不执行任何模型或回测。"""
+    from send_report import send_report
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    if not STATE_PATH.exists():
+        print(f"错误: 未找到 {STATE_PATH}")
+        print("请先运行 juejin/main.py 或 daily_eval 生成回测状态")
+        return None
+
+    if verbose:
+        print(f"\n{'='*60}")
+        print(f"[{timestamp}] 从 backtest_state.json 生成日报")
+        print(f"{'='*60}")
+
+    try:
+        with open(STATE_PATH, "r", encoding="utf-8") as f:
+            state = json.load(f)
+
+        # 优先从 state 文件读取 trade_mode（掘金回测保存），否则用参数
+        state_trade_mode = state.get("trade_mode")
+        if state_trade_mode:
+            trade_mode = state_trade_mode
+
+        sequences = state.get("sequences", {})
+        if not sequences:
+            print("错误: backtest_state.json 中无序列数据")
+            return None
+
+        # 选主序列（遵循 model_selection.yaml 的 master 设置）
+        report_key = _resolve_report_key(sequences)
+        if not report_key:
+            print("错误: 无法确定主序列")
+            return None
+        report_data = sequences[report_key]
+
+        # 加载价格数据
+        raw_df = pd.read_csv(DATA_FILE, dtype={"股票代码": str})
+        raw_df["股票代码"] = raw_df["股票代码"].astype(str).str.zfill(6)
+        raw_df["日期"] = pd.to_datetime(raw_df["日期"])
+        latest_date = raw_df["日期"].max()
+        latest_date_str = latest_date.strftime("%Y-%m-%d")
+        end_date = (latest_date + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+        # 加载 ETF 名称
+        etf_names = {}
+        etf_list_path = PROJECT_ROOT / "etf_data" / "etf_list_before_2022_74.csv"
+        if etf_list_path.exists():
+            import csv
+            with open(etf_list_path, "r", encoding="utf-8-sig") as f:
+                for row in csv.DictReader(f):
+                    code = row.get("代码", "").strip()
+                    name = row.get("名称", "").strip()
+                    if code and name:
+                        etf_names[code] = name
+
+        # 今日调仓
+        all_today_trades = []
+        for key, seq in sequences.items():
+            for t in seq.get("trades", []):
+                if t["date"] == latest_date_str and t["action"] in ("买入", "卖出"):
+                    t["model_key"] = key
+                    all_today_trades.append(t)
+        is_rebalance_day = len(all_today_trades) > 0
+
+        # 构造持仓
+        pnl_positions = {p["stock_id"]: p for p in report_data.get("today_pnl", {}).get("positions", [])}
+        holdings = []
+        for stock_id, pos in report_data.get("positions", {}).items():
+            price = pnl_positions.get(stock_id, {}).get("today_close", 0)
+            sub = raw_df[raw_df["股票代码"] == stock_id]
+            tc_s = sub.loc[sub["日期"] == latest_date, "收盘"]
+            if price == 0 and not tc_s.empty:
+                price = float(tc_s.values[0])
+            hl_s = sub.loc[sub["日期"] == latest_date, "涨停价"]
+            ll_s = sub.loc[sub["日期"] == latest_date, "跌停价"]
+            holdings.append({
+                "stock_id": stock_id,
+                "name": etf_names.get(stock_id, ""),
+                "price": price,
+                "buy_price": round(report_data.get("metrics", {}).get("last_trade_prices", {}).get(stock_id, 0), 4),
+                "shares": pos["shares"],
+                "cost": pos["cost"],
+                "high_limit": round(float(hl_s.values[0]), 4) if not hl_s.empty else 0,
+                "low_limit": round(float(ll_s.values[0]), 4) if not ll_s.empty else 0,
+            })
+
+        # 构建 sequences_summary
+        sequences_summary = {}
+        for key, seq in sequences.items():
+            seq_pnl = {p["stock_id"]: p for p in seq.get("today_pnl", {}).get("positions", [])}
+            seq_current_prices = {sid: p["today_close"] for sid, p in seq_pnl.items() if p.get("today_close", 0) > 0}
+            model_stats = _compute_model_stats(seq.get("trades", []), seq_current_prices, report_date=latest_date_str)
+            seq["model_stats"] = model_stats
+            sequences_summary[key] = {
+                "metrics": seq.get("metrics", {}),
+                "cash": seq.get("cash", 0),
+                "positions_count": len(seq.get("positions", {})),
+                "trades_count": len(seq.get("trades", [])),
+                "trades": seq.get("trades", []),
+                "today_pnl": seq.get("today_pnl", {}),
+                "model_stats": model_stats,
+                "equity_curve": seq.get("equity_curve", []),
+                "skipped_trades": seq.get("skipped_trades", []),
+            }
+
+        # HS300 基准曲线
+        hs300_curve = []
+        hs300_raw = raw_df[raw_df["股票代码"] == "510300.XSHG"].sort_values("日期")
+        if not hs300_raw.empty:
+            hs300_period = hs300_raw[(hs300_raw["日期"] >= pd.Timestamp(start_date)) & (hs300_raw["日期"] < pd.Timestamp(end_date))]
+            if not hs300_period.empty:
+                hs300_start_price = float(hs300_period["收盘"].iloc[0])
+                for _, row in hs300_period.iterrows():
+                    hs300_curve.append({
+                        "date": row["日期"].strftime("%Y-%m-%d"),
+                        "total_value": round(float(row["收盘"]) / hs300_start_price * initial_capital, 2),
+                    })
+
+        # 构建 latest_report.json
+        report = {
+            "date": latest_date_str,
+            "is_rebalance_day": is_rebalance_day,
+            "next_rebalance_date": report_data.get("metrics", {}).get("next_rebalance_date", ""),
+            "today_trades": all_today_trades,
+            "all_today_trades": all_today_trades,
+            "metrics": report_data.get("metrics", {}),
+            "holdings": holdings,
+            "cash": report_data.get("cash", 0),
+            "total_value": report_data.get("metrics", {}).get("latest_value", 0),
+            "sequences": sequences_summary,
+            "hs300_curve": hs300_curve,
+            "trade_mode": trade_mode,
+        }
+
+        with open(REPORT_PATH, "w", encoding="utf-8") as f:
+            json.dump(report, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
+
+        if verbose:
+            print(f"\n[日报] latest_report.json 已保存")
+            print(f"  日期: {latest_date_str}, 持仓: {len(holdings)}, 交易: {len(all_today_trades)}")
+
+        # 发送邮件
+        try:
+            model_display = report_key.replace("search_", "").replace("_exp_", " ")
+            print(f"\n[邮件] 发送报告: {model_display}...")
+            send_report(model_key=report_key)
+        except Exception as e:
+            if verbose:
+                print(f"\n[邮件] 发送失败: {e}")
+
+        return report
+
+    except Exception as e:
+        print(f"\n[错误] 从 backtest_state 生成日报失败: {e}")
+        traceback.print_exc()
+        return None
+
+
 if __name__ == "__main__":
     import argparse
     import multiprocessing as mp
@@ -1988,16 +2665,49 @@ if __name__ == "__main__":
     parser.add_argument("--rebalance-days", type=int, default=5, help="调仓频率(天)")
     parser.add_argument("--position-pct", type=float, default=0.95, help="仓位比例")
     parser.add_argument("--quiet", action="store_true", help="静默模式")
+    parser.add_argument("--predictions-only", action="store_true", help="仅保存预测信号，不执行回测")
+    parser.add_argument("--from-predictions", action="store_true", help="从已保存的预测信号生成日报（跳过模型加载）")
+    parser.add_argument("--update-only", action="store_true", help="仅更新ETF数据，不执行任何其他操作")
+    parser.add_argument("--from-state", action="store_true", help="从已保存的 backtest_state.json 生成日报（跳过模型和回测）")
+    parser.add_argument("--trade-mode", type=str, default="open", choices=["open", "close"], help="交易模式: open（开盘交易，用前日收盘特征）或 close（收盘交易，用当日收盘特征）")
     args = parser.parse_args()
 
     mp.set_start_method("spawn", force=True)
 
-    daily_eval(
-        config_name=args.config,
-        update_data=not args.no_update,
-        top_k=args.topk,
-        verbose=not args.quiet,
-        start_date=args.start_date,
-        rebalance_days=args.rebalance_days,
-        position_pct=args.position_pct,
-    )
+    if args.update_only:
+        update_etf_data(verbose=not args.quiet)
+        print("数据更新完成。")
+    elif args.from_state:
+        run_from_backtest_state(verbose=not args.quiet, start_date=args.start_date, trade_mode=args.trade_mode)
+    elif args.predictions_only:
+        generate_predictions_only(
+            config_name=args.config,
+            update_data=not args.no_update,
+            top_k=args.topk,
+            verbose=not args.quiet,
+            start_date=args.start_date,
+            rebalance_days=args.rebalance_days,
+            position_pct=args.position_pct,
+        )
+    elif args.from_predictions:
+        run_from_predictions(
+            update_data=not args.no_update,
+            top_k=args.topk,
+            verbose=not args.quiet,
+            start_date=args.start_date,
+            rebalance_days=args.rebalance_days,
+            position_pct=args.position_pct,
+            config_name=args.config,
+            trade_mode=args.trade_mode,
+        )
+    else:
+        daily_eval(
+            config_name=args.config,
+            update_data=not args.no_update,
+            top_k=args.topk,
+            verbose=not args.quiet,
+            start_date=args.start_date,
+            rebalance_days=args.rebalance_days,
+            position_pct=args.position_pct,
+            trade_mode=args.trade_mode,
+        )

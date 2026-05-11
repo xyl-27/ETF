@@ -324,8 +324,11 @@ class BacktestEngine:
         predictions_func,
         rebalance_days: int = 5,
         first_rebalance_date=None,
+        trade_mode: str = "open",
     ) -> List[Dict]:
-        """运行回测"""
+        """运行回测
+        trade_mode: "open"（开盘交易，用前日特征）或 "close"（收盘交易，用当日特征）
+        """
         if first_rebalance_date is None:
             first_rebalance_date = dates[0]
 
@@ -416,7 +419,20 @@ class BacktestEngine:
                     self._write_log(f"\n{'=' * 50}")
                     self._write_log(f"调仓日: {current_date.strftime('%Y-%m-%d')}")
 
-                predictions = predictions_func(current_date)
+                if trade_mode == "open":
+                    if i > start_idx:
+                        pred_date = dates[i - 1]
+                    else:
+                        all_dates_ts = sorted(price_data["日期"].unique())
+                        try:
+                            idx = all_dates_ts.index(current_date)
+                            pred_date = all_dates_ts[idx - 1] if idx > 0 else current_date
+                        except ValueError:
+                            pred_date = current_date
+                else:
+                    pred_date = current_date
+
+                predictions = predictions_func(pred_date)
                 if predictions is None:
                     if self.log:
                         self._write_log("预测失败，跳过调仓")
@@ -470,49 +486,69 @@ class BacktestEngine:
                         if self.log:
                             self._write_log(f"卖出: {stock}")
 
-                if self.log:
-                    total_pct = self.position_pct * 100
-                    self._write_log(
-                        f"总仓位: {total_pct:.2f}%, 目标持仓数: {self.top_k}"
-                    )
+                # 对所有 Top-K 等权再平衡（类似 order_target_percent）
+                target_value_per_stock = total_value * self.position_pct / self.top_k
 
-                buyable_targets = []
                 for pred in predictions[: self.top_k]:
                     stock = pred["stock_id"]
                     price = price_dict.get(stock, 0)
-                    if price > 0 and stock not in self.positions:
+                    if price <= 0:
+                        continue
+
+                    exec_price_buy = price * (1 + self.slippage)
+                    exec_price_sell = price * (1 - self.slippage)
+
+                    target_shares = int(target_value_per_stock / exec_price_buy / 100) * 100
+                    if target_shares == 0:
+                        continue
+
+                    current_shares = self.positions.get(stock, {}).get("shares", 0)
+                    diff_shares = target_shares - current_shares
+
+                    if diff_shares > 0:
                         if not self._can_buy(stock, price, high_limit_dict, paused_dict):
                             reason = "停牌" if paused_dict.get(stock, 0) == 1 else "涨停"
                             self.skipped_trades.append({"date": current_date, "action": "买入", "stock": stock, "reason": reason})
                             if self.log:
                                 self._write_log(f"  {stock}: {reason}，暂不可买入，跳过")
                             continue
-                        buyable_targets.append((stock, price, pred))
-
-                if buyable_targets:
-                    adjusted_buy_value = total_value * self.position_pct / len(buyable_targets)
-                    self._write_log(
-                        f"每只股票目标市值: {adjusted_buy_value:.2f} (可买{len(buyable_targets)}只)"
-                    ) if self.log else None
-                    for stock, price, pred in buyable_targets:
-                        self.buy(stock, price, adjusted_buy_value, current_date)
+                        buy_value = diff_shares * exec_price_buy
+                        if buy_value > self.cash:
+                            diff_shares = int(self.cash / exec_price_buy / 100) * 100
+                            if diff_shares == 0:
+                                continue
+                            buy_value = diff_shares * exec_price_buy
+                        self.buy(stock, price, buy_value, current_date)
                         if self.trades:
                             s = score_map[stock]
                             self.trades[-1]["score"] = float(s)
                             self.trades[-1]["advantage"] = round((s - score_cutoff) / score_std, 4)
                         if self.log:
-                            shares = self.positions[stock]["shares"]
-                            actual_value = shares * price
+                            new_shares = self.positions[stock]["shares"]
+                            actual_value = new_shares * price
                             pct = actual_value / total_value * 100
                             self._write_log(
-                                f"买入 {stock}: {shares}股 @ {price:.4f} (市值: {actual_value:.2f}, 占比: {pct:.2f}%)"
+                                f"买入 {stock}: {diff_shares}股 @ {exec_price_buy:.4f} (目标: {target_shares}股, 占比: {pct:.2f}%)"
                             )
 
-                if self.log:
-                    for pred in predictions[: self.top_k]:
-                        stock = pred["stock_id"]
-                        price = price_dict.get(stock, 0)
-                        if price > 0 and stock in self.positions:
+                    elif diff_shares < 0:
+                        if not self._can_sell(stock, price, low_limit_dict, paused_dict):
+                            reason = "停牌" if paused_dict.get(stock, 0) == 1 else "跌停"
+                            self.skipped_trades.append({"date": current_date, "action": "卖出", "stock": stock, "reason": reason})
+                            if self.log:
+                                self._write_log(f"  {stock}: {reason}，暂不可卖出，跳过")
+                            continue
+                        sell_percent = (-diff_shares) / current_shares
+                        old_shares = self.positions[stock]["shares"]
+                        self.sell(stock, price, sell_percent, current_date)
+                        sold_shares = old_shares - self.positions.get(stock, {}).get("shares", 0)
+                        if self.log:
+                            self._write_log(
+                                f"卖出 {stock}: {sold_shares}股 @ {exec_price_sell:.4f} (目标: {target_shares}股)"
+                            )
+
+                    if self.log:
+                        if stock in self.positions:
                             shares = self.positions[stock]["shares"]
                             cost = self.positions[stock]["cost"]
                             actual_value = shares * price
@@ -730,7 +766,7 @@ class ETFBacktester:
             print(f"特征准备完成 (使用缓存): {self.processed.shape}")
 
     def _get_predictions(self, target_date) -> Optional[List[Dict]]:
-        """获取模型预测"""
+        """获取模型预测，使用 <= target_date 的数据"""
         all_dates_sorted = sorted(self.processed["日期"].unique())
         try:
             target_idx = all_dates_sorted.index(target_date)
@@ -784,6 +820,7 @@ class ETFBacktester:
         commission: float = 0.0003,
         slippage: float = 0.001,
         first_rebalance_date: str = None,
+        trade_mode: str = "open",
         log: bool = False,
     ) -> BacktestResult:
         """
@@ -798,6 +835,7 @@ class ETFBacktester:
             initial_capital: 初始资金
             commission: 手续费率
             first_rebalance_date: 首次调仓日期
+            trade_mode: "open"（开盘交易，用前日收盘特征）或 "close"（收盘交易，用当日收盘特征）
             log: 是否打印交易过程日志
 
         Returns:
@@ -846,6 +884,7 @@ class ETFBacktester:
             predictions_func=predictions_func,
             rebalance_days=rebalance_days,
             first_rebalance_date=first_reb_ts,
+            trade_mode=trade_mode,
         )
 
         # 计算策略收益
@@ -931,6 +970,7 @@ def run_backtest(
     commission: float = 0.0003,
     slippage: float = 0.001,
     first_rebalance_date: str = None,
+    trade_mode: str = "open",
     device: str = "cuda",
     model_file: str = "best_model_sliding.pth",
     log: bool = False,
@@ -950,6 +990,7 @@ def run_backtest(
         initial_capital: 初始资金
         commission: 手续费率
         first_rebalance_date: 首次调仓日期
+        trade_mode: "open"（开盘交易，用前日收盘特征）或 "close"（收盘交易，用当日收盘特征）
         device: 设备 (cuda/cpu)
         model_file: 模型权重文件 (best_model.pth 或 best_model_sliding.pth)
         log: 是否打印交易过程日志
@@ -1004,6 +1045,7 @@ def run_backtest(
         commission=commission,
         slippage=slippage,
         first_rebalance_date=first_rebalance_date,
+        trade_mode=trade_mode,
         log=log,
     )
 

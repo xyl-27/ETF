@@ -311,7 +311,8 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
                       trades_list, metrics, next_rebalance, is_rebalance,
                       today_pnl_total, today_pnl_positions=None,
                       chart_data_url=None, model_stats_section="",
-                      equity_data=None, scatter_section="", health_section=""):
+                      equity_data=None, scatter_section="", health_section="",
+                      trade_mode="open"):
     """构建报告HTML，各组件已预先准备好"""
     # 持仓表
     pnl_by_stock = {p["stock_id"]: p for p in (today_pnl_positions or [])}
@@ -498,7 +499,8 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
 
     # 填充模板
     html = _load_template()
-    html = html.replace("{{MODEL_INFO}}", f"模型: {model_display} | 日期: {date} | 下个调仓日: {next_rebalance}")
+    mode_label = "开盘交易" if trade_mode == "open" else "收盘交易"
+    html = html.replace("{{MODEL_INFO}}", f"模型: {model_display} | 日期: {date} | 模式: {mode_label} | 下个调仓日: {next_rebalance}")
     html = html.replace("{{TOTAL_BAR}}", total_bar)
     html = html.replace("{{METRICS_ROWS}}", metrics_rows)
     html = html.replace("{{WINDOW_ROWS}}", window_rows)
@@ -571,6 +573,8 @@ def send_report(model_key=None):
     if hs300:
         equity_data["沪深300"] = hs300
 
+    trade_mode = report.get("trade_mode", "open")
+
     html_body = build_report_html(
         date=date,
         model_display=model_display,
@@ -586,6 +590,7 @@ def send_report(model_key=None):
         model_stats_section=model_stats_section,
         equity_data=equity_data,
         health_section=health_section,
+        trade_mode=trade_mode,
     )
 
     msg = MIMEMultipart()
