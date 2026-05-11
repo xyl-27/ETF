@@ -94,10 +94,10 @@ def on_order_status(context, order):
 def on_backtest_finished(context, indicator):
     print("\n" + "="*50)
     print("回测完成")
-    print(f"累计收益: {indicator['cumulative_return_ratio']*100:.2f}%")
-    print(f"年化收益: {indicator['annual_return_ratio']*100:.2f}%")
-    print(f"最大回撤: {indicator['max_drawdown']*100:.2f}%")
-    print(f"夏普比率: {indicator['sharpe_ratio']:.2f}")
+    print(f"累计收益: {indicator.get('cumulative_return_ratio', 0)*100:.2f}%")
+    print(f"年化收益: {indicator.get('annual_return_ratio', 0)*100:.2f}%")
+    print(f"最大回撤: {indicator.get('max_drawdown', 0)*100:.2f}%")
+    print(f"夏普比率: {indicator.get('sharpe_ratio', 0):.2f}")
 
 
 if __name__ == '__main__':
