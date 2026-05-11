@@ -1257,7 +1257,8 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
             }
         health_scores = {}
         for hkey in all_sequences:
-            health_scores[hkey] = _compute_health_score(all_sequences[hkey])
+            truncated = {"equity_curve": [e for e in all_sequences[hkey].get("equity_curve", []) if e["date"] <= cur_date]}
+            health_scores[hkey] = _compute_health_score(truncated)
         health_section = _build_health_table(health_scores)
 
         model_stats_section = _build_model_stats_table(hist_sequences)
