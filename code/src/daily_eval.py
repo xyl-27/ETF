@@ -857,10 +857,11 @@ BEST_CONFIG = [
 
 
 def _compute_health_score(model_data):
-    """Compute universal health score (0-100) for a model from its equity curve."""
+    """Compute universal health score (0-100) with details and correlation."""
+    from scipy.stats import pearsonr
     ec = model_data.get("equity_curve", [])
     if len(ec) < 2:
-        return 50.0
+        return {"score": 50.0, "details": {}, "corr": None}
     values = [e["total_value"] for e in ec]
     daily_rets = [(values[i] / values[i - 1] - 1) * 100 for i in range(1, len(values))]
     df = pd.DataFrame({"ret": daily_rets})
@@ -868,12 +869,12 @@ def _compute_health_score(model_data):
     raw = {}
     for name, window, weight, direction in BEST_CONFIG:
         if name == "avgret":
-            raw[name] = df["ret"].rolling(window).mean().fillna(0)
+            s = df["ret"].rolling(window).mean()
+            raw[name] = s.fillna(0)
         elif name == "dd":
             running_max = np.maximum.accumulate(df["cummax"].values)
             dd_vals = (df["cummax"].values - running_max) / running_max * 100
-            df_tmp = pd.DataFrame({"dd": dd_vals})
-            raw[name] = df_tmp["dd"].rolling(window).min().fillna(0)
+            raw[name] = pd.Series(dd_vals).rolling(window).min().fillna(0)
         elif name == "wr":
             raw[name] = (df["ret"] > 0).rolling(window).mean().fillna(0.5)
         elif name == "vol":
@@ -881,6 +882,7 @@ def _compute_health_score(model_data):
     latest = {k: float(v.iloc[-1]) for k, v in raw.items()}
     all_hist = {k: v.values for k, v in raw.items()}
     scores = []
+    details = {}
     for name, window, weight, direction in BEST_CONFIG:
         h = all_hist[name]
         v = latest[name]
@@ -893,10 +895,51 @@ def _compute_health_score(model_data):
         if direction == -1:
             norm = 1.0 - norm
         scores.append(norm * weight)
+        if name == "wr":
+            details["wr"] = f"{v*100:.0f}%"
+        elif name == "avgret":
+            details["avgret"] = f"{v:+.2f}%"
+        elif name == "dd":
+            details["dd"] = f"{v:.1f}%"
+        elif name == "vol":
+            details["vol"] = f"{v:.2f}%"
     raw_score = sum(scores)
     total_weight = sum(w for _, _, w, _ in BEST_CONFIG)
     score_01 = raw_score / total_weight if total_weight > 0 else 0.5
-    return round(max(0.0, min(100.0, score_01 * 100)), 1)
+
+    all_scores = []
+    for i in range(len(daily_rets)):
+        s = []
+        for name, window, weight, direction in BEST_CONFIG:
+            h = all_hist[name]
+            v_i = float(raw[name].iloc[i])
+            lo_i, hi_i = float(np.min(h[:i+1])), float(np.max(h[:i+1]))
+            if hi_i - lo_i < 1e-12:
+                n = 0.5
+            else:
+                n = (v_i - lo_i) / (hi_i - lo_i)
+                n = max(0.0, min(1.0, n))
+            if direction == -1:
+                n = 1.0 - n
+            s.append(n * weight)
+        rs = sum(s) / total_weight if total_weight > 0 else 0.5
+        all_scores.append(rs)
+    all_scores = np.array(all_scores)
+    fwd_ret = []
+    for i in range(len(daily_rets)):
+        end = min(i + 5, len(daily_rets))
+        fwd_ret.append(sum(daily_rets[i:end]))
+    fwd_ret = np.array(fwd_ret)
+    corr_val = None
+    window_corr = 14
+    if len(all_scores) >= window_corr and np.std(all_scores[-window_corr:]) > 0 and np.std(fwd_ret[-window_corr:]) > 0:
+        r, p = pearsonr(all_scores[-window_corr:], fwd_ret[-window_corr:])
+        corr_val = {"r": round(r, 3), "p": round(p, 4), "n": window_corr}
+    return {
+        "score": round(max(0.0, min(100.0, score_01 * 100)), 1),
+        "details": details,
+        "corr": corr_val,
+    }
 
 
 def _health_color(score):
