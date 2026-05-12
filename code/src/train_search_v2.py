@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import time
+import traceback
 import joblib
 import pandas as pd
 import numpy as np
@@ -722,14 +723,28 @@ def main(args):
                 results = json.load(f)
             print(f"Loaded {len(results)} existing results for best-score tracking.")
 
-        optuna_storage = f"sqlite:///{search_dir}/optuna_study.db"
-        study = optuna.create_study(
-            storage=optuna_storage,
-            study_name=f"etf_{config['model_type']}_{config.get('top_k', 3)}",
-            load_if_exists=True,
-            direction="maximize",
-            sampler=optuna.samplers.TPESampler(seed=42),
-        )
+        optuna_db_path = os.path.join(search_dir, "optuna_study.db")
+        optuna_storage = f"sqlite:///{optuna_db_path}"
+
+        if args.fresh:
+            for f_path in [optuna_db_path, optuna_db_path + "-journal"]:
+                if os.path.exists(f_path):
+                    os.remove(f_path)
+                    print(f"Deleted old study: {f_path}")
+            results = []
+            study = optuna.create_study(
+                study_name=f"etf_{config['model_type']}_{config.get('top_k', 3)}",
+                direction="maximize",
+                sampler=optuna.samplers.TPESampler(seed=42),
+            )
+        else:
+            study = optuna.create_study(
+                storage=optuna_storage,
+                study_name=f"etf_{config['model_type']}_{config.get('top_k', 3)}",
+                load_if_exists=True,
+                direction="maximize",
+                sampler=optuna.samplers.TPESampler(seed=42),
+            )
 
         search_metric = config.get("search_metric", "ndcg")
         n_completed = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
@@ -742,7 +757,12 @@ def main(args):
         print(f"Optimization metric: {search_metric}")
 
         def objective(trial):
-            params = search_space_fn(trial)
+            try:
+                params = search_space_fn(trial)
+            except Exception as e:
+                print(f"  Trial {trial.number} search space error: {e}")
+                raise optuna.exceptions.TrialPruned()
+
             exp_idx = trial.number
 
             output_dir = os.path.join(search_dir, f"exp_{exp_idx}")
@@ -766,7 +786,12 @@ def main(args):
                 print(f"GPU before: allocated={torch.cuda.memory_allocated()/1e9:.2f}GB, reserved={torch.cuda.memory_reserved()/1e9:.2f}GB")
 
             start_time = time.time()
-            result = run_experiment(params, config, preprocessed_data, scaler, search_dir, exp_idx, config_module)
+            try:
+                result = run_experiment(params, config, preprocessed_data, scaler, search_dir, exp_idx, config_module)
+            except Exception as e:
+                print(f"  Trial {trial.number} failed during training: {e}")
+                traceback.print_exc()
+                raise optuna.exceptions.TrialPruned()
             elapsed = time.time() - start_time
             result["exp_idx"] = exp_idx
             results.append(result)
@@ -850,5 +875,6 @@ if __name__ == "__main__":
     parser.add_argument("--search-method", type=str, default="bayesian", choices=["grid", "bayesian"])
     parser.add_argument("--n-trials", type=int, default=None)
     parser.add_argument("--search-metric", type=str, default=None)
+    parser.add_argument("--fresh", action="store_true", help="删除旧的 Optuna study，重新开始")
     args = parser.parse_args()
     main(args)

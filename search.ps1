@@ -13,7 +13,7 @@ if (Test-Path ".venv") {
 }
 
 # 要搜索的模型类型 (空格分隔)
-$SEARCH_MODEL_TYPES = @("itransformer","gru","dlinear","lstm","timesnet")
+$SEARCH_MODEL_TYPES = @("itransformer","gru","tcn","dlinear","lstm","timesnet")
 
 # 通用配置
 $CONFIG_NAME = "config"
@@ -79,18 +79,20 @@ foreach ($MODEL_TYPE in $SEARCH_MODEL_TYPES) {
         Write-Host "Search completed for $MODEL_TYPE!"
         Write-Host ""
         Write-Host "Top 5 results:"
-        # 结果文件路径转为 Python 安全的格式（反斜杠 → 正斜杠）
-        $PY_RESULTS_PATH = $RESULTS_FILE.Replace('\', '/')
-        python -c @"
-import json
-path = '$PY_RESULTS_PATH'
+        # 用临时文件避免 PowerShell 字符串转义问题
+        $tmpScript = [System.IO.Path]::GetTempFileName() + ".py"
+        @"
+import json, sys
+path = '$($RESULTS_FILE.Replace("\", "/"))'
 with open(path) as f:
     results = json.load(f)
 sorted_results = sorted([r for r in results if r.get('success')], key=lambda x: x.get('score', 0), reverse=True)
 for i, r in enumerate(sorted_results[:5]):
-    params = r['params']
-    print(f"{i+1}. LR={params['learning_rate']:.6g}, DM={params['d_model']}, NL={params['num_layers']}, DP={params['dropout']} -> score={r['score']:.4f}  model={r.get('model_type','?')}")
-"@
+    p = r['params']
+    print(f"{i+1}. LR={p['learning_rate']:.6g}, DM={p['d_model']}, NL={p['num_layers']}, DP={p['dropout']} -> score={r['score']:.4f}  model={r.get('model_type','?')}")
+"@ | Out-File -FilePath $tmpScript -Encoding UTF8
+        python $tmpScript
+        Remove-Item $tmpScript
     }
 
     Write-Host ""
