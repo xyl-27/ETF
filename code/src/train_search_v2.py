@@ -528,6 +528,7 @@ def run_experiment(
         "success": True,
         "score": best_metric_val,
         "metric": search_metric,
+        "model_type": exp_config.get("model_type", ""),
         "sliding_score": best_sliding_score,
         "best_epoch": best_epoch,
         "params": params,
@@ -665,6 +666,7 @@ def main(args):
 
             print(f"\n{'=' * 50}")
             print(f"Experiment {i + 1}/{len(PARAM_GRID)}")
+            print(f"Model: {config.get('model_type', '?')}")
             print(f"Params: {params}")
             print(f"{'=' * 50}")
 
@@ -693,6 +695,7 @@ def main(args):
                 results[-1]["time"] = elapsed
 
             print(f"\n📊 Experiment {i + 1} result:")
+            print(f"   Model: {result.get('model_type', '?')}")
             print(f"   Metric: {result.get('metric', config.get('search_metric', 'ndcg'))}")
             print(f"   Score:  {result['score']:.6f}")
             print(f"   Sliding final_score: {result.get('sliding_score', 0):.6f}")
@@ -755,6 +758,7 @@ def main(args):
 
             print(f"\n{'=' * 50}")
             print(f"Trial {trial.number + 1}/{min(n_trials, remaining_trials + n_completed)} (Bayesian)")
+            print(f"Model: {config.get('model_type', '?')}")
             print(f"Params: {params}")
             print(f"{'=' * 50}")
 
@@ -778,6 +782,7 @@ def main(args):
 
             best_sofar = max(r["score"] for r in results if r["success"])
             print(f"\n📊 Trial {trial.number + 1} result:")
+            print(f"   Model: {result.get('model_type', '?')}")
             print(f"   Metric: {result.get('metric', search_metric)}")
             print(f"   Score:  {result['score']:.6f}")
             print(f"   Sliding final_score: {result.get('sliding_score', 0):.6f}")
