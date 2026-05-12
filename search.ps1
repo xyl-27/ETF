@@ -13,7 +13,7 @@ if (Test-Path ".venv") {
 }
 
 # 要搜索的模型类型 (空格分隔)
-$SEARCH_MODEL_TYPES = @("dlinear","lstm","timesnet")
+$SEARCH_MODEL_TYPES = @("itransformer","gru","dlinear","lstm","timesnet")
 
 # 通用配置
 $CONFIG_NAME = "config"
@@ -22,7 +22,7 @@ $FEATURE_NUM = "39"
 $TOPK = 3
 $DATA_FILE = "etf_74_train.csv"
 $SEARCH_METHOD = "bayesian"   # "bayesian" 或 "grid"
-$N_TRIALS = 80                # 贝叶斯搜索的试验次数 (仅 bayesian 模式生效)
+$N_TRIALS = 160                # 贝叶斯搜索的试验次数 (仅 bayesian 模式生效)
 $SEARCH_METRIC = "ndcg"       # 优化指标 (ndcg/mrr/excess_return/final_score)
 
 foreach ($MODEL_TYPE in $SEARCH_MODEL_TYPES) {
@@ -79,15 +79,18 @@ foreach ($MODEL_TYPE in $SEARCH_MODEL_TYPES) {
         Write-Host "Search completed for $MODEL_TYPE!"
         Write-Host ""
         Write-Host "Top 5 results:"
-        python -c "
+        # 结果文件路径转为 Python 安全的格式（反斜杠 → 正斜杠）
+        $PY_RESULTS_PATH = $RESULTS_FILE.Replace('\', '/')
+        python -c @"
 import json
-with open('$RESULTS_FILE') as f:
+path = '$PY_RESULTS_PATH'
+with open(path) as f:
     results = json.load(f)
 sorted_results = sorted([r for r in results if r.get('success')], key=lambda x: x.get('score', 0), reverse=True)
 for i, r in enumerate(sorted_results[:5]):
     params = r['params']
-    print(f'{i+1}. LR={params[\"learning_rate\"]}, DM={params[\"d_model\"]}, NL={params[\"num_layers\"]}, DP={params[\"dropout\"]} -> {r[\"score\"]:.4f}')
-"
+    print(f"{i+1}. LR={params['learning_rate']:.6g}, DM={params['d_model']}, NL={params['num_layers']}, DP={params['dropout']} -> score={r['score']:.4f}  model={r.get('model_type','?')}")
+"@
     }
 
     Write-Host ""
