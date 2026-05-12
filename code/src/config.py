@@ -23,6 +23,7 @@ config = {
     "data_path": "./etf_data",
     "data_file": "etf_74_train.csv",
     "search_metric": "ndcg",
+    "n_trials": 80,
     # 回测参数
     "commission": 0.0003,   # 手续费率 (万分之三)
     "slippage": 0.001,      # 滑点 (千分之一)
@@ -196,36 +197,104 @@ def get_param_grid(model_type):
 
 
 def get_search_space(model_type):
-    """返回贝叶斯搜索的搜索空间函数（Optuna trial 风格）"""
+    """返回贝叶斯搜索的搜索空间函数（Optuna trial 风格）
+
+    范围与 PARAM_GRID 一致，避免浪费 trial 在无效区域。
+    """
     if model_type not in MODEL_CONFIGS:
         raise ValueError(f"Unknown model type: {model_type}")
 
+    # 各模型类型的参数范围（与 PARAM_GRID 对齐）
+    ranges = {
+        "transformer": dict(
+            d_models=[128],
+            num_layers_range=(2, 3),
+            dropout_values=(0.1, 0.2),
+            learning_rate_range=(1e-5, 1e-4),
+        ),
+        "itransformer": dict(
+            d_models=[128, 256],
+            num_layers_range=(2, 3),
+            dropout_values=(0.1, 0.2),
+            learning_rate_range=(1e-5, 1e-4),
+            nhead_values=[8],
+            num_experts_values=[None, 3, 4],
+        ),
+        "lstm": dict(
+            d_models=[64, 128, 256],
+            num_layers_range=(1, 2),
+            dropout_values=(0.1, 0.2),
+            learning_rate_range=(1e-5, 1e-4),
+            num_experts_values=[None, 3, 4],
+        ),
+        "gru": dict(
+            d_models=[64, 128, 256],
+            num_layers_range=(1, 2),
+            dropout_values=(0.1, 0.2),
+            learning_rate_range=(1e-5, 1e-4),
+            num_experts_values=[None, 3, 4],
+        ),
+        "tcn": dict(
+            d_models=[128, 256],
+            num_layers_range=(3, 4),
+            dropout_values=(0.1, 0.2),
+            learning_rate_range=(1e-5, 1e-4),
+            kernel_size_values=[3],
+            num_experts_values=[None, 2, 3],
+        ),
+        "timesnet": dict(
+            d_models=[64, 128, 256],
+            num_layers_range=(2, 3),
+            dropout_values=(0.1, 0.2),
+            learning_rate_range=(1e-5, 1e-4),
+            num_kernels_values=[6],
+            fft_top_k_values=[1],
+        ),
+        "dlinear": dict(
+            d_models=[64, 128, 256],
+            num_layers_range=(1, 1),
+            dropout_values=(0.1, 0.2),
+            learning_rate_range=(1e-5, 1e-4),
+            kernel_size_values=[25],
+        ),
+    }
+
+    r = ranges.get(model_type, ranges["dlinear"])
+
     def search_space(trial):
         params = {}
-        params["learning_rate"] = trial.suggest_float("learning_rate", 5e-6, 5e-4, log=True)
-        params["d_model"] = trial.suggest_categorical("d_model", [64, 128, 256])
-        params["num_layers"] = trial.suggest_int("num_layers", 1, 4)
-        params["dropout"] = trial.suggest_float("dropout", 0.05, 0.4)
+        params["learning_rate"] = trial.suggest_float(
+            "learning_rate", r["learning_rate_range"][0], r["learning_rate_range"][1], log=True,
+        )
+        params["d_model"] = trial.suggest_categorical("d_model", r["d_models"])
+        params["num_layers"] = trial.suggest_int("num_layers", *r["num_layers_range"])
+        params["dropout"] = trial.suggest_float(
+            "dropout", r["dropout_values"][0], r["dropout_values"][1],
+        )
 
-        if model_type in ("transformer",):
-            params["nhead"] = trial.suggest_categorical("nhead", [4, 8])
+        if model_type in ("transformer", "itransformer"):
+            nhead = r.get("nhead_values", [8])
+            params["nhead"] = trial.suggest_categorical("nhead", nhead)
 
-        if model_type in ("itransformer",):
-            params["nhead"] = trial.suggest_categorical("nhead", [4, 8, 16])
+        if r.get("num_experts_values"):
+            params["num_experts"] = trial.suggest_categorical(
+                "num_experts", r["num_experts_values"],
+            )
 
-        if model_type in ("tcn",):
-            params["kernel_size"] = trial.suggest_categorical("kernel_size", [3, 5, 7])
-            params["num_experts"] = trial.suggest_categorical("num_experts", [None, 2, 3])
+        if r.get("kernel_size_values"):
+            params["kernel_size"] = trial.suggest_categorical(
+                "kernel_size", r["kernel_size_values"],
+            )
 
-        if model_type in ("lstm", "gru"):
-            params["num_experts"] = trial.suggest_categorical("num_experts", [None, 2, 3, 4])
+        if r.get("num_kernels_values"):
+            params["num_kernels"] = trial.suggest_categorical(
+                "num_kernels", r["num_kernels_values"],
+            )
 
-        if model_type in ("timesnet",):
-            params["num_kernels"] = trial.suggest_categorical("num_kernels", [4, 6, 8])
-            params["fft_top_k"] = trial.suggest_int("fft_top_k", 1, 5)
-
-        if model_type in ("dlinear",):
-            params["kernel_size"] = trial.suggest_categorical("kernel_size", [25, 51])
+        if r.get("fft_top_k_values"):
+            params["fft_top_k"] = trial.suggest_categorical(
+                "fft_top_k", r["fft_top_k_values"],
+            )
 
         return params
 
