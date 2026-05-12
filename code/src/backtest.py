@@ -37,6 +37,7 @@ class BacktestResult:
     log_file: Optional[str] = None
     equity_curve: pd.DataFrame = field(default_factory=pd.DataFrame)
     hs300_data: pd.DataFrame = field(default_factory=pd.DataFrame)
+    rebalance_stats: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         result = {
@@ -49,6 +50,10 @@ class BacktestResult:
             "是否恢复": self.recovered,
             "恢复天数": self.recovery_days,
         }
+        if self.rebalance_stats:
+            result["调仓次数"] = self.rebalance_stats.get("total", 0)
+            result["胜率"] = f"{self.rebalance_stats.get('win_rate', 0):.1f}%"
+            result["平均每次调仓收益"] = f"{self.rebalance_stats.get('avg_return', 0):.2f}%"
         if self.log_file:
             result["日志文件"] = self.log_file
         return result
@@ -59,6 +64,15 @@ class BacktestResult:
         print("=" * 50)
         for k, v in self.to_dict().items():
             print(f"{k}: {v}")
+        if self.rebalance_stats.get("returns"):
+            rets = self.rebalance_stats["returns"]
+            print("-" * 50)
+            print(f"调仓次数: {self.rebalance_stats['total']}")
+            print(f"盈利次数: {self.rebalance_stats['wins']}")
+            print(f"胜率: {self.rebalance_stats['win_rate']:.1f}%")
+            print(f"平均每次调仓收益: {self.rebalance_stats['avg_return']:.2f}%")
+            print(f"最好: {max(rets):+.2f}%")
+            print(f"最差: {min(rets):+.2f}%")
         print("=" * 50)
 
     def plot(self, save_path: str = None):
@@ -935,6 +949,10 @@ class ETFBacktester:
             recovery_days = None
             recovered = True
 
+        rebalance_stats = _compute_rebalance_stats(
+            equity_df, engine.predictions_history, initial_capital,
+        )
+
         result = BacktestResult(
             start_date=start_date,
             end_date=end_date,
@@ -948,6 +966,7 @@ class ETFBacktester:
             log_file=log_file,
             equity_curve=equity_df,
             hs300_data=hs300_data,
+            rebalance_stats=rebalance_stats,
         )
 
         if engine._log_fh:
@@ -1011,6 +1030,38 @@ class ETFBacktester:
             if preds:
                 result[d.strftime("%Y-%m-%d")] = preds
         return result
+
+
+def _compute_rebalance_stats(equity_df: pd.DataFrame, predictions_history: List[Dict], initial_capital: float) -> Dict:
+    """从 equity_curve + predictions_history 计算每次调仓收益和胜率，返回 dict"""
+    stats = {"returns": [], "total": 0, "wins": 0, "win_rate": 0.0, "avg_return": 0.0}
+    if not predictions_history:
+        return stats
+
+    equity = equity_df.copy()
+    equity["date"] = pd.to_datetime(equity["date"])
+    reb_dates = [pd.Timestamp(p["date"]) for p in predictions_history]
+    returns = []
+
+    for i in range(1, len(reb_dates)):
+        d0, d1 = reb_dates[i - 1], reb_dates[i]
+        v0 = equity.loc[equity["date"] == d0, "total_value"]
+        v1 = equity.loc[equity["date"] == d1, "total_value"]
+        if len(v0) == 0 or len(v1) == 0:
+            continue
+        ret = (v1.iloc[0] / v0.iloc[0] - 1) * 100
+        returns.append(round(ret, 2))
+
+    total = len(returns)
+    wins = sum(1 for r in returns if r > 0)
+    stats = {
+        "returns": returns,
+        "total": total,
+        "wins": wins,
+        "win_rate": round(wins / total * 100, 1) if total > 0 else 0.0,
+        "avg_return": round(sum(returns) / total, 2) if total > 0 else 0.0,
+    }
+    return stats
 
 
 def run_backtest_from_predictions(
@@ -1113,6 +1164,10 @@ def run_backtest_from_predictions(
         recovery_days = None
         recovered = True
 
+    rebalance_stats = _compute_rebalance_stats(
+        equity_df, engine.predictions_history, initial_capital,
+    )
+
     return BacktestResult(
         start_date=start_date,
         end_date=end_date,
@@ -1125,6 +1180,7 @@ def run_backtest_from_predictions(
         recovery_days=recovery_days,
         equity_curve=equity_df,
         hs300_data=hs300_data,
+        rebalance_stats=rebalance_stats,
     )
 
 
