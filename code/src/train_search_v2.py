@@ -594,6 +594,9 @@ def main(args):
     else:
         preprocessed_data, scaler = preprocess_and_save(config, search_dir)
 
+    search_metric_display = config.get("search_metric", "ndcg")
+    print(f"Optimization metric: {search_metric_display}")
+
     if search_method == "grid":
         # ========== 网格搜索 ==========
         PARAM_GRID = config_module.get_param_grid(config["model_type"])
@@ -689,11 +692,17 @@ def main(args):
             if "time" not in results[-1]:
                 results[-1]["time"] = elapsed
 
+            print(f"\n📊 Experiment {i + 1} result:")
+            print(f"   Metric: {result.get('metric', config.get('search_metric', 'ndcg'))}")
+            print(f"   Score:  {result['score']:.6f}")
+            print(f"   Sliding final_score: {result.get('sliding_score', 0):.6f}")
+            print(f"   Best epoch: {result.get('best_epoch', '?')}")
+            print(f"   ⏱️  Time: {elapsed:.1f}s")
+            best_sofar = max(r['score'] for r in results if r['success'])
+            print(f"   ✅ Best score so far: {best_sofar:.6f}")
             print(f"\n📊 Progress: {completed}/{len(PARAM_GRID)} ({completed / len(PARAM_GRID) * 100:.1f}%)")
-            print(f"⏱️  Last exp took: {elapsed:.1f}s")
             if remaining > 0:
                 print(f"⏳ Est. remaining: {remaining * avg_time / 60:.1f} min")
-            print(f"✅ Best score so far: {max(r['score'] for r in results if r['success']):.4f}")
 
     else:
         # ========== 贝叶斯搜索 (Optuna) ==========
@@ -719,6 +728,7 @@ def main(args):
             sampler=optuna.samplers.TPESampler(seed=42),
         )
 
+        search_metric = config.get("search_metric", "ndcg")
         n_completed = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
         remaining_trials = max(0, n_trials - n_completed)
         if len(study.trials) > 0:
@@ -726,6 +736,7 @@ def main(args):
             print(f"  Completed: {n_completed}, remaining: {remaining_trials}")
         else:
             print(f"Starting new Optuna study ({n_trials} trials).")
+        print(f"Optimization metric: {search_metric}")
 
         def objective(trial):
             params = search_space_fn(trial)
@@ -743,14 +754,16 @@ def main(args):
                                 return score
 
             print(f"\n{'=' * 50}")
-            print(f"Trial {trial.number + 1} (Bayesian)")
+            print(f"Trial {trial.number + 1}/{min(n_trials, remaining_trials + n_completed)} (Bayesian)")
             print(f"Params: {params}")
             print(f"{'=' * 50}")
 
             if torch.cuda.is_available():
                 print(f"GPU before: allocated={torch.cuda.memory_allocated()/1e9:.2f}GB, reserved={torch.cuda.memory_reserved()/1e9:.2f}GB")
 
+            start_time = time.time()
             result = run_experiment(params, config, preprocessed_data, scaler, search_dir, exp_idx, config_module)
+            elapsed = time.time() - start_time
             result["exp_idx"] = exp_idx
             results.append(result)
 
@@ -762,6 +775,15 @@ def main(args):
                 torch.cuda.synchronize()
                 torch.cuda.empty_cache()
             gc.collect()
+
+            best_sofar = max(r["score"] for r in results if r["success"])
+            print(f"\n📊 Trial {trial.number + 1} result:")
+            print(f"   Metric: {result.get('metric', search_metric)}")
+            print(f"   Score:  {result['score']:.6f}")
+            print(f"   Sliding final_score: {result.get('sliding_score', 0):.6f}")
+            print(f"   Best epoch: {result.get('best_epoch', '?')}")
+            print(f"   ⏱️  Time: {elapsed:.1f}s")
+            print(f"   ✅ Best score so far: {best_sofar:.6f}")
 
             return result["score"]
 
