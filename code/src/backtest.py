@@ -958,6 +958,145 @@ class ETFBacktester:
         return result
 
 
+    def generate_predictions_dict(
+        self,
+        start_date: str,
+        end_date: str,
+        top_k: int = 5,
+    ) -> Dict[str, List[Dict]]:
+        """为回测期间的所有调仓基准日生成预测，返回 {date_str: [predictions]}"""
+        all_dates = sorted(self.df["日期"].unique())
+        start_ts = pd.Timestamp(start_date)
+        end_ts = pd.Timestamp(end_date)
+        backtest_dates = [d for d in all_dates if start_ts <= d < end_ts]
+        seed_dates = set(backtest_dates)
+        prev_idx = all_dates.index(backtest_dates[0]) - 1
+        if prev_idx >= 0:
+            seed_dates.add(all_dates[prev_idx])
+
+        result = {}
+        for d in sorted(seed_dates):
+            preds = self._get_predictions(d)
+            if preds:
+                result[d.strftime("%Y-%m-%d")] = preds
+        return result
+
+
+def run_backtest_from_predictions(
+    predictions_dict: Dict[str, List[Dict]],
+    data_path: str,
+    start_date: str,
+    end_date: str,
+    top_k: int = 5,
+    rebalance_days: int = 5,
+    position_pct: float = 0.95,
+    initial_capital: float = 1000000,
+    commission: float = 0.0003,
+    slippage: float = 0.001,
+    first_rebalance_date: str = None,
+    trade_mode: str = "open",
+    log: bool = False,
+    verbose: bool = False,
+) -> BacktestResult:
+    """
+    从已保存的预测信号运行回测（无需加载模型，速度快）
+
+    Args:
+        predictions_dict: {date_str: [{rank, stock_id, score}, ...]}
+        data_path: ETF数据文件路径
+        ...其余参数同 run_backtest
+    """
+    start_ts = pd.Timestamp(start_date)
+    end_ts = pd.Timestamp(end_date)
+
+    raw_df = pd.read_csv(data_path, dtype={"股票代码": str})
+    raw_df["股票代码"] = raw_df["股票代码"].astype(str).str.zfill(6)
+    raw_df["日期"] = pd.to_datetime(raw_df["日期"])
+    all_dates = sorted(raw_df["日期"].unique())
+    backtest_dates = [d for d in all_dates if start_ts <= d < end_ts]
+
+    if first_rebalance_date:
+        first_reb_ts = pd.Timestamp(first_rebalance_date)
+    else:
+        first_reb_ts = backtest_dates[0] if backtest_dates else None
+
+    hs300_code = "510300.XSHG"
+    hs300_data = raw_df[raw_df["股票代码"] == hs300_code][["日期", "收盘"]].copy()
+    hs300_data = hs300_data.rename(columns={"日期": "date", "收盘": "close"})
+    hs300_data["date"] = pd.to_datetime(hs300_data["date"])
+    hs300_data = hs300_data[(hs300_data["date"] >= start_ts) & (hs300_data["date"] < end_ts)].copy()
+
+    def pred_func(date):
+        d_str = date.strftime("%Y-%m-%d") if hasattr(date, "strftime") else str(date)
+        return predictions_dict.get(d_str)
+
+    engine = BacktestEngine(
+        initial_capital=initial_capital,
+        commission=commission,
+        slippage=slippage,
+        top_k=top_k,
+        position_pct=position_pct,
+        log=log,
+    )
+
+    results = engine.run(
+        dates=backtest_dates,
+        price_data=raw_df,
+        predictions_func=pred_func,
+        rebalance_days=rebalance_days,
+        first_rebalance_date=first_reb_ts,
+        trade_mode=trade_mode,
+    )
+
+    equity_df = pd.DataFrame(results)
+    equity_df["date"] = pd.to_datetime(equity_df["date"])
+    strategy_return = (equity_df["total_value"].iloc[-1] / initial_capital - 1) * 100
+
+    if len(hs300_data) > 0:
+        hs300_data = hs300_data.sort_values("date").reset_index(drop=True)
+        hs300_start = hs300_data["close"].iloc[0]
+        hs300_end = hs300_data["close"].iloc[-1]
+        hs300_return = (hs300_end / hs300_start - 1) * 100
+    else:
+        hs300_return = 0
+
+    excess_return = strategy_return - hs300_return
+
+    cumulative = (equity_df["total_value"] / initial_capital).values
+    running_max = np.maximum.accumulate(cumulative)
+    drawdown = (cumulative - running_max) / running_max * 100
+    max_dd = abs(drawdown.min())
+    if max_dd > 0:
+        end_idx = int(np.argmin(drawdown))
+        max_idx = int(np.argmax(running_max[: end_idx + 1]))
+        dd_days = end_idx - max_idx
+        recovery_idx = None
+        for idx in range(end_idx + 1, len(cumulative)):
+            if cumulative[idx] >= cumulative[max_idx]:
+                recovery_idx = idx
+                break
+        recovery_days = int(recovery_idx - end_idx) if recovery_idx is not None else None
+        recovered = recovery_idx is not None
+    else:
+        dd_days = 0
+        recovery_days = None
+        recovered = True
+
+    return BacktestResult(
+        start_date=start_date,
+        end_date=end_date,
+        strategy_return=round(strategy_return, 2),
+        hs300_return=round(hs300_return, 2),
+        excess_return=round(excess_return, 2),
+        max_drawdown=round(max_dd, 2),
+        drawdown_days=dd_days,
+        recovered=recovered,
+        recovery_days=recovery_days,
+        equity_curve=equity_df,
+        hs300_data=hs300_data,
+    )
+
+
 def run_backtest(
     model_dir: str,
     data_path: str,
