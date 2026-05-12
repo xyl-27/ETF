@@ -505,6 +505,12 @@ def run_experiment(
     save_targets(val_loader, "weekly")
     save_targets(val_sliding_loader, "sliding")
 
+    # 可视化 epoch_scores
+    try:
+        plot_epoch_scores(output_dir, search_metric)
+    except Exception as e:
+        print(f"  Warning: failed to plot epoch scores: {e}")
+
     # Thorough cleanup
     del model
     del optimizer
@@ -534,6 +540,73 @@ def run_experiment(
         "best_epoch": best_epoch,
         "params": params,
     }
+
+
+def plot_epoch_scores(output_dir, search_metric="ndcg"):
+    """Read epoch_scores.txt and save a multi-panel visualization."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import pandas as pd
+
+    csv_path = os.path.join(output_dir, "epoch_scores.txt")
+    df = pd.read_csv(csv_path)
+    epochs = df["epoch"]
+
+    fig, axes = plt.subplots(2, 3, figsize=(16, 8))
+    fig.suptitle(f"Training History — {os.path.basename(output_dir)}", fontsize=14, fontweight="bold")
+
+    # 1. Loss
+    ax = axes[0, 0]
+    for col, label, style in [("train_loss", "Train", "-"), ("eval_loss", "Val(weekly)", "--"), ("eval_sliding_loss", "Val(sliding)", ":")]:
+        if col in df.columns:
+            ax.plot(epochs, df[col], style, label=label)
+    ax.set_title("Loss"); ax.set_xlabel("Epoch"); ax.legend(); ax.grid(True, alpha=0.3)
+
+    # 2. Main Score
+    ax = axes[0, 1]
+    for col, label, style in [("weekly_score", "Weekly", "-"), ("sliding_score", "Sliding", "--")]:
+        if col in df.columns:
+            ax.plot(epochs, df[col], style, label=label)
+    if search_metric in df.columns:
+        ax.plot(epochs, df[search_metric], ":", label=f"Best({search_metric})", alpha=0.8)
+    ax.set_title("Score"); ax.set_xlabel("Epoch"); ax.legend(); ax.grid(True, alpha=0.3)
+
+    # 3. NDCG
+    ax = axes[0, 2]
+    for col, label, style in [("weekly_ndcg", "Weekly", "-"), ("sliding_ndcg", "Sliding", "--")]:
+        if col in df.columns:
+            ax.plot(epochs, df[col], style, label=label)
+    ax.set_title("NDCG"); ax.set_xlabel("Epoch"); ax.legend(); ax.grid(True, alpha=0.3)
+
+    # 4. Excess Return
+    ax = axes[1, 0]
+    for col, label, style in [("weekly_excess_return", "Weekly", "-"), ("sliding_excess_return", "Sliding", "--")]:
+        if col in df.columns:
+            ax.plot(epochs, df[col], style, label=label)
+    ax.set_title("Excess Return"); ax.set_xlabel("Epoch"); ax.legend(); ax.grid(True, alpha=0.3)
+
+    # 5. Hit Rate & MRR
+    ax = axes[1, 1]
+    for col, label, style in [("weekly_hit_rate", "Hit(weekly)", "-"), ("sliding_hit_rate", "Hit(sliding)", "--"),
+                               ("weekly_mrr", "MRR(weekly)", "-."), ("sliding_mrr", "MRR(sliding)", ":")]:
+        if col in df.columns:
+            ax.plot(epochs, df[col], style, label=label)
+    ax.set_title("Hit Rate / MRR"); ax.set_xlabel("Epoch"); ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
+
+    # 6. Rank IC
+    ax = axes[1, 2]
+    for col, label, style in [("weekly_rank_ic", "Weekly", "-"), ("sliding_rank_ic", "Sliding", "--")]:
+        if col in df.columns:
+            ax.plot(epochs, df[col], style, label=label)
+    ax.axhline(0, color="gray", ls=":", alpha=0.5)
+    ax.set_title("Rank IC"); ax.set_xlabel("Epoch"); ax.legend(); ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    out_path = os.path.join(output_dir, "epoch_scores.png")
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved epoch_scores.png ({os.path.getsize(out_path)/1024:.0f}KB)")
 
 
 def main(args):
@@ -869,18 +942,29 @@ def main(args):
 if __name__ == "__main__":
     import argparse
 
+    # 默认搜索的模型类型（不传 --model-type 时全部搜索）
+    SEARCH_MODEL_TYPES = ["itransformer", "gru", "tcn", "dlinear", "lstm", "timesnet"]
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="config")
-    parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--model-type", type=str, default=None)
-    parser.add_argument("--feature-num", type=str, default=None)
-    parser.add_argument("--data-file", type=str, default=None)
-    parser.add_argument("--topk", type=int, default=None)
-    parser.add_argument("--sequence-length", type=int, default=None)
-    parser.add_argument("--N", type=int, default=None)
+    parser.add_argument("--resume", action="store_true", default=True)
+    parser.add_argument("--model-type", type=str, default=None,
+                        help=f"模型类型，不传则搜索全部: {', '.join(SEARCH_MODEL_TYPES)}")
+    parser.add_argument("--feature-num", type=str, default="39")
+    parser.add_argument("--data-file", type=str, default="etf_74_train.csv")
+    parser.add_argument("--topk", type=int, default=3)
+    parser.add_argument("--sequence-length", type=int, default=60)
+    parser.add_argument("--N", type=int, default=74)
     parser.add_argument("--search-method", type=str, default="bayesian", choices=["grid", "bayesian"])
-    parser.add_argument("--n-trials", type=int, default=None)
-    parser.add_argument("--search-metric", type=str, default=None)
+    parser.add_argument("--n-trials", type=int, default=160)
+    parser.add_argument("--search-metric", type=str, default="ndcg")
     parser.add_argument("--fresh", action="store_true", help="删除旧的 Optuna study，重新开始")
     args = parser.parse_args()
-    main(args)
+
+    model_types = [args.model_type] if args.model_type else SEARCH_MODEL_TYPES
+    for mt in model_types:
+        args.model_type = mt
+        print(f"\n{'=' * 60}")
+        print(f"  搜索模型: {mt}  ({model_types.index(mt) + 1}/{len(model_types)})")
+        print(f"{'=' * 60}")
+        main(args)
