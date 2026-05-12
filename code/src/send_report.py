@@ -347,7 +347,8 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
                       today_pnl_total, today_pnl_positions=None,
                       chart_data_url=None, model_stats_section="",
                        equity_data=None, scatter_section="", health_section="",
-                       trade_mode="open", pred_signals_section=""):
+                       trade_mode="open", pred_signals_section="",
+                       market_monitor_section=""):
     """构建报告HTML，各组件已预先准备好"""
     # 持仓表
     pnl_by_stock = {p["stock_id"]: p for p in (today_pnl_positions or [])}
@@ -547,6 +548,7 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
     html = html.replace("{{TRADES_SECTION}}", trades_section)
     html = html.replace("{{CHART_SRC}}", chart_data_url or "cid:chart_img")
     html = html.replace("{{SCATTER_SECTION}}", scatter_section)
+    html = html.replace("{{MARKET_MONITOR_SECTION}}", market_monitor_section)
     html = html.replace("{{PRED_SIGNALS_SECTION}}", pred_signals_section)
     html = html.replace("{{EQUITY_DATA}}", json.dumps(equity_data) if equity_data else "{}")
     html = html.replace("{{GENERATED_TIME}}", datetime.now().strftime("%Y-%m-%d %H:%M"))
@@ -614,6 +616,15 @@ def send_report(model_key=None):
     # 预测信号表
     pred_signals_section = _build_pred_signals_table(seq_data, date)
 
+    # 市场监控
+    market_monitor_section = ""
+    try:
+        from market_monitor import run_market_monitor
+        _, _, mm_html = run_market_monitor()
+        market_monitor_section = mm_html
+    except Exception as e:
+        print(f"  [市场监控] 生成失败: {e}")
+
     html_body = build_report_html(
         date=date,
         model_display=model_display,
@@ -631,6 +642,7 @@ def send_report(model_key=None):
         health_section=health_section,
         trade_mode=trade_mode,
         pred_signals_section=pred_signals_section,
+        market_monitor_section=market_monitor_section,
     )
 
     msg = MIMEMultipart()
