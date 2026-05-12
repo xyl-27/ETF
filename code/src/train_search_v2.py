@@ -394,38 +394,36 @@ def run_experiment(
                 f"{sliding_std_pred:.6f},{sliding_std_score:.6f}\n"
             )
 
-        # 保存当前epoch的预测结果到单独文件 (使用masked后的结果，和训练时评估一致)
-        model.eval()
-        with torch.no_grad():
-            # Weekly predictions
-            batch_preds_weekly = []
-            for batch in val_loader:
-                sequences = batch["sequences"].to(device)
-                outputs = model(sequences)
-                masks = batch["masks"].to(device)
-                # 应用mask：将无效股票设为很小的负数
-                masked_outputs = outputs * masks + (1 - masks) * (-1e9)
-                batch_preds_weekly.append(masked_outputs.cpu().numpy())
-            epoch_preds_weekly = np.concatenate(batch_preds_weekly, axis=0)
-            np.save(
-                os.path.join(output_dir, f"preds_weekly_epoch{epoch + 1}.npy"),
-                epoch_preds_weekly,
-            )
+        if exp_config.get("save_predictions", False):
+            model.eval()
+            with torch.no_grad():
+                # Weekly predictions
+                batch_preds_weekly = []
+                for batch in val_loader:
+                    sequences = batch["sequences"].to(device)
+                    outputs = model(sequences)
+                    masks = batch["masks"].to(device)
+                    masked_outputs = outputs * masks + (1 - masks) * (-1e9)
+                    batch_preds_weekly.append(masked_outputs.cpu().numpy())
+                epoch_preds_weekly = np.concatenate(batch_preds_weekly, axis=0)
+                np.save(
+                    os.path.join(output_dir, f"preds_weekly_epoch{epoch + 1}.npy"),
+                    epoch_preds_weekly,
+                )
 
-            # Sliding predictions
-            batch_preds_sliding = []
-            for batch in val_sliding_loader:
-                sequences = batch["sequences"].to(device)
-                outputs = model(sequences)
-                masks = batch["masks"].to(device)
-                # 应用mask
-                masked_outputs = outputs * masks + (1 - masks) * (-1e9)
-                batch_preds_sliding.append(masked_outputs.cpu().numpy())
-            epoch_preds_sliding = np.concatenate(batch_preds_sliding, axis=0)
-            np.save(
-                os.path.join(output_dir, f"preds_sliding_epoch{epoch + 1}.npy"),
-                epoch_preds_sliding,
-            )
+                # Sliding predictions
+                batch_preds_sliding = []
+                for batch in val_sliding_loader:
+                    sequences = batch["sequences"].to(device)
+                    outputs = model(sequences)
+                    masks = batch["masks"].to(device)
+                    masked_outputs = outputs * masks + (1 - masks) * (-1e9)
+                    batch_preds_sliding.append(masked_outputs.cpu().numpy())
+                epoch_preds_sliding = np.concatenate(batch_preds_sliding, axis=0)
+                np.save(
+                    os.path.join(output_dir, f"preds_sliding_epoch{epoch + 1}.npy"),
+                    epoch_preds_sliding,
+                )
 
         current_metric = eval_sliding_metrics.get(search_metric, 0.0)
 
@@ -631,6 +629,8 @@ def main(args):
         config["N"] = args.N
     if args.search_metric is not None:
         config["search_metric"] = args.search_metric
+    if args.save_predictions:
+        config["save_predictions"] = True
 
     # Clear any previous GPU memory state
     if torch.cuda.is_available():
@@ -959,6 +959,7 @@ if __name__ == "__main__":
     parser.add_argument("--n-trials", type=int, default=160)
     parser.add_argument("--search-metric", type=str, default="ndcg")
     parser.add_argument("--fresh", action="store_true", help="删除旧的 Optuna study，重新开始")
+    parser.add_argument("--save-predictions", action="store_true", help="保存每 epoch 的预测结果 npy 文件（默认不保存）")
     args = parser.parse_args()
 
     model_types = [args.model_type] if args.model_type else SEARCH_MODEL_TYPES
