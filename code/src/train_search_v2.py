@@ -672,7 +672,8 @@ def main(args):
             print(f"{'=' * 50}")
 
             if torch.cuda.is_available():
-                print(f"GPU before: allocated={torch.cuda.memory_allocated()/1e9:.2f}GB, reserved={torch.cuda.memory_reserved()/1e9:.2f}GB")
+                torch.cuda.reset_peak_memory_stats()
+                print(f"GPU before: alloc={torch.cuda.memory_allocated()/1e9:.2f}GB  reserved={torch.cuda.memory_reserved()/1e9:.2f}GB")
 
             start_time = time.time()
             result = run_experiment(params, config, preprocessed_data, scaler, search_dir, i, config_module)
@@ -680,6 +681,8 @@ def main(args):
             elapsed = time.time() - start_time
 
             if torch.cuda.is_available():
+                print(f"GPU after:  alloc={torch.cuda.memory_allocated()/1e9:.2f}GB  reserved={torch.cuda.memory_reserved()/1e9:.2f}GB  "
+                      f"peak={torch.cuda.max_memory_allocated()/1e9:.2f}GB")
                 torch.cuda.synchronize()
                 torch.cuda.empty_cache()
             gc.collect()
@@ -783,7 +786,8 @@ def main(args):
             print(f"{'=' * 50}")
 
             if torch.cuda.is_available():
-                print(f"GPU before: allocated={torch.cuda.memory_allocated()/1e9:.2f}GB, reserved={torch.cuda.memory_reserved()/1e9:.2f}GB")
+                torch.cuda.reset_peak_memory_stats()
+                print(f"GPU before: alloc={torch.cuda.memory_allocated()/1e9:.2f}GB  reserved={torch.cuda.memory_reserved()/1e9:.2f}GB")
 
             start_time = time.time()
             try:
@@ -794,18 +798,20 @@ def main(args):
                 raise optuna.exceptions.TrialPruned()
             elapsed = time.time() - start_time
             result["exp_idx"] = exp_idx
-            results.append(result)
 
-            with open(results_path, "w") as f:
-                json.dump(results, f, indent=2)
-
-            # 清理资源
             if torch.cuda.is_available():
+                print(f"GPU after:  alloc={torch.cuda.memory_allocated()/1e9:.2f}GB  reserved={torch.cuda.memory_reserved()/1e9:.2f}GB  "
+                      f"peak={torch.cuda.max_memory_allocated()/1e9:.2f}GB")
                 torch.cuda.synchronize()
                 torch.cuda.empty_cache()
             gc.collect()
 
-            best_sofar = max(r["score"] for r in results if r["success"])
+            results.append(result)
+            with open(results_path, "w") as f:
+                json.dump(results, f, indent=2)
+
+            current_completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+            best_sofar = max(t.value for t in current_completed) if current_completed else result["score"]
             print(f"\n📊 Trial {trial.number + 1} result:")
             print(f"   Model: {result.get('model_type', '?')}")
             print(f"   Metric: {result.get('metric', search_metric)}")
