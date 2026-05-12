@@ -1999,7 +1999,7 @@ def daily_eval(
 
 def generate_predictions_only(
     config_name: str = "config",
-    update_data: bool = True,
+    update_data: bool = False,
     top_k: int = 3,
     verbose: bool = True,
     start_date: str = "2026-04-01",
@@ -2209,7 +2209,7 @@ def generate_predictions_only(
 # ============================================================
 
 def run_from_predictions(
-    update_data: bool = True,
+    update_data: bool = False,
     top_k: int = 3,
     verbose: bool = True,
     start_date: str = "2026-04-01",
@@ -2634,7 +2634,6 @@ if __name__ == "__main__":
     elif args.predictions_only:
         generate_predictions_only(
             config_name=args.config,
-            update_data=not args.no_update,
             top_k=args.topk,
             verbose=not args.quiet,
             start_date=args.start_date,
@@ -2643,7 +2642,6 @@ if __name__ == "__main__":
         )
     elif args.from_predictions:
         run_from_predictions(
-            update_data=not args.no_update,
             top_k=args.topk,
             verbose=not args.quiet,
             start_date=args.start_date,
