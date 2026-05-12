@@ -963,19 +963,50 @@ class ETFBacktester:
         start_date: str,
         end_date: str,
         top_k: int = 5,
+        rebalance_days: int = None,
+        first_rebalance_date: str = None,
     ) -> Dict[str, List[Dict]]:
-        """为回测期间的所有调仓基准日生成预测，返回 {date_str: [predictions]}"""
+        """为回测期间生成预测，返回 {date_str: [predictions]}
+
+        若指定 rebalance_days，则仅生成可能被回测引擎查询的日期预测
+        （同时覆盖 close 和 open 两种模式），大幅减少无用预测。
+        """
         all_dates = sorted(self.df["日期"].unique())
         start_ts = pd.Timestamp(start_date)
         end_ts = pd.Timestamp(end_date)
         backtest_dates = [d for d in all_dates if start_ts <= d < end_ts]
-        seed_dates = set(backtest_dates)
-        prev_idx = all_dates.index(backtest_dates[0]) - 1
-        if prev_idx >= 0:
-            seed_dates.add(all_dates[prev_idx])
+
+        if rebalance_days is not None:
+            if first_rebalance_date:
+                first_reb_ts = pd.Timestamp(first_rebalance_date)
+            else:
+                first_reb_ts = backtest_dates[0]
+            start_idx = next(
+                (i for i, d in enumerate(backtest_dates) if d >= first_reb_ts),
+                0,
+            )
+            # 调仓日索引集合
+            rebal_indices = set(range(start_idx, len(backtest_dates), rebalance_days))
+
+            # 需要的预测日期 = 调仓日本身(close) + 前一交易日(open)
+            need_dates = set()
+            for i in rebal_indices:
+                need_dates.add(backtest_dates[i])                     # close
+                if i > 0:
+                    need_dates.add(backtest_dates[i - 1])             # open
+                elif i == 0:
+                    need_dates.add(backtest_dates[0])                 # open fallback
+            # 首个调仓日的前一天（open 模式 seed date 可能被 _get_predictions 需要）
+            if start_idx > 0:
+                need_dates.add(backtest_dates[start_idx - 1])
+        else:
+            need_dates = set(backtest_dates)
+            prev_idx = all_dates.index(backtest_dates[0]) - 1
+            if prev_idx >= 0:
+                need_dates.add(all_dates[prev_idx])
 
         result = {}
-        for d in sorted(seed_dates):
+        for d in sorted(need_dates):
             preds = self._get_predictions(d)
             if preds:
                 result[d.strftime("%Y-%m-%d")] = preds
