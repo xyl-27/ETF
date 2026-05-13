@@ -358,7 +358,9 @@ def simulate_state_at_date(seq, target_date, raw_df, initial_capital=100000):
 
     # HS300 curve
     hs300_curve = []
-    hs_period = hs_raw[hs_raw["日期"] <= target_dt]
+    hs_raw = raw_df[raw_df["股票代码"] == HS300_CODE].sort_values("日期")
+    hs_first_date = ec_trunc[0]["date"]
+    hs_period = hs_raw[(hs_raw["日期"] >= pd.Timestamp(hs_first_date)) & (hs_raw["日期"] <= target_dt)]
     if not hs_period.empty:
         hs300_start_price = float(hs_period["收盘"].iloc[0])
         for _, row in hs_period.iterrows():
