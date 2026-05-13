@@ -353,6 +353,34 @@ def _compute_health_score(model_data):
     }
 
 
+def _compute_rank_maps(target_date):
+    """Compute 1-day (实时) and 5-day (近5日) return rankings for all ETFs."""
+    _df = pd.read_csv(str(PROJECT_ROOT / "etf_data" / "etf_74.csv"))
+    _df["日期"] = pd.to_datetime(_df["日期"])
+    _df["股票代码"] = _df["股票代码"].astype(str).str.zfill(6)
+    target_dt = pd.Timestamp(target_date)
+    dates = sorted(_df["日期"].unique())
+    avail = [d for d in dates if d <= target_dt]
+    if len(avail) < 2:
+        return {}
+    pivot = _df[_df["日期"].isin(avail)].pivot_table(index="股票代码", columns="日期", values="收盘")
+    pivot = pivot[[c for c in pivot.columns if c <= target_dt]]
+    results = {}
+    if len(pivot.columns) >= 6:
+        ret_5d = (pivot.iloc[:, -1] / pivot.iloc[:, -6] - 1) * 100
+        ranked = ret_5d.dropna().sort_values(ascending=False)
+        for i, code in enumerate(ranked.index):
+            results.setdefault(code, {})["rank_5d"] = i + 1
+            results[code]["ret_5d"] = round(float(ranked.iloc[i]), 2)
+    if len(pivot.columns) >= 2:
+        ret_1d = (pivot.iloc[:, -1] / pivot.iloc[:, -2] - 1) * 100
+        ranked = ret_1d.dropna().sort_values(ascending=False)
+        for i, code in enumerate(ranked.index):
+            results.setdefault(code, {})["rank_1d"] = i + 1
+            results[code]["ret_1d"] = round(float(ranked.iloc[i]), 2)
+    return results
+
+
 def _build_pred_signals_table(seq_data, report_date):
     """从 predictions_history 构建预测信号表（前10名）"""
     ph_list = seq_data.get("predictions_history", [])
@@ -375,6 +403,15 @@ def _build_pred_signals_table(seq_data, report_date):
     score_std = max(np.std([p["score"] for p in preds]), 1e-12) if len(preds) > 1 else 1.0
 
     etf_names = _load_etf_names()
+    rank_map = _compute_rank_maps(report_date)
+
+    def _rank_cell(code, key):
+        info = rank_map.get(code, {})
+        r = info.get(key)
+        if r is None:
+            return '<td style="text-align:right;color:#999;font-size:11px;">-</td>'
+        clr = "#cc0000" if r <= 25 else ("#f39c12" if r <= 50 else "#009900")
+        return f'<td style="text-align:right;color:{clr};font-weight:bold;font-size:11px;">{r}</td>'
 
     rows = ""
     for p in preds:
@@ -387,9 +424,9 @@ def _build_pred_signals_table(seq_data, report_date):
         adv_clr = "#cc0000" if advantage >= 0 else "#009900"
         score_str = f"{score:.4f}"
         name_display = f" ({name})" if name else ""
-        rows += f"""<tr><td style="text-align:right;font-weight:bold;">{rank}</td><td><a href="{_xueqiu_url(code)}" target="_blank" style="text-decoration:none;color:inherit;">{code}</a>{name_display}</td><td style="text-align:right;font-family:monospace;">{score_str}</td><td style="text-align:right;font-family:monospace;color:{adv_clr};font-weight:bold;">{adv_str}</td></tr>"""
+        rows += f"""<tr><td style="text-align:right;font-weight:bold;">{rank}</td><td><a href="{_xueqiu_url(code)}" target="_blank" style="text-decoration:none;color:inherit;">{code}</a>{name_display}</td><td style="text-align:right;font-family:monospace;">{score_str}</td><td style="text-align:right;font-family:monospace;color:{adv_clr};font-weight:bold;">{adv_str}</td>{_rank_cell(code, 'rank_1d')}{_rank_cell(code, 'rank_5d')}</tr>"""
 
-    return f"""<h3>预测信号 (Top10, {ph_date})</h3><table><thead><tr><th style="text-align:right;">排名</th><th>代码</th><th style="text-align:right;">Score</th><th style="text-align:right;">优势</th></tr></thead><tbody>{rows}</tbody></table>"""
+    return f"""<h3>预测信号 (Top10, {ph_date})</h3><table><thead><tr><th style="text-align:right;">排名</th><th>代码</th><th style="text-align:right;">Score</th><th style="text-align:right;">优势</th><th style="text-align:right;font-size:11px;">实时<br>排名</th><th style="text-align:right;font-size:11px;">近5日<br>排名</th></tr></thead><tbody>{rows}</tbody></table>"""
 
 
 def build_report_html(*, date, model_display, total_value, cash, holdings,
@@ -400,6 +437,14 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
                        trade_mode="open", pred_signals_section="",
                        market_monitor_section=""):
     """构建报告HTML，各组件已预先准备好"""
+    # 排行数据
+    _rank_map = _compute_rank_maps(date) if 'date' in locals() or date else {}
+    def _rc(code, key):
+        info = _rank_map.get(code, {})
+        r = info.get(key)
+        if r is None: return '<td style="text-align:right;color:#999;font-size:10px;">-</td>'
+        clr = "#cc0000" if r <= 25 else ("#f39c12" if r <= 50 else "#009900")
+        return f'<td style="text-align:right;color:{clr};font-weight:bold;font-size:10px;">{r}</td>'
     # 持仓表
     pnl_by_stock = {p["stock_id"]: p for p in (today_pnl_positions or [])}
     holdings_rows = ""
@@ -428,17 +473,19 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
         ll_str = f"{ll:.3f}" if ll else "-"
         hl_color = "#cc0000" if price and hl and price >= hl else "#333"
         ll_color = "#009900" if price and ll and price <= ll else "#333"
-        holdings_rows += f"""<tr><td><a href="{_xueqiu_url(code)}" target="_blank" style="text-decoration:none;color:inherit;">{code}</a></td><td>{name}</td><td style="text-align:right;">{price_str}</td><td style="text-align:right;">{buy_price_str}</td><td style="text-align:right;color:{hl_color};">{hl_str}</td><td style="text-align:right;color:{ll_color};">{ll_str}</td><td style="text-align:right;">{shares:,}</td><td style="text-align:right;">{mkt_val:,.0f}</td><td style="text-align:right;font-weight:bold;">{weight:.2f}%</td><td style="text-align:right;color:{pnl_color};font-weight:bold;">{pnl_str}</td><td style="text-align:right;font-weight:bold;color:{rebal_color};">{rebal_str}</td></tr>"""
+        buy_date = h.get("buy_date", "")
+        buy_date_str = buy_date[-5:] if len(buy_date) >= 5 else buy_date
+        holdings_rows += f"""<tr><td><a href="{_xueqiu_url(code)}" target="_blank" style="text-decoration:none;color:inherit;">{code}</a></td><td>{name}</td>{_rc(code, 'rank_1d')}{_rc(code, 'rank_5d')}<td style="text-align:right;">{price_str}</td><td style="text-align:right;">{buy_price_str}</td><td style="text-align:center;font-size:11px;color:#888;">{buy_date_str}</td><td style="text-align:right;color:{hl_color};">{hl_str}</td><td style="text-align:right;color:{ll_color};">{ll_str}</td><td style="text-align:right;">{shares:,}</td><td style="text-align:right;">{mkt_val:,.0f}</td><td style="text-align:right;font-weight:bold;">{weight:.2f}%</td><td style="text-align:right;color:{pnl_color};font-weight:bold;">{pnl_str}</td><td style="text-align:right;font-weight:bold;color:{rebal_color};">{rebal_str}</td></tr>"""
 
     cash_weight = (cash / total_value * 100) if total_value > 0 else 0
-    holdings_rows += f"""<tr style="color:#999;"><td>现金</td><td>未投资资金</td><td style="text-align:right;">-</td><td style="text-align:right;">-</td><td style="text-align:right;">-</td><td style="text-align:right;">-</td><td style="text-align:right;">-</td><td style="text-align:right;">{cash:,.0f}</td><td style="text-align:right;">{cash_weight:.2f}%</td><td style="text-align:right;">-</td><td style="text-align:right;">-</td></tr>"""
+    holdings_rows += f"""<tr style="color:#999;"><td>现金</td><td>未投资资金</td><td style="text-align:right;color:#999;font-size:10px;">-</td><td style="text-align:right;color:#999;font-size:10px;">-</td><td style="text-align:right;">-</td><td style="text-align:right;">-</td><td style="text-align:center;font-size:11px;color:#999;">-</td><td style="text-align:right;">-</td><td style="text-align:right;">-</td><td style="text-align:right;">-</td><td style="text-align:right;">{cash:,.0f}</td><td style="text-align:right;">{cash_weight:.2f}%</td><td style="text-align:right;">-</td><td style="text-align:right;">-</td></tr>"""
 
     pnl_total_color = "#cc0000" if today_pnl_total >= 0 else "#009900"
     total_rebal_pnl = sum(round(h["shares"] * (h["price"] - h.get("buy_price", 0)), 2) for h in holdings if h.get("price") and h.get("buy_price"))
     total_rebal_cost = sum(h.get("buy_price", 0) * h["shares"] for h in holdings if h.get("price") and h.get("buy_price"))
     total_rebal_pnl_pct = round(total_rebal_pnl / total_rebal_cost * 100, 2) if total_rebal_cost > 0 else 0
     rebal_total_color = "#cc0000" if total_rebal_pnl >= 0 else "#009900"
-    holdings_rows += f"""<tr style="font-weight:bold;border-top:2px solid #333;"><td colspan="8" style="text-align:right;">合计</td><td style="text-align:right;font-weight:bold;">{(total_value - cash) / total_value * 100:.2f}%</td><td style="text-align:right;color:{pnl_total_color};">{today_pnl_total:+.0f}</td><td style="text-align:right;color:{rebal_total_color};">{total_rebal_pnl:+.0f} ({total_rebal_pnl_pct:+.2f}%)</td></tr>"""
+    holdings_rows += f"""<tr style="font-weight:bold;border-top:2px solid #333;"><td colspan="4" style="text-align:right;">合计</td><td colspan="5" style="text-align:right;">&nbsp;</td><td style="text-align:right;">{(total_value - cash) / total_value * 100:.2f}%</td><td style="text-align:right;color:{pnl_total_color};">{today_pnl_total:+.0f}</td><td style="text-align:right;color:{rebal_total_color};">{total_rebal_pnl:+.0f} ({total_rebal_pnl_pct:+.2f}%)</td></tr>"""
 
     # 交易表
     trades_section = ""

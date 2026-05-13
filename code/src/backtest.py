@@ -222,6 +222,7 @@ class BacktestEngine:
         self.cash = initial_capital
         self.positions = {}
         self.positions_prev = {}
+        self.pre_rebalance_positions = {}
         self.equity_curve = []
         self.trades = []
         self.predictions_history = []
@@ -429,6 +430,11 @@ class BacktestEngine:
             }
 
             if (i - start_idx) % rebalance_days == 0:
+                self.pre_rebalance_positions = {
+                    s: {"shares": p["shares"], "cost": p["cost"]}
+                    for s, p in self.positions.items()
+                }
+
                 if self.log:
                     self._write_log(f"\n{'=' * 50}")
                     self._write_log(f"调仓日: {current_date.strftime('%Y-%m-%d')}")

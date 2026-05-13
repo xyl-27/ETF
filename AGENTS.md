@@ -71,25 +71,9 @@ python code/src/daily_eval.py --from-state
 python code/src/daily_eval.py --from-state
 ```
 
-### Sync specific fields manually
-```bash
-python juejin/sync_report.py --from-juejin output/juejin_result.json --send-email
-python juejin/sync_report.py --override-cash 50000 --override-total-value 135000 --send-email
-```
-
-### Dry run (preview without saving)
-```python
-from juejin.sync_report import apply_juejin_result, load_report
-import copy
-
-report = load_report()
-result = apply_juejin_result("juejin_result.json", copy.deepcopy(report), dry_run=True)
-```
-
 ## Test Commands
 ```bash
 python -m py_compile code/src/daily_eval.py
 python -m py_compile code/src/send_report.py
 python -m py_compile juejin/main.py
-python -m py_compile juejin/sync_report.py
 ```

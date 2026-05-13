@@ -205,6 +205,19 @@ def algo(context):
     top_k_stocks = {p["stock_id"] for p in today_preds[:TOP_K]}
     print(f"[策略] Top-{TOP_K}: {', '.join(top_k_stocks)}")
 
+    # 保存调仓前持仓快照（供日报收盘模式使用）
+    try:
+        pre_positions = {}
+        for pos in context.account().positions():
+            local = gm_to_local(pos["symbol"])
+            pre_positions[local] = {
+                "shares": pos["volume"],
+                "cost": round(pos["vwap"] * pos["volume"], 2),
+            }
+        context.pre_rebalance_positions = pre_positions
+    except Exception:
+        context.pre_rebalance_positions = {}
+
     # 卖出现在持仓但不在 Top-K 的
     current_pos = context.account().positions()
     for pos in current_pos:
@@ -357,15 +370,25 @@ def on_backtest_finished(context, indicator):
             },
         }
 
-        state = {
-            "sequences": {MODEL_KEY: single_seq},
-            "last_updated": str(datetime.now()),
-            "trade_mode": getattr(context, 'trade_mode', 'open'),
-        }
+        pre_rb_pos = getattr(context, 'pre_rebalance_positions', {})
+        if pre_rb_pos:
+            single_seq["pre_rebalance_positions"] = pre_rb_pos
+
+        state = {}
+        if os.path.exists(STATE_PATH):
+            try:
+                with open(STATE_PATH, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+                    state = existing
+            except Exception:
+                pass
+        state.setdefault("sequences", {})[MODEL_KEY] = single_seq
+        state["last_updated"] = str(datetime.now())
+        state["trade_mode"] = getattr(context, 'trade_mode', 'open')
 
         with open(STATE_PATH, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=2, cls=_DatetimeEncoder)
-        print(f"\n[结果] backtest_state.json 已保存")
+        print(f"\n[结果] backtest_state.json 已保存 (序列: {list(state['sequences'].keys())})")
 
         # 同时保存详细成交记录
         last_date = context.daily_equity[-1]["date"] if context.daily_equity else str(datetime.now().date())

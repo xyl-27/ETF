@@ -95,14 +95,6 @@ def build_market_monitor_section(raw_df, seq, target_date, holdings_at_date, etf
 
     regime_labels_display = {"bull": "牛市 ↑", "bear": "熊市 ↓", "sideways": "震荡 →"}
 
-    # Model vs HS300 stats
-    stats = {}
-    for regime_type in ["all", "bull", "bear", "sideways"]:
-        stats[regime_type] = {"days": 0, "model_return": 0, "hs300_return": 0, "excess_return": 0, "beat_rate": 0}
-
-    # Current info
-    stats["all"] = {"days": 0, "model_return": 0, "hs300_return": 0, "excess_return": 0, "beat_rate": 0}
-
     # ETF rankings
     rank_map, ret_series = compute_ranks_at_date(raw_df, target_date, 5)
     all_codes_list = list(ret_series.index) if ret_series is not None else []
@@ -193,7 +185,7 @@ def build_market_monitor_section(raw_df, seq, target_date, holdings_at_date, etf
 
     # Build HTML
     from market_monitor import build_regime_table_html, build_etf_rankings_html
-    regime_html = build_regime_table_html(stats, {
+    regime_html = build_regime_table_html({}, {
         "regime": regime,
         "rolling_20d_return": r20 if not pd.isna(r20) else 0,
         "rolling_vol": vol if not pd.isna(vol) else 0,
@@ -303,12 +295,13 @@ def simulate_state_at_date(seq, target_date, raw_df, initial_capital=100000):
     win_rate = wins / (len(ec_values) - 1) if len(ec_values) > 1 else 0
     dd = _compute_max_drawdown(ec_values)
 
-    # HS300 return
+    # HS300 return (from backtest start date, not from HS300 data start)
     hs_raw = raw_df[raw_df["股票代码"] == HS300_CODE].sort_values("日期")
-    hs_prices = hs_raw[hs_raw["日期"] <= target_dt]["收盘"]
+    hs_first_date = ec_trunc[0]["date"]
+    hs_period = hs_raw[(hs_raw["日期"] >= pd.Timestamp(hs_first_date)) & (hs_raw["日期"] <= target_dt)]
     hs_ret = 0
-    if len(hs_prices) >= 2:
-        hs_ret = (hs_prices.iloc[-1] / hs_prices.iloc[0] - 1) * 100
+    if len(hs_period) >= 2:
+        hs_ret = (hs_period["收盘"].iloc[-1] / hs_period["收盘"].iloc[0] - 1) * 100
 
     # Sharpe, Calmar, Sortino
     daily_rets = []
@@ -403,22 +396,32 @@ def simulate_state_at_date(seq, target_date, raw_df, initial_capital=100000):
     }
 
 
-def build_report(report_state, seq_key, all_sequences):
+def build_report(report_state, seq_key, all_sequences, raw_df):
     """Generate HTML for one historical date."""
     seq_data = all_sequences.get(seq_key, {})
     metrics = report_state["metrics"]
+    # Build price lookup from today_pnl positions
+    close_prices = {p["stock_id"]: p["today_close"] for p in report_state.get("today_pnl", {}).get("positions", []) if p.get("today_close", 0) > 0}
     holdings_list = []
     etf_names = _load_etf_names()
+    target_dt = pd.Timestamp(report_state["date"])
     for sid, pinfo in report_state["holdings"].items():
+        price = close_prices.get(sid, 0)
+        sub = raw_df[raw_df["股票代码"] == sid]
+        if not price:
+            tc_s = sub.loc[sub["日期"] == target_dt, "收盘"]
+            price = float(tc_s.values[0]) if not tc_s.empty else 0
+        hl_s = sub.loc[sub["日期"] == target_dt, "涨停价"]
+        ll_s = sub.loc[sub["日期"] == target_dt, "跌停价"]
         holdings_list.append({
             "stock_id": sid,
             "name": etf_names.get(sid, ""),
-            "price": 0,
+            "price": price,
             "buy_price": round(pinfo.get("buy_price", 0), 4),
             "shares": pinfo["shares"],
             "cost": pinfo.get("cost", 0),
-            "high_limit": 0,
-            "low_limit": 0,
+            "high_limit": round(float(hl_s.values[0]), 4) if not hl_s.empty else 0,
+            "low_limit": round(float(ll_s.values[0]), 4) if not ll_s.empty else 0,
         })
 
     # Build sequences_summary for this date
@@ -551,7 +554,7 @@ def main():
                 print("skip (no data)")
                 continue
 
-            html = build_report(report_state, report_key, sequences)
+            html = build_report(report_state, report_key, sequences, raw_df)
             filepath.write_text(html, encoding="utf-8")
             print(f"saved to {filename}")
         except Exception as e:

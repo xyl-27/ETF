@@ -617,10 +617,18 @@ def run_backtest_sequence(
         **windows,
     }
 
+    pre_rebalance_positions = {}
+    for stock_id, pos in engine.pre_rebalance_positions.items():
+        pre_rebalance_positions[stock_id] = {
+            "shares": pos["shares"],
+            "cost": round(pos["cost"], 2),
+        }
+
     return {
         "equity_curve": equity_curve,
         "trades": trades,
         "positions": positions,
+        "pre_rebalance_positions": pre_rebalance_positions,
         "metrics": metrics,
         "cash": round(engine.cash, 2),
         "today_pnl": today_pnl,
@@ -1020,9 +1028,11 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
         today_buys = {t["stock"] for t in trades if t["date"] == cur_date and t["action"] == "买入"}
 
         buy_prices = {}
+        buy_dates = {}
         for t in today_trades_list:
             if t.get("model_key") == model_key and t["action"] in ("买入", "保持") and t.get("price", 0) > 0:
                 buy_prices[t["stock"]] = t["price"]
+                buy_dates[t["stock"]] = t.get("date", cur_date)
         for sid in list(positions.keys()):
             if sid not in buy_prices:
                 hist_trades = sorted(
@@ -1031,6 +1041,7 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
                 )
                 if hist_trades:
                     buy_prices[sid] = hist_trades[0]["price"]
+                    buy_dates[sid] = hist_trades[0]["date"]
 
         for stock_id, p in positions.items():
             sub = raw_df[raw_df["股票代码"] == stock_id]
@@ -1049,6 +1060,7 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
                 "name": etf_names.get(stock_id, ""),
                 "price": round(price, 4) if price else 0,
                 "buy_price": round(buy_prices.get(stock_id, 0), 4),
+                "buy_date": buy_dates.get(stock_id, ""),
                 "shares": p["shares"],
                 "cost": round(p["cost"], 2),
                 "today_pnl": pnl,
@@ -1803,6 +1815,14 @@ def daily_eval(
                     if code and name:
                         etf_names[code] = name
 
+        # 收盘交易模式下，调仓日显示调仓前持仓（新持仓明天再出现）
+        if trade_mode == "close" and is_rebalance_day:
+            display_positions = report_data.get("pre_rebalance_positions", {})
+            if not display_positions:
+                display_positions = report_data["positions"]
+        else:
+            display_positions = report_data["positions"]
+
         holdings = []
         # 从持久化的调仓价取成交价，非调仓日加载上次保存的价格
         latest_trade_prices = report_data.get("metrics", {}).get("last_trade_prices", {})
@@ -1816,15 +1836,17 @@ def daily_eval(
                         break
             except Exception:
                 pass
-        for stock_id, pos in report_data["positions"].items():
+        for stock_id, pos in display_positions.items():
             price = pnl_positions.get(stock_id, {}).get("today_close", 0)
             sub = raw_df[raw_df["股票代码"] == stock_id]
             hl_s = sub.loc[sub["日期"] == latest_date, "涨停价"]
             ll_s = sub.loc[sub["日期"] == latest_date, "跌停价"]
             buy_price = 0
+            buy_date = ""
             for t in report_data.get("trades", []):
                 if t["action"] == "买入" and t["stock"] == stock_id:
                     buy_price = t["price"]
+                    buy_date = t["date"]
             if not buy_price:
                 buy_price = (pos.get("cost", 0) / pos.get("shares", 1)) if pos.get("shares", 0) > 0 else 0
             holdings.append({
@@ -1832,6 +1854,7 @@ def daily_eval(
                 "name": etf_names.get(stock_id, ""),
                 "price": price,
                 "buy_price": round(buy_price, 4),
+                "buy_date": buy_date,
                 "shares": pos["shares"],
                 "cost": pos["cost"],
                 "high_limit": round(float(hl_s.values[0]), 4) if not hl_s.empty else 0,
@@ -2326,6 +2349,14 @@ def run_from_predictions(
                     if code and name:
                         etf_names[code] = name
 
+        # 收盘交易模式下，调仓日显示调仓前持仓（新持仓明天再出现）
+        if trade_mode == "close" and is_rebalance_day:
+            display_positions = report_data.get("pre_rebalance_positions", {})
+            if not display_positions:
+                display_positions = report_data["positions"]
+        else:
+            display_positions = report_data["positions"]
+
         # 构造持仓
         last_buy_prices = {}
         for t in report_data.get("trades", []):
@@ -2334,7 +2365,7 @@ def run_from_predictions(
                 if stock not in last_buy_prices or t["date"] > last_buy_prices[stock]["date"]:
                     last_buy_prices[stock] = {"date": t["date"], "price": t["price"]}
         holdings = []
-        for stock_id, pos in report_data["positions"].items():
+        for stock_id, pos in display_positions.items():
             price = pnl_positions.get(stock_id, {}).get("today_close", 0)
             sub = raw_df[raw_df["股票代码"] == stock_id]
             hl_s = sub.loc[sub["日期"] == latest_date, "涨停价"]
@@ -2347,10 +2378,11 @@ def run_from_predictions(
                 "name": etf_names.get(stock_id, ""),
                 "price": price,
                 "buy_price": round(buy_price, 4),
+                "buy_date": last_buy_prices.get(stock_id, {}).get("date", ""),
                 "shares": pos["shares"],
                 "cost": pos["cost"],
                 "high_limit": round(float(hl_s.values[0]), 4) if not hl_s.empty else 0,
-                "low_limit": round(float(ll_s.values[0]), 4) if not hl_s.empty else 0,
+                "low_limit": round(float(ll_s.values[0]), 4) if not ll_s.empty else 0,
             })
 
         # 今日调仓（全部序列）
@@ -2524,10 +2556,24 @@ def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capit
                     all_today_trades.append(t)
         is_rebalance_day = len(all_today_trades) > 0
 
+        # 收盘交易模式下，调仓日显示调仓前持仓（新持仓明天再出现）
+        if trade_mode == "close" and is_rebalance_day:
+            display_positions = report_data.get("pre_rebalance_positions", {})
+            if not display_positions:
+                display_positions = report_data.get("positions", {})
+        else:
+            display_positions = report_data.get("positions", {})
+
         # 构造持仓
         pnl_positions = {p["stock_id"]: p for p in report_data.get("today_pnl", {}).get("positions", [])}
+        last_buy_dates = {}
+        for t in report_data.get("trades", []):
+            if t["action"] == "买入":
+                stock = t["stock"]
+                if stock not in last_buy_dates or t["date"] > last_buy_dates[stock]:
+                    last_buy_dates[stock] = t["date"]
         holdings = []
-        for stock_id, pos in report_data.get("positions", {}).items():
+        for stock_id, pos in display_positions.items():
             price = pnl_positions.get(stock_id, {}).get("today_close", 0)
             sub = raw_df[raw_df["股票代码"] == stock_id]
             tc_s = sub.loc[sub["日期"] == latest_date, "收盘"]
@@ -2540,6 +2586,7 @@ def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capit
                 "name": etf_names.get(stock_id, ""),
                 "price": price,
                 "buy_price": round(report_data.get("metrics", {}).get("last_trade_prices", {}).get(stock_id, 0), 4),
+                "buy_date": last_buy_dates.get(stock_id, ""),
                 "shares": pos["shares"],
                 "cost": pos["cost"],
                 "high_limit": round(float(hl_s.values[0]), 4) if not hl_s.empty else 0,
