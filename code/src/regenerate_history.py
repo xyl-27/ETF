@@ -140,13 +140,18 @@ def build_market_monitor_section(raw_df, seq, target_date, holdings_at_date, etf
                     prev_rebalance_date = preds[i]["date"]
                     break
 
+    # 调仓日排名（用调仓当日的5日收益排名）
+    rebalance_rank_map = {}
+    if current_rebalance_date:
+        rebalance_rank_map, _ = compute_ranks_at_date(raw_df, current_rebalance_date, 5)
+
     # Holdings data
     holdings_data = []
     if rank_map and holdings_at_date:
         for code in sorted(holdings_at_date):
             r = ret_series.get(code) if ret_series is not None else None
             if r is not None:
-                rr = rank_map.get(code, 0)
+                rr = rebalance_rank_map.get(code, 0)
                 holdings_data.append({
                     "code": code,
                     "name": etf_names.get(code, ""),
