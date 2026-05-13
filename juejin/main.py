@@ -12,6 +12,7 @@ from datetime import datetime
 
 PREDICTIONS_PATH = r"C:\Users\xyl\Desktop\ETF\output\predictions.json"
 STATE_PATH = r"C:\Users\xyl\Desktop\ETF\output\backtest_state.json"
+JUEJIN_STATE_PATH = r"C:\Users\xyl\Desktop\ETF\output\juejin_state.json"
 RESULT_PATH = r"C:\Users\xyl\Desktop\ETF\output\juejin_result.json"
 
 MODEL_KEY = "search_itransformer_exp_54"
@@ -374,21 +375,15 @@ def on_backtest_finished(context, indicator):
         if pre_rb_pos:
             single_seq["pre_rebalance_positions"] = pre_rb_pos
 
-        state = {}
-        if os.path.exists(STATE_PATH):
-            try:
-                with open(STATE_PATH, "r", encoding="utf-8") as f:
-                    existing = json.load(f)
-                    state = existing
-            except Exception:
-                pass
-        state.setdefault("sequences", {})[MODEL_KEY] = single_seq
-        state["last_updated"] = str(datetime.now())
-        state["trade_mode"] = getattr(context, 'trade_mode', 'open')
+        state = {
+            "sequences": {"juejin": single_seq},
+            "last_updated": str(datetime.now()),
+            "trade_mode": getattr(context, 'trade_mode', 'open'),
+        }
 
-        with open(STATE_PATH, "w", encoding="utf-8") as f:
+        with open(JUEJIN_STATE_PATH, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=2, cls=_DatetimeEncoder)
-        print(f"\n[结果] backtest_state.json 已保存 (序列: {list(state['sequences'].keys())})")
+        print(f"\n[结果] {JUEJIN_STATE_PATH} 已保存")
 
         # 同时保存详细成交记录
         last_date = context.daily_equity[-1]["date"] if context.daily_equity else str(datetime.now().date())

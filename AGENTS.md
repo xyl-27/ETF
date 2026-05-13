@@ -2,6 +2,13 @@
 
 ## Daily Report Generation (3+1 modes)
 
+Any mode supports `--clear` to delete old output files first (preserves `model_selection.yaml`):
+```bash
+python code/src/daily_eval.py --clear --from-state
+```
+
+## Daily Report Generation (3+1 modes)
+
 ### Mode 0: Full pipeline (模型推理 + 回测 + 日报)
 ```bash
 python code/src/daily_eval.py
@@ -47,13 +54,13 @@ python code/src/daily_eval.py --from-predictions --no-update
 # Step 1: update data
 python code/src/daily_eval.py --update-only
 
-# Step 2: generate predictions (slow, needs model)
-python code/src/daily_eval.py --predictions-only --no-update
+# Step 2: generate predictions + local backtest (6 sequences: 3 models + average + voting + juejin placeholder)
+python code/src/daily_eval.py --from-predictions --no-update
 
-# Step 3: run Juejin backtest (reads predictions.json, saves backtest_state.json)
+# Step 3: run Juejin backtest (reads predictions.json, merges "juejin" sequence into state)
 python juejin/main.py
 
-# Step 4: generate report from backtest state (no model, no backtest)
+# Step 4: generate report from backtest state (master: juejin → 掘金作主序列)
 python code/src/daily_eval.py --from-state
 ```
 
@@ -63,13 +70,18 @@ python code/src/daily_eval.py --from-state
 - Reads `output/predictions.json` (raw model scores)
 - Picks Top-K by score each rebalance day
 - Executes trades via Juejin API
-- Saves results to `output/backtest_state.json` and `output/juejin_result.json`
+- Saves results as `"juejin"` sequence in `output/juejin_state.json` (独立文件)
+- Also saves `output/juejin_result.json` for reference
 
 ### After Juejin backtest finishes
 ```bash
-# Generate report from juejin's backtest results:
+# Generate report with juejin as master sequence:
 python code/src/daily_eval.py --from-state
 ```
+
+### Sequence priority (report_key resolution)
+1. `model_selection.yaml` → `master: juejin` (explicit)
+2. Fallback: `juejin` → `average` → `voting` → first
 
 ## Test Commands
 ```bash

@@ -139,6 +139,7 @@ def plot_equity_curves(sequences: Dict[str, Any], data_file: str, initial_capita
 # ============================================================
 OUTPUT_DIR = PROJECT_ROOT / "output"
 STATE_PATH = OUTPUT_DIR / "backtest_state.json"
+JUEJIN_STATE_PATH = OUTPUT_DIR / "juejin_state.json"
 REPORT_PATH = OUTPUT_DIR / "latest_report.json"
 PORTFOLIO_PATH = OUTPUT_DIR / "portfolio.json"
 PREDICTIONS_PATH = OUTPUT_DIR / "predictions.json"
@@ -2510,15 +2511,24 @@ def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capit
         with open(STATE_PATH, "r", encoding="utf-8") as f:
             state = json.load(f)
 
-        # 优先从 state 文件读取 trade_mode（掘金回测保存），否则用参数
-        state_trade_mode = state.get("trade_mode")
-        if state_trade_mode:
-            trade_mode = state_trade_mode
-
         sequences = state.get("sequences", {})
         if not sequences:
             print("错误: backtest_state.json 中无序列数据")
             return None
+
+        # 加载掘金回测结果（如有），合并到 sequences
+        if JUEJIN_STATE_PATH.exists():
+            try:
+                with open(JUEJIN_STATE_PATH, "r", encoding="utf-8") as f:
+                    juejin_state = json.load(f)
+                juejin_seq = juejin_state.get("sequences", {}).get("juejin")
+                if juejin_seq:
+                    sequences["juejin"] = juejin_seq
+                if verbose:
+                    print(f"  加载掘金回测结果: {JUEJIN_STATE_PATH}")
+            except Exception as e:
+                if verbose:
+                    print(f"  加载掘金回测结果失败: {e}")
 
         # 选主序列（遵循 model_selection.yaml 的 master 设置）
         report_key = _resolve_report_key(sequences)
@@ -2566,12 +2576,12 @@ def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capit
 
         # 构造持仓
         pnl_positions = {p["stock_id"]: p for p in report_data.get("today_pnl", {}).get("positions", [])}
-        last_buy_dates = {}
+        last_buy_info = {}
         for t in report_data.get("trades", []):
             if t["action"] == "买入":
                 stock = t["stock"]
-                if stock not in last_buy_dates or t["date"] > last_buy_dates[stock]:
-                    last_buy_dates[stock] = t["date"]
+                if stock not in last_buy_info or t["date"] > last_buy_info[stock]["date"]:
+                    last_buy_info[stock] = {"date": t["date"], "price": t["price"]}
         holdings = []
         for stock_id, pos in display_positions.items():
             price = pnl_positions.get(stock_id, {}).get("today_close", 0)
@@ -2585,8 +2595,8 @@ def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capit
                 "stock_id": stock_id,
                 "name": etf_names.get(stock_id, ""),
                 "price": price,
-                "buy_price": round(report_data.get("metrics", {}).get("last_trade_prices", {}).get(stock_id, 0), 4),
-                "buy_date": last_buy_dates.get(stock_id, ""),
+                "buy_price": round(last_buy_info.get(stock_id, {}).get("price", 0), 4),
+                "buy_date": last_buy_info.get(stock_id, {}).get("date", ""),
                 "shares": pos["shares"],
                 "cost": pos["cost"],
                 "high_limit": round(float(hl_s.values[0]), 4) if not hl_s.empty else 0,
@@ -2683,7 +2693,20 @@ if __name__ == "__main__":
     parser.add_argument("--update-only", action="store_true", help="仅更新ETF数据，不执行任何其他操作")
     parser.add_argument("--from-state", action="store_true", help="从已保存的 backtest_state.json 生成日报（跳过模型和回测）")
     parser.add_argument("--trade-mode", type=str, default="open", choices=["open", "close"], help="交易模式: open（开盘交易，用前日收盘特征）或 close（收盘交易，用当日收盘特征）")
+    parser.add_argument("--clear", action="store_true", help="先清除旧输出文件")
     args = parser.parse_args()
+
+    if args.clear:
+        import glob
+        kept = {"model_selection.yaml"}
+        for fp in glob.glob(str(OUTPUT_DIR / "*")):
+            if os.path.basename(fp) not in kept:
+                if os.path.isdir(fp):
+                    import shutil
+                    shutil.rmtree(fp)
+                else:
+                    os.remove(fp)
+        print(f"已清除 output/ 下旧文件（保留: {', '.join(sorted(kept))}）")
 
     mp.set_start_method("spawn", force=True)
 
