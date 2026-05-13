@@ -695,7 +695,8 @@ def _history_chart_b64(all_sequences, hs300_raw, rb_date, first_date, initial_ca
     ax.set_ylabel("账户总值 (万元)", fontsize=11)
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d"))
     ax.grid(True, alpha=0.3, linestyle="--", linewidth=0.8)
-    ax.legend(fontsize=9, framealpha=0.9, edgecolor="gray", loc="upper left")
+    if ax.get_legend_handles_labels()[0]:
+        ax.legend(fontsize=9, framealpha=0.9, edgecolor="gray", loc="upper left")
     fig.tight_layout()
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=120)
@@ -1820,7 +1821,12 @@ def daily_eval(
             sub = raw_df[raw_df["股票代码"] == stock_id]
             hl_s = sub.loc[sub["日期"] == latest_date, "涨停价"]
             ll_s = sub.loc[sub["日期"] == latest_date, "跌停价"]
-            buy_price = pos.get("buy_price", 0) or report_data.get("metrics", {}).get("last_trade_prices", {}).get(stock_id, 0)
+            buy_price = 0
+            for t in report_data.get("trades", []):
+                if t["action"] == "买入" and t["stock"] == stock_id:
+                    buy_price = t["price"]
+            if not buy_price:
+                buy_price = (pos.get("cost", 0) / pos.get("shares", 1)) if pos.get("shares", 0) > 0 else 0
             holdings.append({
                 "stock_id": stock_id,
                 "name": etf_names.get(stock_id, ""),
@@ -2321,13 +2327,21 @@ def run_from_predictions(
                         etf_names[code] = name
 
         # 构造持仓
+        last_buy_prices = {}
+        for t in report_data.get("trades", []):
+            if t["action"] == "买入":
+                stock = t["stock"]
+                if stock not in last_buy_prices or t["date"] > last_buy_prices[stock]["date"]:
+                    last_buy_prices[stock] = {"date": t["date"], "price": t["price"]}
         holdings = []
         for stock_id, pos in report_data["positions"].items():
             price = pnl_positions.get(stock_id, {}).get("today_close", 0)
             sub = raw_df[raw_df["股票代码"] == stock_id]
             hl_s = sub.loc[sub["日期"] == latest_date, "涨停价"]
             ll_s = sub.loc[sub["日期"] == latest_date, "跌停价"]
-            buy_price = pos.get("buy_price", 0) or report_data.get("metrics", {}).get("last_trade_prices", {}).get(stock_id, 0)
+            buy_price = last_buy_prices.get(stock_id, {}).get("price", 0)
+            if not buy_price:
+                buy_price = (pos.get("cost", 0) / pos.get("shares", 1)) if pos.get("shares", 0) > 0 else 0
             holdings.append({
                 "stock_id": stock_id,
                 "name": etf_names.get(stock_id, ""),

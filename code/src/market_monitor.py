@@ -36,6 +36,27 @@ def load_hs300_data():
     return hs
 
 
+def _load_pool_prices():
+    """加载全部74只ETF的收盘价（宽表），用于计算等权组合收益"""
+    df = pd.read_csv(DATA_PATH)
+    df["日期"] = pd.to_datetime(df["日期"])
+    pivot = df.pivot_table(index="日期", columns="股票代码", values="收盘")
+    return pivot
+
+
+def _load_pool_value_weighted_roll(window=20):
+    """用平均成交额做权重计算全池加权滚动收益"""
+    df = pd.read_csv(DATA_PATH)
+    df["日期"] = pd.to_datetime(df["日期"])
+    weights = df.groupby("股票代码")["成交额"].mean()
+    weights = weights / weights.sum()
+    pivot_close = df.pivot_table(index="日期", columns="股票代码", values="收盘")
+    rets = pivot_close.pct_change().dropna()
+    weighted_rets = rets.mul(weights, axis=1).sum(axis=1) * 100
+    roll = weighted_rets.rolling(window).sum().dropna()
+    return roll
+
+
 def load_backtest_equity(seq_key=None):
     with open(STATE_PATH) as f:
         state = json.load(f)
@@ -168,6 +189,137 @@ def compute_market_breadth(window=20):
     return breadth_df, last
 
 
+def _rank_map_at_date(df, target_date_str, window=5):
+    """计算截止到 target_date（含）的 window 日收益率排名"""
+    dates = sorted(df["日期"].unique())
+    target_dt = pd.Timestamp(target_date_str)
+    filtered = [d for d in dates if d <= target_dt]
+    if len(filtered) < window + 1:
+        return {}
+    end_date = filtered[-1]
+    start_date = filtered[-(window + 1)]
+    period = df[df["日期"].between(start_date, end_date)].copy()
+    pivot = period.pivot_table(index="股票代码", columns="日期", values="收盘")
+    if len(pivot.columns) < 2:
+        return {}
+    ret = (pivot.iloc[:, -1] / pivot.iloc[:, 0] - 1) * 100
+    ret = ret.dropna().sort_values(ascending=False)
+    return {code: i + 1 for i, code in enumerate(ret.index)}
+
+
+def compute_top_etf_rankings(window=5):
+    """计算近期涨幅最大/最小的ETF排行，标记持仓"""
+    df = pd.read_csv(DATA_PATH)
+    df["日期"] = pd.to_datetime(df["日期"])
+    dates = sorted(df["日期"].unique())
+    if len(dates) < window + 1:
+        return [], [], [], [], "", ""
+    end_date = dates[-1]
+    start_date = dates[-(window + 1)]
+    period = df[df["日期"].between(start_date, end_date)].copy()
+    pivot = period.pivot_table(index="股票代码", columns="日期", values="收盘")
+    ret = (pivot.iloc[:, -1] / pivot.iloc[:, 0] - 1) * 100
+    ret = ret.dropna().sort_values(ascending=False)
+    # 加载持仓
+    try:
+        with open(STATE_PATH) as f:
+            state = json.load(f)
+        for k in state.get("sequences", state):
+            if k != "hs300":
+                holdings = set(state["sequences"][k].get("positions", {}).keys())
+                break
+        else:
+            holdings = set()
+    except Exception:
+        holdings = set()
+    # 加载ETF名称
+    etf_names = {}
+    etf_list_path = PROJECT_ROOT / "etf_data" / "etf_list_before_2022_74.csv"
+    if etf_list_path.exists():
+        import csv
+        with open(etf_list_path, encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                code = row.get("代码", "").strip()
+                name = row.get("名称", "").strip()
+                if code and name:
+                    etf_names[code] = name
+    top = []
+    for code, r in ret.head(10).items():
+        top.append({"code": code, "name": etf_names.get(code, ""), "return": round(r, 2), "held": code in holdings})
+    bot = []
+    for code, r in ret.tail(10).items():
+        bot.append({"code": code, "name": etf_names.get(code, ""), "return": round(r, 2), "held": code in holdings})
+    # 持仓排行
+    rank_map = {code: i+1 for i, code in enumerate(ret.index)}
+    # 当前调仓日排名
+    rebalance_rank_map = {}
+    current_rebalance_date = ""
+    try:
+        seq = state["sequences"][k]
+        preds = seq.get("predictions_history", [])
+        if preds:
+            last_pred_date = preds[-1]["date"]
+            current_rebalance_date = last_pred_date
+            rebalance_rank_map = _rank_map_at_date(df, last_pred_date, window)
+    except Exception:
+        pass
+    holdings_data = []
+    for code in sorted(holdings):
+        r = ret.get(code)
+        if r is not None:
+            rr = rebalance_rank_map.get(code, 0)
+            holdings_data.append({
+                "code": code,
+                "name": etf_names.get(code, ""),
+                "return": round(r, 2),
+                "rank": rank_map[code],
+                "rank_at_rebalance": rr,
+                "total": len(ret),
+                "rebalance_date": current_rebalance_date,
+            })
+    holdings_data.sort(key=lambda x: x["rank"])
+    # 上期持仓：上一次调仓日的持仓及其当前表现
+    prev_rank_map = {}
+    prev_holdings_data = []
+    try:
+        seq = state["sequences"][k]
+        preds = seq.get("predictions_history", [])
+        if len(preds) >= 2:
+            prev_date = preds[-2]["date"]
+            prev_rank_map = _rank_map_at_date(df, prev_date, window)
+            # 模拟到 prev_date 的持仓
+            held = set()
+            for t in seq.get("trades", []):
+                if t["date"] > prev_date:
+                    break
+                if t["action"] == "买入":
+                    held.add(t["stock"])
+                elif t["action"] == "卖出":
+                    held.discard(t["stock"])
+            # 距今天数（交易日）
+            eq_dates = sorted(set(e["date"] for e in seq.get("equity_curve", [])))
+            days_ago = sum(1 for d in eq_dates if d >= prev_date)
+            for code in sorted(held):
+                r = ret.get(code)
+                if r is not None:
+                    pr = prev_rank_map.get(code, 0)
+                    prev_holdings_data.append({
+                        "code": code,
+                        "name": etf_names.get(code, ""),
+                        "return": round(r, 2),
+                        "rank": rank_map[code],
+                        "rank_at_rebalance": pr,
+                        "total": len(ret),
+                        "days_ago": days_ago,
+                        "rebalance_date": prev_date,
+                    })
+            prev_holdings_data.sort(key=lambda x: x["rank"])
+    except Exception:
+        prev_holdings_data = []
+    date_range = f"{pivot.columns[0].strftime('%Y-%m-%d')}~{pivot.columns[-1].strftime('%Y-%m-%d')}"
+    return top, bot, holdings_data, prev_holdings_data, str(pivot.columns[0].date()), str(pivot.columns[-1].date())
+
+
 def compute_model_vs_market(dates, values, hs_data):
     """对齐模型和HS300日期，按市场状态分段统计"""
     hs_dict = dict(zip(hs_data["日期"].dt.strftime("%Y-%m-%d"), hs_data["return_pct"]))
@@ -276,51 +428,60 @@ def plot_market_analysis(dates, values, df_regime, breadth_df, output_path):
     hs_aligned = hs_prices.reindex(plot_dates, method="ffill")
     hs_norm = hs_aligned.values / hs_aligned.values[0] * values[0]
 
-    regime_colors = {"bull": "#27ae60", "bear": "#e74c3c", "sideways": "#f39c12", "N/A": "#bdc3c7"}
+    regime_colors = {"bull": "#e74c3c", "bear": "#27ae60", "sideways": "#f39c12", "N/A": "#bdc3c7"}
     regime_labels = {"bull": "牛市", "bear": "熊市", "sideways": "震荡"}
     regime_dates = pd.to_datetime(df_regime["date"])
     unique_regimes = [r for r in ["bull", "bear", "sideways"] if r in df_regime["regime"].values]
 
-    fig = plt.figure(figsize=(14, 12))
-    gs = fig.add_gridspec(6, 1, height_ratios=[0.8, 0.04, 1, 0.7, 0.7, 0.7], hspace=0.06)
+    fig = plt.figure(figsize=(14, 16))
+    gs = fig.add_gridspec(6, 1, height_ratios=[0.8, 0.7, 1.2, 0.7, 0.7, 0.7], hspace=0.18)
     ax_breadth = fig.add_subplot(gs[0])
-    ax_status = fig.add_subplot(gs[1], sharex=ax_breadth)
-    ax_curve = fig.add_subplot(gs[2], sharex=ax_breadth)
-    ax_excess = fig.add_subplot(gs[3], sharex=ax_breadth)
-    ax_roll = fig.add_subplot(gs[4], sharex=ax_breadth)
+    ax_breadth_bt = fig.add_subplot(gs[1])
+    ax_curve = fig.add_subplot(gs[2])
+    ax_excess = fig.add_subplot(gs[3])
+    ax_roll = fig.add_subplot(gs[4])
 
-    # ===== 面板 0: 市场宽度 =====
+    # ===== 面板 0: 市场宽度（全历史） =====
     bdates = breadth_df["date"]
     ax_breadth.fill_between(bdates, 0, breadth_df["bull_pct"].values,
-                            color="#27ae60", alpha=0.5, label="bull%")
+                            color="#e74c3c", alpha=0.5, label="bull%")
     ax_breadth.fill_between(bdates, breadth_df["bull_pct"].values,
                             breadth_df["bull_pct"].values + breadth_df["sideways_pct"].values,
                             color="#f39c12", alpha=0.5, label="sideways%")
     ax_breadth.fill_between(bdates,
                             breadth_df["bull_pct"].values + breadth_df["sideways_pct"].values,
                             100,
-                            color="#e74c3c", alpha=0.5, label="bear%")
+                            color="#27ae60", alpha=0.5, label="bear%")
     ax_breadth.axhline(50, color="gray", ls=":", lw=0.5, alpha=0.6)
-    ax_breadth.set_ylim(0, 100)
+    ax_breadth.set_ylim(-5, 105)
+    ax_breadth.set_xlim(bdates.iloc[0], bdates.iloc[-1])
     ax_breadth.set_ylabel("ETF占比 (%)", fontsize=10)
     ax_breadth.set_title("市场宽度 — ETF池子牛/熊/震荡占比", fontsize=11, fontweight="bold")
+    ax_breadth.text(0.01, 0.95, f"{bdates.iloc[0].strftime('%Y-%m')}~{bdates.iloc[-1].strftime('%Y-%m')}",
+                    transform=ax_breadth.transAxes, fontsize=8, color="#888",
+                    va="top", ha="left", alpha=0.7)
     ax_breadth.legend(loc="upper left", fontsize=8, ncol=3)
     ax_breadth.grid(True, alpha=0.2)
 
-    # ===== 面板 1: HS300 市场状态色条 =====
-    for r in unique_regimes:
-        mask = df_regime["regime"].values == r
-        if mask.sum() < 2:
-            continue
-        sub_dates = regime_dates[mask]
-        if len(sub_dates) < 2:
-            continue
-        ax_status.axvspan(sub_dates.iloc[0], sub_dates.iloc[-1],
-                          alpha=0.9, color=regime_colors.get(r, "#ccc"))
-    ax_status.set_yticks([])
-    ax_status.set_ylabel("HS\n300", fontsize=7, color="#555")
-    ax_status.tick_params(axis="x", length=0)
-    ax_status.set_frame_on(False)
+    # ===== 面板 1: 市场宽度（回测起始日至今） =====
+    bt_start = plot_dates[0]
+    bd_bt = breadth_df[breadth_df["date"] >= bt_start].copy()
+    if len(bd_bt) > 5:
+        ax_breadth_bt.fill_between(bd_bt["date"], 0, bd_bt["bull_pct"].values,
+                                   color="#e74c3c", alpha=0.5, label="bull%")
+        ax_breadth_bt.fill_between(bd_bt["date"], bd_bt["bull_pct"].values,
+                                   bd_bt["bull_pct"].values + bd_bt["sideways_pct"].values,
+                                   color="#f39c12", alpha=0.5, label="sideways%")
+        ax_breadth_bt.fill_between(bd_bt["date"],
+                                   bd_bt["bull_pct"].values + bd_bt["sideways_pct"].values,
+                                   100,
+                                   color="#27ae60", alpha=0.5, label="bear%")
+    ax_breadth_bt.axhline(50, color="gray", ls=":", lw=0.5, alpha=0.6)
+    ax_breadth_bt.set_ylim(-5, 105)
+    ax_breadth_bt.set_ylabel("ETF占比 (%)", fontsize=10)
+    ax_breadth_bt.set_title("市场宽度（回测期）", fontsize=11, fontweight="bold")
+    ax_breadth_bt.legend(loc="upper left", fontsize=8, ncol=3)
+    ax_breadth_bt.grid(True, alpha=0.2)
 
     # ===== 面板 2: 净值曲线 =====
     ax_curve.plot(plot_dates, model_vals, color="#2980b9", lw=2, label="策略")
@@ -353,22 +514,47 @@ def plot_market_analysis(dates, values, df_regime, breadth_df, output_path):
     window = 20
     model_prices = pd.Series(values, index=plot_dates)
     model_roll = model_prices.pct_change(window).dropna() * 100
-    hs_roll = hs_prices.reindex(model_roll.index).pct_change(window) * 100
-    hs_roll = hs_roll.reindex(model_roll.index)
+    hs_full = load_hs300_data().set_index("日期")["收盘"]
+    hs_roll = hs_full.pct_change(window).dropna() * 100
+    hs_roll = hs_roll.reindex(plot_dates)
+    pool_df = _load_pool_prices()
+    pool_has_data = len(pool_df) > window
+    if pool_has_data:
+        pool_full_rets = pool_df.pct_change().dropna()
+        pool_eq = pool_full_rets.mean(axis=1) * 100
+        pool_roll = pool_eq.rolling(window).sum()
+        pool_roll = pool_roll.reindex(plot_dates)
+    pool_vw = _load_pool_value_weighted_roll(window)
+    pool_vw = pool_vw.reindex(plot_dates)
     ax_roll.plot(model_roll.index, model_roll.values, color="#2980b9", lw=1.5, label=f"策略 {window}d 滚动收益")
-    ax_roll.plot(hs_roll.index, hs_roll.values, color="#7f8c8d", lw=1.5, ls="--", label=f"HS300 {window}d 滚动收益")
+    ax_roll.plot(plot_dates, hs_roll.values, color="#7f8c8d", lw=1.5, ls="--", label=f"HS300 {window}d 滚动收益")
+    if pool_has_data:
+        ax_roll.plot(plot_dates, pool_roll.values, color="#e67e22", lw=1.5, ls=":", label=f"全池等权 {window}d 滚动收益")
+    ax_roll.plot(plot_dates, pool_vw.values, color="#2ecc71", lw=1.5, ls="-.", label=f"全池加权 {window}d 滚动收益")
     ax_roll.axhline(0, color="gray", ls=":", lw=0.5)
     ax_roll.set_ylabel(f"{window}d 滚动收益 (%)", fontsize=11)
-    ax_roll.legend(loc="upper left", fontsize=9)
+    ax_roll.legend(loc="upper left", fontsize=7)
     ax_roll.grid(True, alpha=0.2)
 
-    # ===== 图例：市场状态 =====
+    # 各面板独立 X 轴：广度全历史面板显示x标签(无旋转)，回测期面板隐藏避免遮挡
+    ax_breadth.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+    ax_breadth.xaxis.set_major_locator(mdates.MonthLocator(interval=4))
+    ax_breadth.tick_params(axis="x", labelsize=6, pad=0)
+    ax_breadth_bt.set_title("")
+    bt_dates = plot_dates
+    bt_dates = plot_dates
+    tick_step = 5
+    bt_ticks = bt_dates[::tick_step]
+    ax_breadth_bt.set_xticks(bt_ticks)
+    ax_breadth_bt.tick_params(axis="x", labelbottom=False)
     for a in [ax_curve, ax_excess, ax_roll]:
-        a.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d"))
-        a.xaxis.set_major_locator(mdates.WeekdayLocator(interval=2))
+        a.set_xticks(bt_ticks)
+        a.set_xticklabels([d.strftime("%m/%d") for d in bt_ticks], fontsize=7)
+    for a in [ax_curve, ax_excess]:
+        a.tick_params(axis="x", labelbottom=False)
 
-    plt.xlabel("日期", fontsize=11)
-    fig.suptitle("市场监控 — 市场宽度 · HS300 · 策略表现", fontsize=14, fontweight="bold", y=0.98)
+    fig.text(0.5, 0.005, "日期", ha="center", fontsize=11)
+    fig.suptitle("市场监控 — 市场宽度 · HS300 · 策略表现", fontsize=14, fontweight="bold", y=0.99)
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return str(output_path)
@@ -416,7 +602,7 @@ def build_regime_table_html(stats, current_regime=None, breadth_last=None):
         )
     header_info = "<br>".join(header_lines)
 
-    return f"""<h3>市场状态 vs 模型表现</h3>
+    return f"""<h3>市场状态</h3>
     <p style="font-size:11px;color:#666;">{header_info}</p>
     <table>
         <thead><tr><th>市场状态</th><th style="text-align:right;">天数</th><th style="text-align:right;">模型收益</th><th style="text-align:right;">HS300</th><th style="text-align:right;">超额收益</th><th style="text-align:right;">日胜率</th></tr></thead>
@@ -436,16 +622,70 @@ def build_recent_table_html(recent):
         h_clr = "#cc0000" if h_ret >= 0 else "#009900"
         e_clr = "#cc0000" if e_ret >= 0 else "#009900"
         rows += f"""<tr>
-            <td style="font-weight:bold;">{label}</td>
+            <td>{label}</td>
             <td style="text-align:right;color:{m_clr};">{m_ret:+.2f}%</td>
             <td style="text-align:right;color:{h_clr};">{h_ret:+.2f}%</td>
             <td style="text-align:right;color:{e_clr};font-weight:bold;">{e_ret:+.2f}%</td>
-            <td style="text-align:right;">{s['daily_win_rate']*100:.1f}%</td>
         </tr>"""
     return f"""<h3>近期表现</h3>
     <table>
-        <thead><tr><th>区间</th><th style="text-align:right;">模型收益</th><th style="text-align:right;">HS300</th><th style="text-align:right;">超额收益</th><th style="text-align:right;">日胜率</th></tr></thead>
+        <thead><tr><th>区间</th><th style="text-align:right;">模型收益</th><th style="text-align:right;">HS300</th><th style="text-align:right;">超额收益</th></tr></thead>
         <tbody>{rows}</tbody>
+    </table>"""
+
+
+def build_etf_rankings_html(top, bot, holdings_data, prev_holdings_data, date_range):
+    """生成ETF涨跌排行 + 持仓排行 HTML"""
+    def rank_rows(items):
+        rows = ""
+        for i, item in enumerate(items):
+            clr = "#cc0000" if item["return"] >= 0 else "#009900"
+            held_tag = ' 🟢持仓' if item.get("held") else ''
+            name_display = f'<br><span style="font-size:11px;color:#666;">{item["name"]}</span>' if item.get("name") else ''
+            rows += f"""<tr>
+                <td style="text-align:center;">{i+1}</td>
+                <td><code>{item['code']}</code>{name_display}{held_tag}</td>
+                <td style="text-align:right;color:{clr};font-weight:bold;">{item['return']:+.2f}%</td>
+            </tr>"""
+        return rows
+
+    def holding_rows(items):
+        rows = ""
+        for item in items:
+            clr = "#cc0000" if item["return"] >= 0 else "#009900"
+            name_display = f'<br><span style="font-size:11px;color:#666;">{item["name"]}</span>' if item.get("name") else ''
+            rr = item.get("rank_at_rebalance", 0)
+            rebalance_str = f"<br><span style='font-size:10px;color:#999;'>调仓时第{rr}名</span>" if rr else ""
+            rows += f"""<tr>
+                <td><code>{item['code']}</code>{name_display}</td>
+                <td style="text-align:right;color:{clr};font-weight:bold;">{item['return']:+.2f}%</td>
+                <td style="text-align:center;">第{item['rank']}/{item['total']}名{rebalance_str}</td>
+            </tr>"""
+        return rows
+
+    cur_date = holdings_data[0].get("rebalance_date", "") if holdings_data else ""
+    cur_label = f"📦 当前持仓（调仓日: {cur_date}）" if cur_date else "📦 当前持仓"
+    cur_sec = f"""<tr style="background:#fffde7;"><td colspan="3" style="font-weight:bold;color:#f57f17;">{cur_label}</td></tr>
+{holding_rows(holdings_data)}""" if holdings_data else ""
+
+    prev_sec = ""
+    if prev_holdings_data:
+        prev_date = prev_holdings_data[0].get("rebalance_date", "")
+        prev_label = f"📋 上期持仓（{prev_date}）" if prev_date else "📋 上期持仓"
+        prev_sec = f"""<tr style="background:#f3e5f5;"><td colspan="3" style="font-weight:bold;color:#7b1fa2;">{prev_label}</td></tr>
+{holding_rows(prev_holdings_data)}"""
+
+    return f"""<h3>ETF 排行榜 {date_range}</h3>
+    <table>
+        <thead><tr><th style="text-align:center;">#</th><th>代码</th><th style="text-align:right;">收益率</th></tr></thead>
+        <tbody>
+            <tr style="background:#fff5f5;"><td colspan="3" style="font-weight:bold;color:#cc0000;">📈 涨幅前10</td></tr>
+            {rank_rows(top)}
+            <tr style="background:#f0fff0;"><td colspan="3" style="font-weight:bold;color:#009900;">📉 跌幅前10</td></tr>
+            {rank_rows(bot)}
+            {cur_sec}
+            {prev_sec}
+        </tbody>
     </table>"""
 
 
@@ -477,23 +717,46 @@ def run_market_monitor(seq_key=None):
     print(f"  Backtest equity: {dates[0]} ~ {dates[-1]} ({len(dates)} days)")
 
     df_regime, stats = compute_model_vs_market(dates, values, hs_regime)
-    recent = compute_recent_performance(dates, values, hs_data)
 
     chart_path = OUTPUT_DIR / "market_monitor.png"
     plot_market_analysis(dates, values, df_regime, breadth_df, chart_path)
     print(f"  Chart saved: {chart_path}")
 
     regime_html = build_regime_table_html(stats, current_regime, breadth_last)
-    recent_html = build_recent_table_html(recent)
-    html_section = regime_html + "<br>" + recent_html
+    top, bot, holdings_data, prev_holdings_data, rank_start, rank_end = compute_top_etf_rankings()
+    rank_date = f"{rank_start}~{rank_end}" if rank_start else ""
+    rank_html = build_etf_rankings_html(top, bot, holdings_data, prev_holdings_data, rank_date) if top else ""
+    print("  Top 10 ETFs (5d):")
+    for item in top:
+        tag = " [持仓]" if item.get("held") else ""
+        print(f"    {item['code']}: {item['return']:+.2f}%{tag}")
+    print("  Bottom 10 ETFs (5d):")
+    for item in bot:
+        tag = " [持仓]" if item.get("held") else ""
+        print(f"    {item['code']}: {item['return']:+.2f}%{tag}")
+    print("  Holdings ranking:")
+    for item in holdings_data:
+        print(f"    {item['code']}: {item['return']:+.2f}% (rank {item['rank']}/{item['total']})")
+    if prev_holdings_data:
+        d = prev_holdings_data[0]["days_ago"]
+        print(f"  Previous holdings ({d}d ago):")
+        for item in prev_holdings_data:
+            print(f"    {item['code']}: {item['return']:+.2f}% (rank {item['rank']}/{item['total']})")
+    html_section = regime_html + "<br>" + (rank_html if rank_html else "")
 
     json_path = OUTPUT_DIR / "market_monitor.json"
     with open(json_path, "w") as f:
         json.dump({
             "stats": stats,
-            "recent": recent,
             "current_regime": current_regime,
             "breadth": breadth_last,
+            "etf_rankings": {
+                "period": rank_date,
+                "top": top,
+                "bottom": bot,
+                "holdings": holdings_data,
+                "prev_holdings": prev_holdings_data,
+            },
             "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M"),
         }, f, indent=2)
     print(f"  JSON saved: {json_path}")

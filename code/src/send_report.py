@@ -35,6 +35,52 @@ EMAIL_TO = os.environ.get("EMAIL_TO", "1280745039@qq.com")
 
 TEMPLATE_PATH = PROJECT_ROOT / "code" / "src" / "report_template.html"
 
+ETF_LIST_PATH = PROJECT_ROOT / "etf_data" / "etf_list_before_2022_74.csv"
+
+
+def _add_window(metrics, key, values, n):
+    """向 metrics 补充 N 日窗口数据"""
+    if len(values) < n + 1:
+        return
+    ret = (values[-1] / values[-n - 1] - 1) * 100
+    ann = ((1 + ret / 100) ** (252 / n) - 1) * 100 if n > 0 else 0
+    sub = values[-n:]
+    wins = sum(1 for i in range(1, len(sub)) if sub[i] > sub[i - 1])
+    win_rate = wins / (len(sub) - 1) if len(sub) > 1 else 0
+    dd = _compute_max_drawdown(sub)
+    metrics[key] = {
+        "strategy_return_pct": round(ret, 2),
+        "annualized_return_pct": round(ann, 2),
+        "daily_win_rate": round(win_rate, 4),
+        "max_drawdown_pct": round(dd, 2),
+        "total_days": n,
+    }
+
+
+def _compute_max_drawdown(values):
+    peak = values[0]
+    dd = 0
+    for v in values:
+        if v > peak:
+            peak = v
+        dd = min(dd, (v - peak) / peak)
+    return abs(dd) * 100
+
+
+def _load_etf_names():
+    """加载 ETF 代码→名称映射"""
+    if not ETF_LIST_PATH.exists():
+        return {}
+    import csv
+    mapping = {}
+    with open(ETF_LIST_PATH, encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            code = row.get("代码", "").strip()
+            name = row.get("名称", "").strip()
+            if code and name:
+                mapping[code] = name
+    return mapping
+
 
 def _xueqiu_url(stock_id):
     code = stock_id.split(".")[0]
@@ -308,7 +354,7 @@ def _compute_health_score(model_data):
 
 
 def _build_pred_signals_table(seq_data, report_date):
-    """从 predictions_history 构建预测信号表"""
+    """从 predictions_history 构建预测信号表（前10名）"""
     ph_list = seq_data.get("predictions_history", [])
     if not ph_list:
         return ""
@@ -322,24 +368,28 @@ def _build_pred_signals_table(seq_data, report_date):
     if not latest_ph:
         return ""
 
-    preds = latest_ph["predictions"]
+    preds = latest_ph["predictions"][:10]
     ph_date = latest_ph["date"]
     cutoff_idx = min(3, len(preds) - 1) if preds else 0
     cutoff_score = preds[cutoff_idx]["score"] if preds and cutoff_idx >= 0 else 0
     score_std = max(np.std([p["score"] for p in preds]), 1e-12) if len(preds) > 1 else 1.0
 
+    etf_names = _load_etf_names()
+
     rows = ""
     for p in preds:
         rank = p["rank"]
         code = p["stock_id"]
+        name = etf_names.get(code, "")
         score = p["score"]
         advantage = (score - cutoff_score) / score_std
         adv_str = f"{advantage:+.4f}"
         adv_clr = "#cc0000" if advantage >= 0 else "#009900"
         score_str = f"{score:.4f}"
-        rows += f"""<tr><td style="text-align:right;font-weight:bold;">{rank}</td><td><a href="{_xueqiu_url(code)}" target="_blank" style="text-decoration:none;color:inherit;">{code}</a></td><td style="text-align:right;font-family:monospace;">{score_str}</td><td style="text-align:right;font-family:monospace;color:{adv_clr};font-weight:bold;">{adv_str}</td></tr>"""
+        name_display = f" ({name})" if name else ""
+        rows += f"""<tr><td style="text-align:right;font-weight:bold;">{rank}</td><td><a href="{_xueqiu_url(code)}" target="_blank" style="text-decoration:none;color:inherit;">{code}</a>{name_display}</td><td style="text-align:right;font-family:monospace;">{score_str}</td><td style="text-align:right;font-family:monospace;color:{adv_clr};font-weight:bold;">{adv_str}</td></tr>"""
 
-    return f"""<h3>预测信号 ({ph_date})</h3><table><thead><tr><th style="text-align:right;">排名</th><th>代码</th><th style="text-align:right;">Score</th><th style="text-align:right;">优势</th></tr></thead><tbody>{rows}</tbody></table>"""
+    return f"""<h3>预测信号 (Top10, {ph_date})</h3><table><thead><tr><th style="text-align:right;">排名</th><th>代码</th><th style="text-align:right;">Score</th><th style="text-align:right;">优势</th></tr></thead><tbody>{rows}</tbody></table>"""
 
 
 def build_report_html(*, date, model_display, total_value, cash, holdings,
@@ -488,9 +538,12 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
     win_rate = metrics.get("daily_win_rate")
     win_rate_str = f"{win_rate*100:.1f}%" if isinstance(win_rate, (int, float)) else ""
 
-    window_labels = {"window_5d": "近5天(交易日)", "window_1m": "近一个月"}
+    window_labels = {"window_3d": "近3天(交易日)", "window_5d_real": "近5天(交易日)", "window_10d": "近10天(交易日)", "window_1m": "近20天(交易日)"}
     window_rows = ""
-    for wkey in ["window_5d", "window_1m"]:
+    # 加载HS300数据用于对比
+    _hs_prices = None
+    _hs_path = PROJECT_ROOT / "etf_data" / "etf_74.csv"
+    for wkey in ["window_3d", "window_5d_real", "window_10d", "window_1m"]:
         w = metrics.get(wkey)
         if w:
             w_ret = w.get("strategy_return_pct", 0)
@@ -498,7 +551,19 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
             w_win = w.get("daily_win_rate", 0)
             w_win_str = f"{w_win*100:.1f}%" if isinstance(w_win, (int, float)) else ""
             w_dd = w.get("max_drawdown_pct", 0)
-            window_rows += f"""<tr><td>{window_labels.get(wkey, wkey)}</td><td style="text-align:right;color:{'#cc0000' if w_ret >= 0 else '#009900'};font-weight:bold;">{_pct(w_ret)}</td><td style="text-align:right;">{_pct(w_ann)}</td><td style="text-align:right;">{w_win_str}</td><td style="text-align:right;">{w_dd:.2f}%</td></tr>"""
+            w_days = w.get("total_days", 0)
+            # 计算同期HS300收益
+            w_hs = ""
+            if _hs_path.exists() and w_days > 0:
+                if _hs_prices is None:
+                    _df = pd.read_csv(_hs_path)
+                    _df["日期"] = pd.to_datetime(_df["日期"])
+                    _hs = _df[_df["股票代码"] == "510300.XSHG"].sort_values("日期")
+                    _hs_prices = _hs.set_index("日期")["收盘"]
+                if len(_hs_prices) >= w_days + 1:
+                    _hs_ret = (_hs_prices.iloc[-1] / _hs_prices.iloc[-w_days - 1] - 1) * 100
+                    w_hs = f'<td style="text-align:right;color:{"#cc0000" if _hs_ret >= 0 else "#009900"};">{_hs_ret:+.2f}%</td>'
+            window_rows += f"""<tr><td>{window_labels.get(wkey, wkey)}</td><td style="text-align:right;color:{'#cc0000' if w_ret >= 0 else '#009900'};font-weight:bold;">{_pct(w_ret)}</td>{w_hs}<td style="text-align:right;">{_pct(w_ann)}</td><td style="text-align:right;">{w_win_str}</td><td style="text-align:right;">{w_dd:.2f}%</td></tr>"""
 
     # 账户总值栏
     sr = metrics.get("strategy_return_pct", 0)
@@ -579,6 +644,17 @@ def send_report(model_key=None):
         seq_data = sequences[model_key]
 
     metrics = seq_data["metrics"]
+    # 补充近3天、近10天窗口（如果回测长度足够）
+    ec = seq_data.get("equity_curve", [])
+    if len(ec) >= 4:
+        vals = [e["total_value"] for e in ec]
+        _add_window(metrics, "window_3d", vals, 3)
+    if len(ec) >= 6:
+        vals = [e["total_value"] for e in ec]
+        _add_window(metrics, "window_5d_real", vals, 5)
+    if len(ec) >= 11:
+        vals = [e["total_value"] for e in ec]
+        _add_window(metrics, "window_10d", vals, 10)
     holdings = seq_data.get("holdings", report.get("holdings", []))
     cash = seq_data.get("cash", report.get("cash", 0))
     total_value = metrics.get("latest_value", 0)
