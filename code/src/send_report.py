@@ -435,7 +435,8 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
                       chart_data_url=None, model_stats_section="",
                        equity_data=None, scatter_section="", health_section="",
                        trade_mode="open", pred_signals_section="",
-                       market_monitor_section=""):
+                       market_monitor_section="", pre_holdings=None,
+                       rebalance_win_rate=None):
     """构建报告HTML，各组件已预先准备好"""
     # 排行数据
     _rank_map = _compute_rank_maps(date) if 'date' in locals() or date else {}
@@ -588,8 +589,7 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
     if not dd_rows:
         dd_rows = "<tr><td colspan='6' style='color:#999;text-align:center;'>暂无回撤</td></tr>"
 
-    win_rate = metrics.get("daily_win_rate")
-    win_rate_str = f"{win_rate*100:.1f}%" if isinstance(win_rate, (int, float)) else ""
+    win_rate_str = f"{rebalance_win_rate:.1f}%" if isinstance(rebalance_win_rate, (int, float)) else ""
 
     window_labels = {"window_3d": "近3天(交易日)", "window_5d_real": "近5天(交易日)", "window_10d": "近10天(交易日)", "window_1m": "近20天(交易日)"}
     window_rows = ""
@@ -647,14 +647,15 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
         if v.startswith("-"): return "#009900"
         return "#333"
     r1 = _cell("策略收益", sr_v, _clr(sr_v)) + _cell("年化收益", ar_v, _clr(ar_v)) + _cell("沪深300", hs_v, _clr(hs_v)) + _cell("超额收益", er_v, _clr(er_v))
-    r2 = _cell("日胜率", wr_v) + _cell("最大回撤", md_v) + _cell("夏普比率", sh_v) + _cell("卡玛比率", ca_v)
+    r2 = _cell("调仓胜率", wr_v) + _cell("最大回撤", md_v) + _cell("夏普比率", sh_v) + _cell("卡玛比率", ca_v)
     r3 = _cell("索提诺", so_v) + _cell("年化波动", av_v) + _cell("总交易日", td_v) + _cell("现金", cs_v)
     metrics_rows = f"<tr>{r1}</tr><tr>{r2}</tr><tr>{r3}</tr>"
 
     # 填充模板
     html = _load_template()
     mode_label = "开盘交易" if trade_mode == "open" else "收盘交易"
-    html = html.replace("{{MODEL_INFO}}", f"模型: {model_display} | 日期: {date} | 模式: {mode_label} | 下个调仓日: {next_rebalance}")
+    juejin_badge = '<span style="display:inline-block;background:#e74c3c;color:#fff;font-size:10px;font-weight:bold;padding:1px 6px;border-radius:3px;margin-left:6px;">掘金</span>' if "掘金" in model_display else ""
+    html = html.replace("{{MODEL_INFO}}", f"模型: {model_display}{juejin_badge} | 日期: {date} | 模式: {mode_label} | 下个调仓日: {next_rebalance}")
     html = html.replace("{{TOTAL_BAR}}", total_bar)
     html = html.replace("{{METRICS_ROWS}}", metrics_rows)
     html = html.replace("{{WINDOW_ROWS}}", window_rows)
@@ -663,6 +664,19 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
     html = html.replace("{{HEALTH_SECTION}}", health_section)
     html = html.replace("{{HOLDINGS_TITLE}}", f"当前持仓 ({len(holdings)} 只)")
     html = html.replace("{{HOLDINGS_ROWS}}", holdings_rows)
+
+    pre_holdings_section = ""
+    if pre_holdings:
+        pre_rows = ""
+        for h in pre_holdings:
+            code = h["stock_id"]
+            name = h.get("name") or code
+            shares = h["shares"]
+            price = h.get("price_display", h.get("price", 0))
+            pre_rows += f'<tr><td>{code}</td><td>{name}</td><td style="text-align:right;">{price:.3f}</td><td style="text-align:right;">{shares:,}</td></tr>'
+        pre_holdings_section = f'<h3>上期持仓 ({len(pre_holdings)} 只)</h3><table><thead><tr><th>代码</th><th>名称</th><th style="text-align:right;">现价</th><th style="text-align:right;">股数</th></tr></thead><tbody>{pre_rows}</tbody></table>'
+    html = html.replace("{{PRE_HOLDINGS_SECTION}}", pre_holdings_section)
+
     html = html.replace("{{TRADES_SECTION}}", trades_section)
     html = html.replace("{{CHART_SRC}}", chart_data_url or "cid:chart_img")
     html = html.replace("{{SCATTER_SECTION}}", scatter_section)
@@ -709,8 +723,10 @@ def send_report(model_key=None):
         vals = [e["total_value"] for e in ec]
         _add_window(metrics, "window_10d", vals, 10)
     holdings = seq_data.get("holdings", report.get("holdings", []))
+    pre_holdings = report.get("pre_holdings", [])
     cash = seq_data.get("cash", report.get("cash", 0))
     total_value = metrics.get("latest_value", 0)
+    rebalance_win_rate = seq_data.get("model_stats", {}).get("total_win_rate_pct")
 
     trades = report.get("all_today_trades", report.get("today_trades", []))
 
@@ -782,6 +798,7 @@ def send_report(model_key=None):
         total_value=total_value,
         cash=cash,
         holdings=holdings,
+        pre_holdings=pre_holdings,
         trades_list=trades,
         metrics=metrics,
         next_rebalance=next_rebalance,
@@ -794,6 +811,7 @@ def send_report(model_key=None):
         trade_mode=trade_mode,
         pred_signals_section=pred_signals_section,
         market_monitor_section=market_monitor_section,
+        rebalance_win_rate=rebalance_win_rate,
     )
 
     msg = MIMEMultipart()

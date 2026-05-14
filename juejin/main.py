@@ -24,6 +24,26 @@ TRADE_MODE = "open"  # "open"（开盘交易，用前日特征）或 "close"（�
 _BACKTEST_DATES = None  # 缓存预测文件中的全交易日历
 
 
+def get_backtest_end_date():
+    """从 predictions.json 读取最后一个回测日期，避免硬编码。"""
+    if os.path.exists(PREDICTIONS_PATH):
+        try:
+            with open(PREDICTIONS_PATH, "r", encoding="utf-8") as f:
+                meta = json.load(f).get("_meta", {})
+            dates = meta.get("backtest_dates", [])
+            if dates:
+                return dates[-1]
+        except Exception:
+            pass
+    # fallback: 取最近一个交易日
+    import datetime
+    today = datetime.date.today()
+    while True:
+        if today.weekday() < 5:
+            return today.strftime("%Y-%m-%d")
+        today -= datetime.timedelta(days=1)
+
+
 def to_gm_symbol(stock_id):
     """510300.XSHG -> SHSE.510300"""
     code, exchange = stock_id.split(".")
@@ -105,6 +125,8 @@ def init(context):
     if not context.predictions:
         raise ValueError("无预测数据，策略退出")
 
+    context.end_date = _BACKTEST_DATES[-1] if _BACKTEST_DATES else get_backtest_end_date()
+
     # 计算调仓日（用全交易日历，与本地引擎对齐）
     cal = _BACKTEST_DATES or sorted(context.predictions.keys())
     context.rebalance_dates = compute_rebalance_dates(cal, START_DATE, REBALANCE_DAYS)
@@ -113,7 +135,7 @@ def init(context):
     # 调试：对比 CSV 日历 vs GM 日历
     try:
         from gm.api import get_trading_dates
-        gm_dates_raw = get_trading_dates(exchange='SHSE', start_date=START_DATE, end_date='2026-05-12')
+        gm_dates_raw = get_trading_dates(exchange='SHSE', start_date=START_DATE, end_date=context.end_date)
         gm_date_strs = [str(d) for d in gm_dates_raw]
         csv_only = set(cal) - set(gm_date_strs)
         gm_only = set(gm_date_strs) - set(cal)
@@ -442,7 +464,7 @@ def on_backtest_finished(context, indicator):
                     "initial_cash": 100000,
                     "slippage_ratio": 0.001,
                     "commission_ratio": 0.0003,
-                    "backtest_end": "2026-05-12",
+                    "backtest_end": context.end_date,
                 },
                 "rebalance_dates": rebalance_dates_sorted,
                 "calendar_diff": {},
@@ -484,12 +506,15 @@ if __name__ == '__main__':
     this = sys.modules[__name__]
     this.TRADE_MODE = args.trade_mode
 
+    end_date = get_backtest_end_date()
+    print(f"[策略] 回测区间: {START_DATE} ~ {end_date}")
+
     run(strategy_id='strategy_id',
         filename='main.py',
         mode=MODE_BACKTEST,
         token='{{token}}',
-        backtest_start_time='2026-04-01 08:00:00',
-        backtest_end_time='2026-05-12 16:00:00',
+        backtest_start_time=f'{START_DATE} 08:00:00',
+        backtest_end_time=f'{end_date} 16:00:00',
         backtest_adjust=ADJUST_PREV,
         backtest_initial_cash=100000,
         backtest_commission_ratio=0.0003,

@@ -2593,7 +2593,7 @@ def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capit
         else:
             display_positions = report_data.get("positions", {})
 
-        # 构造持仓
+        # 构造当前持仓
         pnl_positions = {p["stock_id"]: p for p in report_data.get("today_pnl", {}).get("positions", [])}
         _buy_price_col = "开盘" if trade_mode == "open" else "收盘"
         last_buy_info = {}
@@ -2637,6 +2637,25 @@ def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capit
                 "high_limit": round(float(hl_s.values[0]), 4) if not hl_s.empty else 0,
                 "low_limit": round(float(ll_s.values[0]), 4) if not ll_s.empty else 0,
             })
+
+        # 上期持仓（调仓日显示调仓前持仓）
+        pre_holdings = []
+        if is_rebalance_day:
+            pre_positions = report_data.get("pre_rebalance_positions", {})
+            if not pre_positions:
+                pre_positions = report_data.get("positions", {})
+            for stock_id, pos in pre_positions.items():
+                sub = raw_df[raw_df["股票代码"] == stock_id]
+                tc_s = sub.loc[sub["日期"] == latest_date, "收盘"]
+                price = float(tc_s.values[0]) if not tc_s.empty else 0
+                pre_holdings.append({
+                    "stock_id": stock_id,
+                    "name": etf_names.get(stock_id, ""),
+                    "price": price,
+                    "price_display": price,
+                    "shares": pos["shares"],
+                    "cost": pos.get("cost", 0),
+                })
 
         # 构建 sequences_summary
         sequences_summary = {}
@@ -2738,6 +2757,7 @@ def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capit
             "all_today_trades": all_today_trades,
             "metrics": report_data.get("metrics", {}),
             "holdings": holdings,
+            "pre_holdings": pre_holdings,
             "cash": report_data.get("cash", rk_seq.get("cash", 0)),
             "total_value": report_data.get("metrics", {}).get("latest_value", 0),
             "sequences": sequences_summary,
@@ -2750,7 +2770,7 @@ def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capit
 
         if verbose:
             print(f"\n[日报] latest_report.json 已保存")
-            print(f"  日期: {latest_date_str}, 持仓: {len(holdings)}, 交易: {len(all_today_trades)}")
+            print(f"  日期: {latest_date_str}, 持仓: {len(holdings)}, 交易: {len(all_today_trades)}, 上期持仓: {len(pre_holdings)}")
 
         # 发送邮件
         try:

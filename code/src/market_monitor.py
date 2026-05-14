@@ -348,12 +348,14 @@ def compute_model_vs_market(dates, values, hs_data):
         hs_total = hs_total * 100
         excess = model_total - hs_total
         beat_rate = (sub["model_return"] > sub["hs300_return"]).mean()
+        model_win_rate = (sub["model_return"] > 0).mean()
         stats[regime] = {
             "days": len(sub),
             "model_return": round(model_total, 2),
             "hs300_return": round(hs_total, 2),
             "excess_return": round(excess, 2),
             "beat_rate": round(beat_rate, 4),
+            "model_win_rate": round(model_win_rate, 4),
             "avg_model_return": round(sub["model_return"].mean(), 4),
             "avg_hs300_return": round(sub["hs300_return"].mean(), 4),
         }
@@ -362,12 +364,14 @@ def compute_model_vs_market(dates, values, hs_data):
     hs_total = (1 + df["hs300_return"] / 100).prod() - 1
     hs_total = hs_total * 100
     beat_all = (df["model_return"] > df["hs300_return"]).mean()
+    model_win_all = (df["model_return"] > 0).mean()
     stats["all"] = {
         "days": len(df),
         "model_return": round(model_total, 2),
         "hs300_return": round(hs_total, 2),
         "excess_return": round(model_total - hs_total, 2),
         "beat_rate": round(beat_all, 4),
+        "model_win_rate": round(model_win_all, 4),
         "avg_model_return": round(df["model_return"].mean(), 4),
         "avg_hs300_return": round(df["hs300_return"].mean(), 4),
     }
@@ -575,7 +579,7 @@ def build_regime_table_html(stats, current_regime=None, breadth_last=None):
         m_ret = s["model_return"]
         h_ret = s["hs300_return"]
         e_ret = s["excess_return"]
-        b_rate = s["beat_rate"]
+        mwr = s.get("model_win_rate", s.get("beat_rate", 0))
         m_clr = "#cc0000" if m_ret >= 0 else "#009900"
         h_clr = "#cc0000" if h_ret >= 0 else "#009900"
         e_clr = "#cc0000" if e_ret >= 0 else "#009900"
@@ -586,7 +590,7 @@ def build_regime_table_html(stats, current_regime=None, breadth_last=None):
             <td style="text-align:right;color:{m_clr};">{m_ret:+.2f}%</td>
             <td style="text-align:right;color:{h_clr};">{h_ret:+.2f}%</td>
             <td style="text-align:right;color:{e_clr};font-weight:bold;">{e_ret:+.2f}%</td>
-            <td style="text-align:right;">{b_rate*100:.1f}%</td>
+            <td style="text-align:right;">{mwr*100:.1f}%</td>
         </tr>"""
 
     header_lines = []
@@ -605,7 +609,7 @@ def build_regime_table_html(stats, current_regime=None, breadth_last=None):
     return f"""<h3>市场状态</h3>
     <p style="font-size:11px;color:#666;">{header_info}</p>
     <table>
-        <thead><tr><th>市场状态</th><th style="text-align:right;">天数</th><th style="text-align:right;">模型收益</th><th style="text-align:right;">HS300</th><th style="text-align:right;">超额收益</th><th style="text-align:right;">日胜率</th></tr></thead>
+        <thead><tr><th>市场状态</th><th style="text-align:right;">天数</th><th style="text-align:right;">模型收益</th><th style="text-align:right;">HS300</th><th style="text-align:right;">超额收益</th><th style="text-align:right;">调仓胜率</th></tr></thead>
         <tbody>{rows}</tbody>
     </table>
     <p style="font-size:10px;color:#999;">市场状态判定: 以HS300滚动20日收益+波动率为基准。牛: >+5%且波动&lt;30%; 熊: &lt;-5%; 震荡: 其余。市场宽度: 同方法对全ETF池子逐只判定后统计占比。</p>"""
