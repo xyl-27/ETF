@@ -26,6 +26,9 @@ HS300_CODE = "510300.XSHG"
 
 def load_etf_data():
     df = pd.read_csv(DATA_PATH)
+    drops = [c for c in ["振幅_前复权", "涨跌额_前复权", "涨跌幅_前复权", "开盘_前复权", "收盘_前复权", "最高_前复权", "最低_前复权", "前收盘_前复权"] if c in df.columns]
+    if drops:
+        df = df.drop(columns=drops)
     df["日期"] = pd.to_datetime(df["日期"])
     df["股票代码"] = df["股票代码"].astype(str).str.zfill(6)
     return df

@@ -645,6 +645,15 @@ class ETFBacktester:
 
         # 加载数据
         df = pd.read_csv(data_path)
+        drops = [c for c in ["振幅", "涨跌额", "涨跌幅", "开盘", "收盘", "最高", "最低", "前收盘"] if c in df.columns]
+        if drops:
+            df = df.drop(columns=drops)
+        df = df.rename(columns={
+            "开盘_前复权": "开盘", "收盘_前复权": "收盘",
+            "最高_前复权": "最高", "最低_前复权": "最低",
+            "前收盘_前复权": "前收盘",
+            "振幅_前复权": "振幅", "涨跌额_前复权": "涨跌额", "涨跌幅_前复权": "涨跌幅",
+        })
         df["日期"] = pd.to_datetime(df["日期"])
         df["股票代码"] = df["股票代码"].astype(str).str.zfill(6)
         df = df.sort_values(["股票代码", "日期"]).reset_index(drop=True)
@@ -1098,6 +1107,9 @@ def run_backtest_from_predictions(
     end_ts = pd.Timestamp(end_date)
 
     raw_df = pd.read_csv(data_path, dtype={"股票代码": str})
+    drops = [c for c in ["振幅_前复权", "涨跌额_前复权", "涨跌幅_前复权", "开盘_前复权", "收盘_前复权", "最高_前复权", "最低_前复权", "前收盘_前复权"] if c in raw_df.columns]
+    if drops:
+        raw_df = raw_df.drop(columns=drops)
     raw_df["股票代码"] = raw_df["股票代码"].astype(str).str.zfill(6)
     raw_df["日期"] = pd.to_datetime(raw_df["日期"])
     all_dates = sorted(raw_df["日期"].unique())

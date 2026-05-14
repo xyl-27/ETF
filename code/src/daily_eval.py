@@ -29,6 +29,8 @@ class NumpyEncoder(json.JSONEncoder):
             return float(obj)
         if isinstance(obj, (np.ndarray,)):
             return obj.tolist()
+        if isinstance(obj, pd.Timestamp):
+            return str(obj)
         return super().default(obj)
 
 # 项目根目录
@@ -75,7 +77,7 @@ def plot_equity_curves(sequences: Dict[str, Any], data_file: str, initial_capita
         first_trade_date = pd.Timestamp("2026-04-01")
 
     # 2. 加载 HS300 数据，从首个交易日开始归一化
-    raw_df = pd.read_csv(data_file, dtype={"股票代码": str})
+    raw_df = load_etf_data(data_file, dtype={"股票代码": str})
     raw_df["股票代码"] = raw_df["股票代码"].astype(str).str.zfill(6)
     raw_df["日期"] = pd.to_datetime(raw_df["日期"])
     hs300_df = raw_df[raw_df["股票代码"] == "510300.XSHG"].sort_values("日期").copy()
@@ -145,6 +147,14 @@ PORTFOLIO_PATH = OUTPUT_DIR / "portfolio.json"
 PREDICTIONS_PATH = OUTPUT_DIR / "predictions.json"
 MODEL_SELECTION_PATH = OUTPUT_DIR / "model_selection.yaml"
 DATA_FILE = PROJECT_ROOT / "etf_data" / "etf_74.csv"
+
+
+def load_etf_data(path=None, dtype=None):
+    df = pd.read_csv(path or DATA_FILE, dtype=dtype)
+    drops = [c for c in ["振幅_前复权", "涨跌额_前复权", "涨跌幅_前复权", "开盘_前复权", "收盘_前复权", "最高_前复权", "最低_前复权", "前收盘_前复权"] if c in df.columns]
+    if drops:
+        df = df.drop(columns=drops)
+    return df
 
 
 # ============================================================
@@ -302,7 +312,7 @@ def run_backtest_sequence(
     slippage: float = 0.001,
     trade_mode: str = "open",
 ) -> Dict[str, Any]:
-    raw_df = pd.read_csv(data_file, dtype={"股票代码": str})
+    raw_df = load_etf_data(data_file, dtype={"股票代码": str})
     raw_df["股票代码"] = raw_df["股票代码"].astype(str).str.zfill(6)
     raw_df["日期"] = pd.to_datetime(raw_df["日期"])
     price_data = raw_df.copy()
@@ -922,7 +932,7 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
     if not trades or not equity_curve:
         return
 
-    raw_df = pd.read_csv(data_file, dtype={"股票代码": str})
+    raw_df = load_etf_data(data_file, dtype={"股票代码": str})
     raw_df["股票代码"] = raw_df["股票代码"].astype(str).str.zfill(6)
     raw_df["日期"] = pd.to_datetime(raw_df["日期"])
     hs300_raw = raw_df[raw_df["股票代码"] == "510300.XSHG"][["日期", "收盘"]].copy()
@@ -1439,7 +1449,7 @@ def daily_eval(
                 print("\n[1/4] 获取最新ETF数据...")
             update_etf_data(verbose=verbose)
 
-        raw_df = pd.read_csv(DATA_FILE, dtype={"股票代码": str})
+        raw_df = load_etf_data(DATA_FILE, dtype={"股票代码": str})
         raw_df["股票代码"] = raw_df["股票代码"].astype(str).str.zfill(6)
         raw_df["日期"] = pd.to_datetime(raw_df["日期"])
         latest_date = raw_df["日期"].max()
@@ -1783,7 +1793,7 @@ def daily_eval(
             if idx > 0:
                 prev_rb_date = trade_dates[idx - 1]
         if prev_rb_date:
-            m_raw = pd.read_csv(DATA_FILE, dtype={"股票代码": str})
+            m_raw = load_etf_data(DATA_FILE, dtype={"股票代码": str})
             m_raw["股票代码"] = m_raw["股票代码"].astype(str).str.zfill(6)
             m_raw["日期"] = pd.to_datetime(m_raw["日期"])
             prev_ts = pd.Timestamp(prev_rb_date)
@@ -2052,7 +2062,7 @@ def generate_predictions_only(
                 print("[1/4] 获取最新ETF数据...")
             update_etf_data(verbose=verbose)
 
-        raw_df = pd.read_csv(DATA_FILE, dtype={"股票代码": str})
+        raw_df = load_etf_data(DATA_FILE, dtype={"股票代码": str})
         raw_df["股票代码"] = raw_df["股票代码"].astype(str).str.zfill(6)
         raw_df["日期"] = pd.to_datetime(raw_df["日期"])
         latest_date = raw_df["日期"].max()
@@ -2279,7 +2289,7 @@ def run_from_predictions(
                 print(f"[2/4] 获取最新ETF数据...")
             update_etf_data(verbose=verbose)
 
-        raw_df = pd.read_csv(DATA_FILE, dtype={"股票代码": str})
+        raw_df = load_etf_data(DATA_FILE, dtype={"股票代码": str})
         raw_df["股票代码"] = raw_df["股票代码"].astype(str).str.zfill(6)
         raw_df["日期"] = pd.to_datetime(raw_df["日期"])
         latest_date = raw_df["日期"].max()
@@ -2538,7 +2548,7 @@ def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capit
         report_data = sequences[report_key]
 
         # 加载价格数据
-        raw_df = pd.read_csv(DATA_FILE, dtype={"股票代码": str})
+        raw_df = load_etf_data(DATA_FILE, dtype={"股票代码": str})
         raw_df["股票代码"] = raw_df["股票代码"].astype(str).str.zfill(6)
         raw_df["日期"] = pd.to_datetime(raw_df["日期"])
         latest_date = raw_df["日期"].max()

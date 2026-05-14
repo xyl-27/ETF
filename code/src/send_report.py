@@ -356,6 +356,9 @@ def _compute_health_score(model_data):
 def _compute_rank_maps(target_date):
     """Compute 1-day (实时) and 5-day (近5日) return rankings for all ETFs."""
     _df = pd.read_csv(str(PROJECT_ROOT / "etf_data" / "etf_74.csv"))
+    drops = [c for c in ["振幅_前复权", "涨跌额_前复权", "涨跌幅_前复权", "开盘_前复权", "收盘_前复权", "最高_前复权", "最低_前复权", "前收盘_前复权"] if c in _df.columns]
+    if drops:
+        _df = _df.drop(columns=drops)
     _df["日期"] = pd.to_datetime(_df["日期"])
     _df["股票代码"] = _df["股票代码"].astype(str).str.zfill(6)
     target_dt = pd.Timestamp(target_date)
@@ -485,7 +488,8 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
     total_rebal_cost = sum(h.get("buy_price", 0) * h["shares"] for h in holdings if h.get("price") and h.get("buy_price"))
     total_rebal_pnl_pct = round(total_rebal_pnl / total_rebal_cost * 100, 2) if total_rebal_cost > 0 else 0
     rebal_total_color = "#cc0000" if total_rebal_pnl >= 0 else "#009900"
-    holdings_rows += f"""<tr style="font-weight:bold;border-top:2px solid #333;"><td colspan="4" style="text-align:right;">合计</td><td colspan="5" style="text-align:right;">&nbsp;</td><td style="text-align:right;">{(total_value - cash) / total_value * 100:.2f}%</td><td style="text-align:right;color:{pnl_total_color};">{today_pnl_total:+.0f}</td><td style="text-align:right;color:{rebal_total_color};">{total_rebal_pnl:+.0f} ({total_rebal_pnl_pct:+.2f}%)</td></tr>"""
+    total_shares = sum(h["shares"] for h in holdings)
+    holdings_rows += f"""<tr style="font-weight:bold;border-top:2px solid #333;"><td colspan="4" style="text-align:right;">合计</td><td colspan="5" style="text-align:right;">&nbsp;</td><td style="text-align:right;">{total_shares:,}</td><td style="text-align:right;">{total_value:,.0f}</td><td style="text-align:right;">{(total_value - cash) / total_value * 100:.2f}%</td><td style="text-align:right;color:{pnl_total_color};">{today_pnl_total:+.0f}</td><td style="text-align:right;color:{rebal_total_color};">{total_rebal_pnl:+.0f} ({total_rebal_pnl_pct:+.2f}%)</td></tr>"""
 
     # 交易表
     trades_section = ""
@@ -603,9 +607,12 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
             w_hs = ""
             if _hs_path.exists() and w_days > 0:
                 if _hs_prices is None:
-                    _df = pd.read_csv(_hs_path)
-                    _df["日期"] = pd.to_datetime(_df["日期"])
-                    _hs = _df[_df["股票代码"] == "510300.XSHG"].sort_values("日期")
+                    _tmp = pd.read_csv(_hs_path)
+                    drops = [c for c in ["振幅_前复权", "涨跌额_前复权", "涨跌幅_前复权", "开盘_前复权", "收盘_前复权", "最高_前复权", "最低_前复权", "前收盘_前复权"] if c in _tmp.columns]
+                    if drops:
+                        _tmp = _tmp.drop(columns=drops)
+                    _tmp["日期"] = pd.to_datetime(_tmp["日期"])
+                    _hs = _tmp[_tmp["股票代码"] == "510300.XSHG"].sort_values("日期")
                     _hs_prices = _hs.set_index("日期")["收盘"]
                 if len(_hs_prices) >= w_days + 1:
                     _hs_ret = (_hs_prices.iloc[-1] / _hs_prices.iloc[-w_days - 1] - 1) * 100

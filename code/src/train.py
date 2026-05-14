@@ -1125,6 +1125,15 @@ def main():
     # 1. 数据加载
     data_file = os.path.join(data_path, config.get("data_file", "train.csv"))
     full_df = pd.read_csv(data_file)
+    drops = [c for c in ["振幅", "涨跌额", "涨跌幅", "开盘", "收盘", "最高", "最低", "前收盘"] if c in full_df.columns]
+    if drops:
+        full_df = full_df.drop(columns=drops)
+    full_df = full_df.rename(columns={
+        "开盘_前复权": "开盘", "收盘_前复权": "收盘",
+        "最高_前复权": "最高", "最低_前复权": "最低",
+        "前收盘_前复权": "前收盘",
+        "振幅_前复权": "振幅", "涨跌额_前复权": "涨跌额", "涨跌幅_前复权": "涨跌幅",
+    })
     train_df, val_df, val_start = split_train_val_by_last_month(
         full_df,
         config["sequence_length"],
