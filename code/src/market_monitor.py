@@ -756,62 +756,71 @@ def build_etf_rankings_html(top, bot, holdings_data, prev_holdings_data, date_ra
     </table>"""
 
 
-def run_market_monitor(seq_key=None):
+def run_market_monitor(seq_key=None, verbose=False):
     """主函数：运行市场监控，返回 stats dict + chart path + HTML section"""
-    print("=" * 50)
-    print("Market Monitor")
-    print("=" * 50)
+    if verbose:
+        print("=" * 50)
+        print("Market Monitor")
+        print("=" * 50)
 
     hs_data = load_hs300_data()
-    print(f"  HS300 data: {hs_data['日期'].min().date()} ~ {hs_data['日期'].max().date()} ({len(hs_data)} days)")
+    if verbose:
+        print(f"  HS300 data: {hs_data['日期'].min().date()} ~ {hs_data['日期'].max().date()} ({len(hs_data)} days)")
 
     hs_regime = classify_market_regime(hs_data)
-    regime_counts = hs_regime["regime"].value_counts()
-    print(f"  Market regimes: {dict(regime_counts)}")
+    if verbose:
+        regime_counts = hs_regime["regime"].value_counts()
+        print(f"  Market regimes: {dict(regime_counts)}")
 
     current_regime = get_current_regime(hs_data)
-    print(f"  Current: {current_regime['regime']} (rolling_ret={current_regime['rolling_20d_return']:+.2f}%, vol={current_regime['rolling_vol']:.1f}%)")
+    if verbose:
+        print(f"  Current: {current_regime['regime']} (rolling_ret={current_regime['rolling_20d_return']:+.2f}%, vol={current_regime['rolling_vol']:.1f}%)")
 
     breadth_df, breadth_last = compute_market_breadth()
-    print(f"  Market breadth: bull={breadth_last['bull_pct']:.0f}%  sideways={breadth_last['sideways_pct']:.0f}%  bear={breadth_last['bear_pct']:.0f}%")
-    print(f"  Breadth: bull={breadth_last['bull_pct']:.0f}%  sideways={breadth_last['sideways_pct']:.0f}%  bear={breadth_last['bear_pct']:.0f}%")
+    if verbose:
+        print(f"  Market breadth: bull={breadth_last['bull_pct']:.0f}%  sideways={breadth_last['sideways_pct']:.0f}%  bear={breadth_last['bear_pct']:.0f}%")
 
     dates, values = load_backtest_equity(seq_key)
     if dates is None or len(dates) < 10:
-        print("  Warning: backtest equity data too short or missing")
+        if verbose:
+            print("  Warning: backtest equity data too short or missing")
         return {}, "", ""
 
-    print(f"  Backtest equity: {dates[0]} ~ {dates[-1]} ({len(dates)} days)")
+    if verbose:
+        print(f"  Backtest equity: {dates[0]} ~ {dates[-1]} ({len(dates)} days)")
 
     df_regime, stats = compute_model_vs_market(dates, values, hs_regime)
 
     chart_path = OUTPUT_DIR / "market_monitor.png"
     plot_market_analysis(dates, values, df_regime, breadth_df, chart_path)
-    print(f"  Chart saved: {chart_path}")
+    if verbose:
+        print(f"  Chart saved: {chart_path}")
 
     regime_html = build_regime_table_html(stats, current_regime, breadth_last)
     top, bot, holdings_data, prev_holdings_data, rank_start, rank_end = compute_top_etf_rankings()
     rank_date = f"{rank_start}~{rank_end}" if rank_start else ""
     rank_html = build_etf_rankings_html(top, bot, holdings_data, prev_holdings_data, rank_date) if top else ""
-    print("  Top 10 ETFs (5d):")
-    for item in top:
-        tag = " [持仓]" if item.get("held") else ""
-        print(f"    {item['code']}: {item['return']:+.2f}%{tag}")
-    print("  Bottom 10 ETFs (5d):")
-    for item in bot:
-        tag = " [持仓]" if item.get("held") else ""
-        print(f"    {item['code']}: {item['return']:+.2f}%{tag}")
-    print("  Holdings ranking:")
-    for item in holdings_data:
-        print(f"    {item['code']}: {item['return']:+.2f}% (rank {item['rank']}/{item['total']})")
-    if prev_holdings_data:
-        d = prev_holdings_data[0]["days_ago"]
-        print(f"  Previous holdings ({d}d ago):")
-        for item in prev_holdings_data:
+    if verbose:
+        print("  Top 10 ETFs (5d):")
+        for item in top:
+            tag = " [持仓]" if item.get("held") else ""
+            print(f"    {item['code']}: {item['return']:+.2f}%{tag}")
+        print("  Bottom 10 ETFs (5d):")
+        for item in bot:
+            tag = " [持仓]" if item.get("held") else ""
+            print(f"    {item['code']}: {item['return']:+.2f}%{tag}")
+        print("  Holdings ranking:")
+        for item in holdings_data:
             print(f"    {item['code']}: {item['return']:+.2f}% (rank {item['rank']}/{item['total']})")
+        if prev_holdings_data:
+            d = prev_holdings_data[0]["days_ago"]
+            print(f"  Previous holdings ({d}d ago):")
+            for item in prev_holdings_data:
+                print(f"    {item['code']}: {item['return']:+.2f}% (rank {item['rank']}/{item['total']})")
+
     # 生成子图（市场宽度回测期 + 日超额收益）嵌入日报
     subplot_html = ""
-    try:
+    try: 
         breadth_chart = OUTPUT_DIR / "market_breadth.png"
         plot_breadth_backtest(dates, breadth_df, breadth_chart)
         excess_chart = OUTPUT_DIR / "market_excess.png"
@@ -843,7 +852,8 @@ def run_market_monitor(seq_key=None):
         }, f, indent=2)
     print(f"  JSON saved: {json_path}")
 
-    print("  Done.")
+    if verbose:
+        print("  Done.")
     return stats, str(chart_path), html_section
 
 

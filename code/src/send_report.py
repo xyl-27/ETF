@@ -688,7 +688,7 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
     return html
 
 
-def send_report(model_key=None):
+def send_report(model_key=None, verbose=False):
     if not SMTP_USER or not SMTP_PASSWORD:
         print("错误: 请设置 SMTP_USER 和 SMTP_PASSWORD 环境变量")
         return False
@@ -768,7 +768,7 @@ def send_report(model_key=None):
     market_monitor_section = ""
     try:
         from market_monitor import run_market_monitor
-        _, _, mm_html = run_market_monitor()
+        _, _, mm_html = run_market_monitor(verbose=verbose)
         market_monitor_section = mm_html
     except Exception as e:
         print(f"  [市场监控] 生成失败: {e}")

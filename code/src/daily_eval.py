@@ -2779,7 +2779,7 @@ def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capit
             _dn = {"juejin": "掘金", "average": "平均", "voting": "投票"}
             model_display = _dn.get(report_key, report_key.replace("search_", "").replace("_exp_", " "))
             print(f"\n[邮件] 发送报告: {model_display}...")
-            send_report(model_key=report_key)
+            send_report(model_key=report_key, verbose=verbose)
         except Exception as e:
             if verbose:
                 print(f"\n[邮件] 发送失败: {e}")
@@ -2803,7 +2803,8 @@ if __name__ == "__main__":
     parser.add_argument("--topk", type=int, default=3, help="Top-K推荐数量")
     parser.add_argument("--rebalance-days", type=int, default=5, help="调仓频率(天)")
     parser.add_argument("--position-pct", type=float, default=0.95, help="仓位比例")
-    parser.add_argument("--quiet", action="store_true", help="静默模式")
+    parser.add_argument("--quiet", action="store_true", help="静默模式（已弃用，默认即精简）")
+    parser.add_argument("--debug", action="store_true", help="打印详细调试日志")
     parser.add_argument("--predictions-only", action="store_true", help="仅保存预测信号，不执行回测")
     parser.add_argument("--from-predictions", action="store_true", help="从已保存的预测信号生成日报（跳过模型加载）")
     parser.add_argument("--update-only", action="store_true", help="仅更新ETF数据，不执行任何其他操作")
@@ -2827,15 +2828,15 @@ if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
 
     if args.update_only:
-        update_etf_data(verbose=not args.quiet)
+        update_etf_data(verbose=args.debug)
         print("数据更新完成。")
     elif args.from_state:
-        run_from_backtest_state(verbose=not args.quiet, start_date=args.start_date, trade_mode=args.trade_mode)
+        run_from_backtest_state(verbose=args.debug, start_date=args.start_date, trade_mode=args.trade_mode)
     elif args.predictions_only:
         generate_predictions_only(
             config_name=args.config,
             top_k=args.topk,
-            verbose=not args.quiet,
+            verbose=args.debug,
             start_date=args.start_date,
             rebalance_days=args.rebalance_days,
             position_pct=args.position_pct,
@@ -2843,7 +2844,7 @@ if __name__ == "__main__":
     elif args.from_predictions:
         run_from_predictions(
             top_k=args.topk,
-            verbose=not args.quiet,
+            verbose=args.debug,
             start_date=args.start_date,
             rebalance_days=args.rebalance_days,
             position_pct=args.position_pct,
@@ -2855,7 +2856,7 @@ if __name__ == "__main__":
             config_name=args.config,
             update_data=not args.no_update,
             top_k=args.topk,
-            verbose=not args.quiet,
+            verbose=args.debug,
             start_date=args.start_date,
             rebalance_days=args.rebalance_days,
             position_pct=args.position_pct,
