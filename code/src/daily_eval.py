@@ -2749,6 +2749,7 @@ def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capit
         report_data["metrics"] = _rk_metrics
 
         # 构建 latest_report.json
+        source = "掘金" if report_key == "juejin" else "本地回测"
         report = {
             "date": latest_date_str,
             "is_rebalance_day": is_rebalance_day,
@@ -2763,6 +2764,7 @@ def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capit
             "sequences": sequences_summary,
             "hs300_curve": hs300_curve,
             "trade_mode": trade_mode,
+            "source": source,
         }
 
         with open(REPORT_PATH, "w", encoding="utf-8") as f:

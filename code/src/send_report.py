@@ -436,7 +436,7 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
                        equity_data=None, scatter_section="", health_section="",
                        trade_mode="open", pred_signals_section="",
                        market_monitor_section="", pre_holdings=None,
-                       rebalance_win_rate=None):
+                       rebalance_win_rate=None, source=""):
     """构建报告HTML，各组件已预先准备好"""
     # 排行数据
     _rank_map = _compute_rank_maps(date) if 'date' in locals() or date else {}
@@ -655,7 +655,8 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
     html = _load_template()
     mode_label = "开盘交易" if trade_mode == "open" else "收盘交易"
     juejin_badge = '<span style="display:inline-block;background:#e74c3c;color:#fff;font-size:10px;font-weight:bold;padding:1px 6px;border-radius:3px;margin-left:6px;">掘金</span>' if "掘金" in model_display else ""
-    html = html.replace("{{MODEL_INFO}}", f"模型: {model_display}{juejin_badge} | 日期: {date} | 模式: {mode_label} | 下个调仓日: {next_rebalance}")
+    source_tag = f' | 来源: {source}' if source else ""
+    html = html.replace("{{MODEL_INFO}}", f"模型: {model_display}{juejin_badge}{source_tag} | 日期: {date} | 模式: {mode_label} | 下个调仓日: {next_rebalance}")
     html = html.replace("{{TOTAL_BAR}}", total_bar)
     html = html.replace("{{METRICS_ROWS}}", metrics_rows)
     html = html.replace("{{WINDOW_ROWS}}", window_rows)
@@ -727,6 +728,7 @@ def send_report(model_key=None):
     cash = seq_data.get("cash", report.get("cash", 0))
     total_value = metrics.get("latest_value", 0)
     rebalance_win_rate = seq_data.get("model_stats", {}).get("total_win_rate_pct")
+    source = report.get("source", "")
 
     trades = report.get("all_today_trades", report.get("today_trades", []))
 
@@ -812,6 +814,7 @@ def send_report(model_key=None):
         pred_signals_section=pred_signals_section,
         market_monitor_section=market_monitor_section,
         rebalance_win_rate=rebalance_win_rate,
+        source=source,
     )
 
     msg = MIMEMultipart()
