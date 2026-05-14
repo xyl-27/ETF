@@ -356,9 +356,6 @@ def _compute_health_score(model_data):
 def _compute_rank_maps(target_date):
     """Compute 1-day (实时) and 5-day (近5日) return rankings for all ETFs."""
     _df = pd.read_csv(str(PROJECT_ROOT / "etf_data" / "etf_74.csv"))
-    drops = [c for c in ["振幅_前复权", "涨跌额_前复权", "涨跌幅_前复权", "开盘_前复权", "收盘_前复权", "最高_前复权", "最低_前复权", "前收盘_前复权"] if c in _df.columns]
-    if drops:
-        _df = _df.drop(columns=drops)
     _df["日期"] = pd.to_datetime(_df["日期"])
     _df["股票代码"] = _df["股票代码"].astype(str).str.zfill(6)
     target_dt = pd.Timestamp(target_date)
@@ -463,8 +460,11 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
         pnl_str = f"{pnl['pnl']:+.0f}" if pnl else ""
         pnl_color = "#cc0000" if (pnl and pnl["pnl"] >= 0) else "#009900"
         price_str = f"{price:.3f}" if price else "-"
+        price_display = h.get("price_display", price)
+        price_display_str = f"{price_display:.3f}" if price_display else "-"
         buy_price = h.get("buy_price", 0)
-        buy_price_str = f"{buy_price:.3f}" if buy_price else "-"
+        buy_price_display = h.get("buy_price_display", buy_price)
+        buy_price_display_str = f"{buy_price_display:.3f}" if buy_price_display else "-"
         rebal_pnl = round(shares * (price - buy_price), 2) if price and buy_price else 0
         rebal_cost = buy_price * shares
         rebal_pnl_pct = round(rebal_pnl / rebal_cost * 100, 2) if rebal_cost > 0 else 0
@@ -478,10 +478,12 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
         ll_color = "#009900" if price and ll and price <= ll else "#333"
         buy_date = h.get("buy_date", "")
         buy_date_str = buy_date[-5:] if len(buy_date) >= 5 else buy_date
-        holdings_rows += f"""<tr><td><a href="{_xueqiu_url(code)}" target="_blank" style="text-decoration:none;color:inherit;">{code}</a></td><td>{name}</td>{_rc(code, 'rank_1d')}{_rc(code, 'rank_5d')}<td style="text-align:right;">{price_str}</td><td style="text-align:right;">{buy_price_str}</td><td style="text-align:center;font-size:11px;color:#888;">{buy_date_str}</td><td style="text-align:right;color:{hl_color};">{hl_str}</td><td style="text-align:right;color:{ll_color};">{ll_str}</td><td style="text-align:right;">{shares:,}</td><td style="text-align:right;">{mkt_val:,.0f}</td><td style="text-align:right;font-weight:bold;">{weight:.2f}%</td><td style="text-align:right;color:{pnl_color};font-weight:bold;">{pnl_str}</td><td style="text-align:right;font-weight:bold;color:{rebal_color};">{rebal_str}</td></tr>"""
+        buy_factor = h.get("buy_factor", 1.0)
+        buy_factor_str = f"{buy_factor:.4f}" if buy_factor else "-"
+        holdings_rows += f"""<tr><td><a href="{_xueqiu_url(code)}" target="_blank" style="text-decoration:none;color:inherit;">{code}</a></td><td>{name}</td>{_rc(code, 'rank_1d')}{_rc(code, 'rank_5d')}<td style="text-align:right;">{price_display_str}</td><td style="text-align:right;">{buy_price_display_str}</td><td style="text-align:right;font-family:monospace;font-size:11px;">{buy_factor_str}</td><td style="text-align:center;font-size:11px;color:#888;">{buy_date_str}</td><td style="text-align:right;color:{hl_color};">{hl_str}</td><td style="text-align:right;color:{ll_color};">{ll_str}</td><td style="text-align:right;">{shares:,}</td><td style="text-align:right;">{mkt_val:,.0f}</td><td style="text-align:right;font-weight:bold;">{weight:.2f}%</td><td style="text-align:right;color:{pnl_color};font-weight:bold;">{pnl_str}</td><td style="text-align:right;font-weight:bold;color:{rebal_color};">{rebal_str}</td></tr>"""
 
     cash_weight = (cash / total_value * 100) if total_value > 0 else 0
-    holdings_rows += f"""<tr style="color:#999;"><td>现金</td><td>未投资资金</td><td style="text-align:right;color:#999;font-size:10px;">-</td><td style="text-align:right;color:#999;font-size:10px;">-</td><td style="text-align:right;">-</td><td style="text-align:right;">-</td><td style="text-align:center;font-size:11px;color:#999;">-</td><td style="text-align:right;">-</td><td style="text-align:right;">-</td><td style="text-align:right;">-</td><td style="text-align:right;">{cash:,.0f}</td><td style="text-align:right;">{cash_weight:.2f}%</td><td style="text-align:right;">-</td><td style="text-align:right;">-</td></tr>"""
+    holdings_rows += f"""<tr style="color:#999;"><td>现金</td><td>未投资资金</td><td style="text-align:right;color:#999;font-size:10px;">-</td><td style="text-align:right;color:#999;font-size:10px;">-</td><td style="text-align:right;">-</td><td style="text-align:right;">-</td><td style="text-align:right;font-size:11px;">-</td><td style="text-align:center;font-size:11px;color:#999;">-</td><td style="text-align:right;">-</td><td style="text-align:right;">-</td><td style="text-align:right;">-</td><td style="text-align:right;">{cash:,.0f}</td><td style="text-align:right;">{cash_weight:.2f}%</td><td style="text-align:right;">-</td><td style="text-align:right;">-</td></tr>"""
 
     pnl_total_color = "#cc0000" if today_pnl_total >= 0 else "#009900"
     total_rebal_pnl = sum(round(h["shares"] * (h["price"] - h.get("buy_price", 0)), 2) for h in holdings if h.get("price") and h.get("buy_price"))
@@ -489,7 +491,7 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
     total_rebal_pnl_pct = round(total_rebal_pnl / total_rebal_cost * 100, 2) if total_rebal_cost > 0 else 0
     rebal_total_color = "#cc0000" if total_rebal_pnl >= 0 else "#009900"
     total_shares = sum(h["shares"] for h in holdings)
-    holdings_rows += f"""<tr style="font-weight:bold;border-top:2px solid #333;"><td colspan="4" style="text-align:right;">合计</td><td colspan="5" style="text-align:right;">&nbsp;</td><td style="text-align:right;">{total_shares:,}</td><td style="text-align:right;">{total_value:,.0f}</td><td style="text-align:right;">{(total_value - cash) / total_value * 100:.2f}%</td><td style="text-align:right;color:{pnl_total_color};">{today_pnl_total:+.0f}</td><td style="text-align:right;color:{rebal_total_color};">{total_rebal_pnl:+.0f} ({total_rebal_pnl_pct:+.2f}%)</td></tr>"""
+    holdings_rows += f"""<tr style="font-weight:bold;border-top:2px solid #333;"><td colspan="4" style="text-align:right;">合计</td><td colspan="6" style="text-align:right;">&nbsp;</td><td style="text-align:right;">{total_shares:,}</td><td style="text-align:right;">{total_value:,.0f}</td><td style="text-align:right;">{(total_value - cash) / total_value * 100:.2f}%</td><td style="text-align:right;color:{pnl_total_color};">{today_pnl_total:+.0f}</td><td style="text-align:right;color:{rebal_total_color};">{total_rebal_pnl:+.0f} ({total_rebal_pnl_pct:+.2f}%)</td></tr>"""
 
     # 交易表
     trades_section = ""
@@ -608,9 +610,6 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
             if _hs_path.exists() and w_days > 0:
                 if _hs_prices is None:
                     _tmp = pd.read_csv(_hs_path)
-                    drops = [c for c in ["振幅_前复权", "涨跌额_前复权", "涨跌幅_前复权", "开盘_前复权", "收盘_前复权", "最高_前复权", "最低_前复权", "前收盘_前复权"] if c in _tmp.columns]
-                    if drops:
-                        _tmp = _tmp.drop(columns=drops)
                     _tmp["日期"] = pd.to_datetime(_tmp["日期"])
                     _hs = _tmp[_tmp["股票代码"] == "510300.XSHG"].sort_values("日期")
                     _hs_prices = _hs.set_index("日期")["收盘"]
@@ -720,7 +719,8 @@ def send_report(model_key=None):
     today_pnl_positions = today_pnl_data.get("positions", [])
 
     next_rebalance = report.get("next_rebalance_date", "")
-    model_display = model_key.replace("search_", "").replace("_exp_", " ")
+    _display_names = {"juejin": "掘金", "average": "平均", "voting": "投票"}
+    model_display = _display_names.get(model_key, model_key.replace("search_", "").replace("_exp_", " "))
 
     model_stats_section = _build_model_stats_table(sequences)
 
@@ -754,6 +754,27 @@ def send_report(model_key=None):
         market_monitor_section = mm_html
     except Exception as e:
         print(f"  [市场监控] 生成失败: {e}")
+
+    # 补齐展示用 raw 价格 + 复权因子
+    if holdings:
+        try:
+            _raw_prices = pd.read_csv(str(PROJECT_ROOT / "etf_data" / "etf_74.csv"))
+            _raw_prices["日期"] = pd.to_datetime(_raw_prices["日期"])
+            _target = pd.Timestamp(date)
+            for h in holdings:
+                code = h["stock_id"]
+                _sub = _raw_prices[_raw_prices["股票代码"] == code]
+                if "price_display" not in h:
+                    _tc = _sub.loc[_sub["日期"] == _target, "收盘_原始"]
+                    h["price_display"] = float(_tc.values[0]) if not _tc.empty else h.get("price", 0)
+                if "buy_factor" not in h and h.get("buy_date"):
+                    _bf = _sub.loc[_sub["日期"] == pd.Timestamp(h["buy_date"]), "复权因子"]
+                    h["buy_factor"] = float(_bf.values[0]) if not _bf.empty else 1.0
+                if "buy_price_display" not in h and h.get("buy_date"):
+                    _bp = _sub.loc[_sub["日期"] == pd.Timestamp(h["buy_date"]), "开盘_原始" if trade_mode == "open" else "收盘_原始"]
+                    h["buy_price_display"] = float(_bp.values[0]) if not _bp.empty else h.get("buy_price", 0)
+        except Exception:
+            pass
 
     html_body = build_report_html(
         date=date,

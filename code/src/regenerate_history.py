@@ -26,9 +26,6 @@ HS300_CODE = "510300.XSHG"
 
 def load_etf_data():
     df = pd.read_csv(DATA_PATH)
-    drops = [c for c in ["振幅_前复权", "涨跌额_前复权", "涨跌幅_前复权", "开盘_前复权", "收盘_前复权", "最高_前复权", "最低_前复权", "前收盘_前复权"] if c in df.columns]
-    if drops:
-        df = df.drop(columns=drops)
     df["日期"] = pd.to_datetime(df["日期"])
     df["股票代码"] = df["股票代码"].astype(str).str.zfill(6)
     return df
@@ -263,6 +260,7 @@ def simulate_state_at_date(seq, target_date, raw_df, initial_capital=100000):
             "shares": shares,
             "cost": round(remaining_cost, 2),
             "buy_price": buy_trades[-1]["price"] if buy_trades else 0,
+            "buy_date": buy_trades[-1]["date"] if buy_trades else "",
         }
 
     # Compute today_pnl
@@ -416,11 +414,26 @@ def build_report(report_state, seq_key, all_sequences, raw_df):
             price = float(tc_s.values[0]) if not tc_s.empty else 0
         hl_s = sub.loc[sub["日期"] == target_dt, "涨停价"]
         ll_s = sub.loc[sub["日期"] == target_dt, "跌停价"]
+        buy_date = pinfo.get("buy_date", "")
+        buy_factor = 1.0
+        if buy_date:
+            bf_s = sub.loc[sub["日期"] == pd.Timestamp(buy_date), "复权因子"]
+            buy_factor = float(bf_s.values[0]) if not bf_s.empty else 1.0
+        price_display_s = sub.loc[sub["日期"] == target_dt, "收盘_原始"]
+        price_display = float(price_display_s.values[0]) if not price_display_s.empty else price
+        buy_price_display = 0
+        if buy_date:
+            bpd_s = sub.loc[sub["日期"] == pd.Timestamp(buy_date), "收盘_原始"]
+            buy_price_display = float(bpd_s.values[0]) if not bpd_s.empty else pinfo.get("buy_price", 0)
         holdings_list.append({
             "stock_id": sid,
             "name": etf_names.get(sid, ""),
             "price": price,
+            "price_display": price_display,
             "buy_price": round(pinfo.get("buy_price", 0), 4),
+            "buy_price_display": round(buy_price_display, 4),
+            "buy_date": buy_date,
+            "buy_factor": buy_factor,
             "shares": pinfo["shares"],
             "cost": pinfo.get("cost", 0),
             "high_limit": round(float(hl_s.values[0]), 4) if not hl_s.empty else 0,

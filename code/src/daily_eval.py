@@ -151,9 +151,7 @@ DATA_FILE = PROJECT_ROOT / "etf_data" / "etf_74.csv"
 
 def load_etf_data(path=None, dtype=None):
     df = pd.read_csv(path or DATA_FILE, dtype=dtype)
-    drops = [c for c in ["振幅_前复权", "涨跌额_前复权", "涨跌幅_前复权", "开盘_前复权", "收盘_前复权", "最高_前复权", "最低_前复权", "前收盘_前复权"] if c in df.columns]
-    if drops:
-        df = df.drop(columns=drops)
+    # 收盘 = 前复权 (calc), 收盘_原始 = raw (display)
     return df
 
 
@@ -1377,21 +1375,31 @@ def _make_model_key(m):
 
 
 def _resolve_report_key(sequences):
-    """从 model_selection.yaml 确定主序列，兼容 master: first / average / voting 等设置。"""
+    """从 model_selection.yaml 确定主序列。
+
+    优先级:
+      1. master 显式指定 (如 juejin / average / voting / first)
+      2. 兜底: juejin → average → voting → 第一个
+    """
+    master = ""
     if os.path.exists(str(MODEL_SELECTION_PATH)):
         try:
             import yaml
             with open(MODEL_SELECTION_PATH, "r", encoding="utf-8") as f:
                 sel = yaml.safe_load(f)
             master = sel.get("master", "")
+            if master == "first":
+                models = sel.get("models", [])
+                for m in models:
+                    if m.get("enabled", True):
+                        master = _make_model_key(m.get("dir", ""))
+                        break
         except Exception:
-            master = ""
-        if master == "first":
-            return list(sequences.keys())[0] if sequences else None
-        if master and master in sequences:
-            return master
-    # 兜底：优先 average → voting → 第一个
-    for pref in ["average", "voting"]:
+            pass
+    if master and master in sequences:
+        return master
+    # 兜底优先级: juejin → average → voting → 第一个
+    for pref in ["juejin", "average", "voting"]:
         if pref in sequences:
             return pref
     return list(sequences.keys())[0] if sequences else None
@@ -2466,7 +2474,8 @@ def run_from_predictions(
         # 发送邮件
         try:
             if verbose:
-                model_display = report_key.replace("search_", "").replace("_exp_", " ")
+                _dn = {"juejin": "掘金", "average": "平均", "voting": "投票"}
+                model_display = _dn.get(report_key, report_key.replace("search_", "").replace("_exp_", " "))
                 print(f"\n[邮件] 发送报告: {model_display}...")
             send_report(model_key=report_key)
         except Exception as e:
@@ -2586,12 +2595,24 @@ def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capit
 
         # 构造持仓
         pnl_positions = {p["stock_id"]: p for p in report_data.get("today_pnl", {}).get("positions", [])}
+        _buy_price_col = "开盘" if trade_mode == "open" else "收盘"
         last_buy_info = {}
         for t in report_data.get("trades", []):
             if t["action"] == "买入":
                 stock = t["stock"]
                 if stock not in last_buy_info or t["date"] > last_buy_info[stock]["date"]:
-                    last_buy_info[stock] = {"date": t["date"], "price": t["price"]}
+                    buy_date = t["date"]
+                    bp_raw = t["price"]
+                    bp_fq = t["price"]
+                    sub = raw_df[raw_df["股票代码"] == stock]
+                    if not sub.empty:
+                        bp_s = sub.loc[sub["日期"] == pd.Timestamp(buy_date), _buy_price_col]
+                        if not bp_s.empty:
+                            bp_raw = float(bp_s.values[0])
+                        bp_fq_s = sub.loc[sub["日期"] == pd.Timestamp(buy_date), "开盘" if trade_mode == "open" else "收盘"]
+                        if not bp_fq_s.empty:
+                            bp_fq = float(bp_fq_s.values[0])
+                    last_buy_info[stock] = {"date": buy_date, "price": bp_raw, "price_fq": bp_fq}
         holdings = []
         for stock_id, pos in display_positions.items():
             price = pnl_positions.get(stock_id, {}).get("today_close", 0)
@@ -2599,14 +2620,18 @@ def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capit
             tc_s = sub.loc[sub["日期"] == latest_date, "收盘"]
             if price == 0 and not tc_s.empty:
                 price = float(tc_s.values[0])
+            price_display_s = sub.loc[sub["日期"] == latest_date, "收盘"]
+            price_display = float(price_display_s.values[0]) if not price_display_s.empty else price
             hl_s = sub.loc[sub["日期"] == latest_date, "涨停价"]
             ll_s = sub.loc[sub["日期"] == latest_date, "跌停价"]
             holdings.append({
                 "stock_id": stock_id,
                 "name": etf_names.get(stock_id, ""),
                 "price": price,
-                "buy_price": round(last_buy_info.get(stock_id, {}).get("price", 0), 4),
+                "buy_price": round(last_buy_info.get(stock_id, {}).get("price_fq", 0), 4),
                 "buy_date": last_buy_info.get(stock_id, {}).get("date", ""),
+                "price_display": price_display,
+                "buy_price_display": round(last_buy_info.get(stock_id, {}).get("price", 0), 4),
                 "shares": pos["shares"],
                 "cost": pos["cost"],
                 "high_limit": round(float(hl_s.values[0]), 4) if not hl_s.empty else 0,
@@ -2646,6 +2671,64 @@ def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capit
                         "total_value": round(float(row["收盘"]) / hs300_start_price * initial_capital, 2),
                     })
 
+        # 补齐 report_key 序列的缺失数据（today_pnl / cash / 完整 metrics）
+        rk_seq = sequences_summary[report_key]
+        if not rk_seq.get("today_pnl", {}).get("total_pnl"):
+            _total_pnl = 0
+            _positions = []
+            yesterday = raw_df[raw_df["日期"] < pd.Timestamp(latest_date_str)]["日期"].max()
+            for h in holdings:
+                code = h["stock_id"]
+                sub = raw_df[raw_df["股票代码"] == code]
+                tc = sub.loc[sub["日期"] == pd.Timestamp(latest_date_str), "收盘"]
+                yc = sub.loc[sub["日期"] == yesterday, "收盘"]
+                if not tc.empty and not yc.empty:
+                    _pnl = round(h["shares"] * (float(tc.values[0]) - float(yc.values[0])), 2)
+                    _total_pnl += _pnl
+                    _positions.append({
+                        "stock_id": code,
+                        "today_close": float(tc.values[0]),
+                        "pnl": _pnl,
+                        "return_pct": round((float(tc.values[0]) / float(yc.values[0]) - 1) * 100, 2),
+                    })
+            rk_seq["today_pnl"] = {"total_pnl": _total_pnl, "positions": _positions}
+
+        if not rk_seq.get("cash"):
+            _total_mkt_val = sum(h["shares"] * h["price"] for h in holdings if h["price"])
+            _total_value = sequences_summary[report_key].get("metrics", {}).get("latest_value", 0)
+            rk_seq["cash"] = round(max(0, _total_value - _total_mkt_val), 2)
+
+        _rk_metrics = rk_seq.get("metrics", {})
+        _ec = rk_seq.get("equity_curve", [])
+        if not _rk_metrics.get("total_days") and _ec:
+            _rk_metrics["total_days"] = len(_ec)
+            _daily_rets = []
+            for i in range(1, len(_ec)):
+                _r = (_ec[i]["total_value"] / _ec[i - 1]["total_value"] - 1)
+                _daily_rets.append(_r)
+            if _daily_rets:
+                import numpy as np
+                _rk_metrics["daily_win_rate"] = round(sum(1 for r in _daily_rets if r > 0) / len(_daily_rets), 4)
+                _rk_metrics["annualized_volatility_pct"] = round(np.std(_daily_rets) * np.sqrt(252) * 100, 4)
+                _rk_metrics["calmar_ratio"] = round(_rk_metrics.get("annualized_return_pct", 0) / 100 / max(abs(_rk_metrics.get("max_drawdown_pct", 1) / 100), 0.01), 2) if _rk_metrics.get("annualized_return_pct") else 0
+        if not _rk_metrics.get("hs300_return_pct") and _ec:
+            _hs_r = raw_df[raw_df["股票代码"] == "510300.XSHG"].sort_values("日期")
+            if not _hs_r.empty:
+                _hs_start = _hs_r[_hs_r["日期"] == pd.Timestamp(_ec[0]["date"])]
+                _hs_end = _hs_r[_hs_r["日期"] == pd.Timestamp(_ec[-1]["date"])]
+                if not _hs_start.empty and not _hs_end.empty:
+                    _hs_sp = float(_hs_start["收盘"].iloc[0])
+                    _hs_ep = float(_hs_end["收盘"].iloc[0])
+                    if _hs_sp > 0:
+                        _rk_metrics["hs300_return_pct"] = round((_hs_ep / _hs_sp - 1) * 100, 2)
+                if "hs300_return_pct" not in _rk_metrics:
+                    _rk_metrics["hs300_return_pct"] = 0
+                _sr = _rk_metrics.get("strategy_return_pct", 0)
+                _rk_metrics["excess_return_pct"] = round(_sr - _rk_metrics["hs300_return_pct"], 2)
+        rk_seq["metrics"] = _rk_metrics
+        # 同步到 report 根层
+        report_data["metrics"] = _rk_metrics
+
         # 构建 latest_report.json
         report = {
             "date": latest_date_str,
@@ -2655,7 +2738,7 @@ def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capit
             "all_today_trades": all_today_trades,
             "metrics": report_data.get("metrics", {}),
             "holdings": holdings,
-            "cash": report_data.get("cash", 0),
+            "cash": report_data.get("cash", rk_seq.get("cash", 0)),
             "total_value": report_data.get("metrics", {}).get("latest_value", 0),
             "sequences": sequences_summary,
             "hs300_curve": hs300_curve,
@@ -2671,7 +2754,8 @@ def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capit
 
         # 发送邮件
         try:
-            model_display = report_key.replace("search_", "").replace("_exp_", " ")
+            _dn = {"juejin": "掘金", "average": "平均", "voting": "投票"}
+            model_display = _dn.get(report_key, report_key.replace("search_", "").replace("_exp_", " "))
             print(f"\n[邮件] 发送报告: {model_display}...")
             send_report(model_key=report_key)
         except Exception as e:
