@@ -1172,7 +1172,7 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
 
         chart_data_url = _history_chart_b64(all_sequences, hs300_raw, cur_date, sorted_dates[0], initial_capital)
 
-        from send_report import build_report_html, _build_model_stats_table, _build_health_table
+        from send_report import build_report_html, _build_model_stats_table, _build_health_table, _build_pred_signals_table
         hist_sequences = {}
         for hkey, hseq in all_sequences.items():
             hist_trades = [t for t in hseq.get("trades", []) if t["date"] <= cur_date]
@@ -1276,6 +1276,10 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
         # 主序列的调仓胜率
         master_stats = hist_sequences.get(model_key, {}).get("model_stats", {}) if model_key else {}
         hist_rebalance_win_rate = master_stats.get("total_win_rate_pct")
+        # 预测信号（截至当前日期）
+        hist_ph = [p for p in seq.get("predictions_history", []) if p.get("date", "") <= cur_date]
+        hist_seq_data = {**seq, "predictions_history": hist_ph}
+        pred_signals_section = _build_pred_signals_table(hist_seq_data, cur_date)
         try:
             html = build_report_html(
                 date=cur_date,
@@ -1295,6 +1299,7 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
                 equity_data=hist_equity,
                 scatter_section="",
                 health_section=health_section,
+                pred_signals_section=pred_signals_section,
                 source="本地回测",
                 trade_mode=trade_mode,
                 rebalance_win_rate=hist_rebalance_win_rate,
