@@ -597,22 +597,36 @@ def plot_breadth_backtest(dates, breadth_df, output_path):
     return str(output_path)
 
 
-def plot_excess_bars(dates, df_regime, output_path):
-    """保存日超额收益（去掉策略曲线/累计超额）为独立 PNG"""
+def plot_rolling_20d(dates, values, output_path):
+    """保存滚动 20 日收益对比（去掉策略曲线）为独立 PNG"""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    regime_colors = {"bull": "#e74c3c", "bear": "#27ae60", "sideways": "#f39c12", "N/A": "#bdc3c7"}
-    regime_dates = pd.to_datetime(df_regime["date"])
-    excess = df_regime["model_return"].values - df_regime["hs300_return"].values
-    bar_colors = [regime_colors.get(r, "#bdc3c7") for r in df_regime["regime"].values]
+    plot_dates = pd.to_datetime(dates)
+    window = 20
+    hs_full = load_hs300_data().set_index("日期")["收盘"]
+    hs_roll = hs_full.pct_change(window).dropna() * 100
+    hs_roll = hs_roll.reindex(plot_dates)
+    pool_df = _load_pool_prices()
+    pool_has_data = len(pool_df) > window
+    if pool_has_data:
+        pool_full_rets = pool_df.pct_change().dropna()
+        pool_eq = pool_full_rets.mean(axis=1) * 100
+        pool_roll = pool_eq.rolling(window).sum()
+        pool_roll = pool_roll.reindex(plot_dates)
+    pool_vw = _load_pool_value_weighted_roll(window)
+    pool_vw = pool_vw.reindex(plot_dates)
 
     fig, ax = plt.subplots(figsize=(12, 3))
-    ax.bar(regime_dates, excess, color=bar_colors, width=0.8, alpha=0.6, edgecolor="none")
-    ax.axhline(0, color="gray", lw=0.5)
-    ax.set_ylabel("日超额收益 (%)", fontsize=11)
-    ax.set_title("日超额收益（策略 - HS300）", fontsize=11, fontweight="bold")
+    ax.plot(plot_dates, hs_roll.values, color="#7f8c8d", lw=1.5, ls="--", label=f"HS300 {window}d 滚动收益")
+    if pool_has_data:
+        ax.plot(plot_dates, pool_roll.values, color="#e67e22", lw=1.5, ls=":", label=f"全池等权 {window}d 滚动收益")
+    ax.plot(plot_dates, pool_vw.values, color="#2ecc71", lw=1.5, ls="-.", label=f"全池加权 {window}d 滚动收益")
+    ax.axhline(0, color="gray", ls=":", lw=0.5)
+    ax.set_ylabel(f"{window}d 滚动收益 (%)", fontsize=11)
+    ax.set_title("滚动 20 日收益对比", fontsize=11, fontweight="bold")
+    ax.legend(loc="upper left", fontsize=8)
     ax.grid(True, alpha=0.2)
     fig.tight_layout()
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
@@ -818,17 +832,17 @@ def run_market_monitor(seq_key=None, verbose=False):
             for item in prev_holdings_data:
                 print(f"    {item['code']}: {item['return']:+.2f}% (rank {item['rank']}/{item['total']})")
 
-    # 生成子图（市场宽度回测期 + 日超额收益）嵌入日报
+    # 生成子图（市场宽度回测期 + 20d滚动收益）嵌入日报
     subplot_html = ""
-    try: 
+    try:
         breadth_chart = OUTPUT_DIR / "market_breadth.png"
         plot_breadth_backtest(dates, breadth_df, breadth_chart)
-        excess_chart = OUTPUT_DIR / "market_excess.png"
-        plot_excess_bars(dates, df_regime, excess_chart)
+        rolling_chart = OUTPUT_DIR / "market_rolling_20d.png"
+        plot_rolling_20d(dates, values, rolling_chart)
         subplot_html = f"""
         <div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:10px;">
             <div style="flex:1;min-width:300px;"><img src="{_img_to_b64(breadth_chart)}" style="width:100%;border:1px solid #ddd;border-radius:5px;"></div>
-            <div style="flex:1;min-width:300px;"><img src="{_img_to_b64(excess_chart)}" style="width:100%;border:1px solid #ddd;border-radius:5px;"></div>
+            <div style="flex:1;min-width:300px;"><img src="{_img_to_b64(rolling_chart)}" style="width:100%;border:1px solid #ddd;border-radius:5px;"></div>
         </div>"""
     except Exception as e:
         print(f"  [子图] 生成失败: {e}")
