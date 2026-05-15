@@ -1930,22 +1930,19 @@ def daily_eval(
                     })
 
         pre_holdings = []
-        if is_rebalance_day:
-            pre_positions = report_data.get("pre_rebalance_positions", {})
-            if not pre_positions:
-                pre_positions = report_data.get("positions", {})
-            for stock_id, pos in pre_positions.items():
-                sub = raw_df[raw_df["股票代码"] == stock_id]
-                tc_s = sub.loc[sub["日期"] == latest_date, "收盘"]
-                price = float(tc_s.values[0]) if not tc_s.empty else 0
-                pre_holdings.append({
-                    "stock_id": stock_id,
-                    "name": etf_names.get(stock_id, ""),
-                    "price": price,
-                    "price_display": price,
-                    "shares": pos["shares"],
-                    "cost": pos.get("cost", 0),
-                })
+        pre_positions = report_data.get("pre_rebalance_positions", {})
+        for stock_id, pos in pre_positions.items():
+            sub = raw_df[raw_df["股票代码"] == stock_id]
+            tc_s = sub.loc[sub["日期"] == latest_date, "收盘"]
+            price = float(tc_s.values[0]) if not tc_s.empty else 0
+            pre_holdings.append({
+                "stock_id": stock_id,
+                "name": etf_names.get(stock_id, ""),
+                "price": price,
+                "price_display": price,
+                "shares": pos["shares"],
+                "cost": pos.get("cost", 0),
+            })
 
         report = {
             "date": latest_date_str,
@@ -2474,22 +2471,19 @@ def run_from_predictions(
 
         today_pnl_data = report_data.get("today_pnl", {})
         pre_holdings = []
-        if is_rebalance_day:
-            pre_positions = report_data.get("pre_rebalance_positions", {})
-            if not pre_positions:
-                pre_positions = report_data.get("positions", {})
-            for stock_id, pos in pre_positions.items():
-                sub = raw_df[raw_df["股票代码"] == stock_id]
-                tc_s = sub.loc[sub["日期"] == latest_date, "收盘"]
-                price = float(tc_s.values[0]) if not tc_s.empty else 0
-                pre_holdings.append({
-                    "stock_id": stock_id,
-                    "name": etf_names.get(stock_id, ""),
-                    "price": price,
-                    "price_display": price,
-                    "shares": pos["shares"],
-                    "cost": pos.get("cost", 0),
-                })
+        pre_positions = report_data.get("pre_rebalance_positions", {})
+        for stock_id, pos in pre_positions.items():
+            sub = raw_df[raw_df["股票代码"] == stock_id]
+            tc_s = sub.loc[sub["日期"] == latest_date, "收盘"]
+            price = float(tc_s.values[0]) if not tc_s.empty else 0
+            pre_holdings.append({
+                "stock_id": stock_id,
+                "name": etf_names.get(stock_id, ""),
+                "price": price,
+                "price_display": price,
+                "shares": pos["shares"],
+                "cost": pos.get("cost", 0),
+            })
         report = {
             "date": latest_date_str,
             "is_rebalance_day": is_rebalance_day,
@@ -2694,13 +2688,10 @@ def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capit
                 "low_limit": round(float(ll_s.values[0]), 4) if not ll_s.empty else 0,
             })
 
-        # 上期持仓（调仓日显示调仓前持仓）
+        # 上期持仓（最近一次调仓前的持仓）
         pre_holdings = []
-        if is_rebalance_day:
-            pre_positions = report_data.get("pre_rebalance_positions", {})
-            if not pre_positions:
-                pre_positions = report_data.get("positions", {})
-            for stock_id, pos in pre_positions.items():
+        pre_positions = report_data.get("pre_rebalance_positions", {})
+        for stock_id, pos in pre_positions.items():
                 sub = raw_df[raw_df["股票代码"] == stock_id]
                 tc_s = sub.loc[sub["日期"] == latest_date, "收盘"]
                 price = float(tc_s.values[0]) if not tc_s.empty else 0
