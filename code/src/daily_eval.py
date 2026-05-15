@@ -943,7 +943,6 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
     rebalance_dates = sorted(set(t["date"] for t in trades))
     history_dir = PROJECT_ROOT / "output" / "history_report"
     history_dir.mkdir(parents=True, exist_ok=True)
-    scatter_data = {}
     for cur_date in sorted_dates:
         ec_seg = [e for e in equity_curve if e["date"] <= cur_date]
         if len(ec_seg) < 1:
@@ -1239,18 +1238,6 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
 
         model_stats_section = _build_model_stats_table(hist_sequences)
 
-        scatter_data.setdefault(cur_date, {})
-        for hkey in all_sequences:
-            hm = hist_sequences.get(hkey, {}).get("metrics", {})
-            scatter_data[cur_date][hkey] = {
-                "ret": hm.get("strategy_return_pct"),
-                "ic": hm.get("rank_ic"),
-                "ndcg": hm.get("ndcg"),
-                "mrr": hm.get("mrr"),
-                "ksp": hm.get("ks_p"),
-            }
-        scatter_section = _build_scatter_section(scatter_data, cur_date)
-
         hist_equity = {}
         hs300_period = hs300_raw[(hs300_raw["date"] >= pd.Timestamp(sorted_dates[0])) & (hs300_raw["date"] <= pd.Timestamp(cur_date))]
         if not hs300_period.empty:
@@ -1270,7 +1257,7 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
         if prev_rb_date:
             prev_rb_ts = pd.Timestamp(prev_rb_date)
             all_trading_dates = sorted(raw_df["日期"].unique())
-            trading_before = [d for d in all_trading_dates if d < prev_rb_date]
+            trading_before = [d for d in all_trading_dates if d < prev_rb_ts]
             day_before_rb = trading_before[-1].strftime("%Y-%m-%d") if trading_before else None
             if day_before_rb:
                 pre_positions = _rebuild_positions(trades, day_before_rb)
@@ -1303,7 +1290,7 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
                 chart_data_url=chart_data_url,
                 model_stats_section=model_stats_section,
                 equity_data=hist_equity,
-                scatter_section=scatter_section,
+                scatter_section="",
                 health_section=health_section,
             )
             suffix = "(调仓日)" if is_rebalance else ""
