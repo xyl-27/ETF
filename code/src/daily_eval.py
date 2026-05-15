@@ -173,7 +173,7 @@ def update_etf_data(verbose: bool = True) -> bool:
         result = subprocess.run(
             [sys.executable, script_path],
             cwd=str(PROJECT_ROOT),
-            capture_output=False,
+            capture_output=not verbose,
             timeout=600,
         )
         if result.returncode == 0:
@@ -181,8 +181,9 @@ def update_etf_data(verbose: bool = True) -> bool:
                 print("[数据更新] ETF数据获取成功")
             return True
         else:
-            if verbose:
-                print(f"[数据更新] ETF数据获取失败 (exit code: {result.returncode})")
+            print(f"[数据更新] 失败 (exit code: {result.returncode})")
+            if not verbose and result.stderr:
+                print(result.stderr.decode()[:500])
             return False
     except subprocess.TimeoutExpired:
         if verbose:
@@ -1378,8 +1379,9 @@ def _resolve_report_key(sequences):
     """从 model_selection.yaml 确定主序列。
 
     优先级:
-      1. master 显式指定 (如 juejin / average / voting / first)
-      2. 兜底: juejin → average → voting → 第一个
+      1. master 显式指定且在 sequences 中存在 → 使用
+      2. master 显式指定但不存在 → 取第一个真实模型（非 average/voting/juejin）
+      3. master 未指定 → 兜底: juejin → average → voting → 第一个
     """
     master = ""
     if os.path.exists(str(MODEL_SELECTION_PATH)):
@@ -1396,9 +1398,14 @@ def _resolve_report_key(sequences):
                         break
         except Exception:
             pass
-    if master and master in sequences:
-        return master
-    # 兜底优先级: juejin → average → voting → 第一个
+    if master:
+        if master in sequences:
+            return master
+        # master 指定了但不存在（如 juejin 但回测尚未运行），取第一个真实模型
+        for key in sequences:
+            if key not in ("juejin", "average", "voting"):
+                return key
+    # 未指定 master: 兜底优先级 juejin → average → voting → 第一个
     for pref in ["juejin", "average", "voting"]:
         if pref in sequences:
             return pref
@@ -1450,12 +1457,9 @@ def daily_eval(
 
     try:
         if update_data:
-            if verbose:
-                print(f"\n{'='*60}")
-                print(f"[{timestamp}] 每日测评开始")
-                print(f"{'='*60}")
-                print("\n[1/4] 获取最新ETF数据...")
-            update_etf_data(verbose=verbose)
+            print(f"\n[1/4] 更新数据...", end=" ", flush=True)
+            ok = update_etf_data(verbose=verbose)
+            print("✅" if ok else "❌")
 
         raw_df = load_etf_data(DATA_FILE, dtype={"股票代码": str})
         raw_df["股票代码"] = raw_df["股票代码"].astype(str).str.zfill(6)
@@ -1465,10 +1469,9 @@ def daily_eval(
         end_date = (latest_date + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
 
         if verbose:
-            print(f"\n[数据] 最新交易日: {latest_date_str}")
+            print(f"[数据] 最新交易日: {latest_date_str}")
 
-        if verbose:
-            print(f"\n[2/4] 加载模型...")
+        print(f"[2/4] 加载模型...", end=" ", flush=True)
 
         single_models = []
         average_enabled = False
@@ -1478,11 +1481,14 @@ def daily_eval(
             single_models, master, average_enabled, voting_enabled = load_model_selection(str(MODEL_SELECTION_PATH))
             enabled_models = [m for m in single_models if m.get("enabled", True)]
             if verbose:
+                print()
                 print(f"  平均: {'开' if average_enabled else '关'}, 投票: {'开' if voting_enabled else '关'}, 主序列: {master or 'auto'}, 模型数: {len(enabled_models)}")
                 for m in single_models:
                     status = "启用" if m.get("enabled", True) else "禁用"
                     print(f"    {status}: {_make_model_key(m)} ({m['model_file']})")
             single_models = enabled_models
+            if not verbose:
+                print(f"{len(enabled_models)}个模型")
         else:
             config_module = __import__(config_name, fromlist=["config"])
             config = config_module.config.copy()
@@ -1496,7 +1502,9 @@ def daily_eval(
             master = ""
             average_enabled = False
             voting_enabled = False
-            if verbose:
+            if not verbose:
+                print(f"{_make_model_key((exp_dir,))}")
+            elif verbose:
                 print(f"  单模型: {_make_model_key((exp_dir,))} (score={score:.4f})")
 
         if not single_models:
@@ -1531,8 +1539,7 @@ def daily_eval(
             )
             single_backtesters.append((m, bt))
 
-        if verbose:
-            print(f"\n[4/4] 运行回测序列...")
+        print(f"[3/4] 运行回测...")
 
         sequences = {}
 
@@ -1653,6 +1660,7 @@ def daily_eval(
                     t["advantage"] = int(stock_votes - cutoff_votes)
             sequences["voting"] = result
 
+        print("✅")
 
         # 绘制收益曲线图
         plot_path = OUTPUT_DIR / "equity_curves.png"
@@ -1664,15 +1672,9 @@ def daily_eval(
             if verbose:
                 print(f"\n  [图表] 保存失败: {e}")
 
-        if master == "first":
+        report_key = _resolve_report_key(sequences)
+        if not report_key:
             report_key = list(sequences.keys())[0]
-        else:
-            for fallback in ["average", "voting", list(sequences.keys())[0]]:
-                if fallback in sequences:
-                    report_key = fallback
-                    break
-            else:
-                report_key = list(sequences.keys())[0]
         report_data = sequences[report_key]
 
         # 当前价格（从今日盈亏中取）
@@ -1680,6 +1682,12 @@ def daily_eval(
 
         today_actual_trades = [t for t in report_data["trades"] if t["date"] == latest_date_str and t["action"] in ("买入", "卖出")]
         is_rebalance_day = len(today_actual_trades) > 0
+        if not is_rebalance_day:
+            all_dates = sorted(raw_df["日期"].unique())
+            start_idx = next((i for i, d in enumerate(all_dates) if d >= pd.Timestamp(start_date)), None)
+            today_idx = next((i for i, d in enumerate(all_dates) if d >= pd.Timestamp(latest_date_str)), None)
+            if start_idx is not None and today_idx is not None and (today_idx - start_idx) % rebalance_days == 0:
+                is_rebalance_day = True
 
         today_trades = list(today_actual_trades)
         if is_rebalance_day:
@@ -1951,23 +1959,18 @@ def daily_eval(
             json.dump(portfolio, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
 
         # 发送邮件报告
+        print(f"[4/4] 生成并发送邮件...", end=" ", flush=True)
         try:
             from send_report import send_report
-            if master == "first":
+            email_key = _resolve_report_key(sequences)
+            if not email_key:
                 email_key = list(sequences.keys())[0]
-            else:
-                for fallback in ["average", "voting", list(sequences.keys())[0]]:
-                    if fallback in sequences:
-                        email_key = fallback
-                        break
-                else:
-                    email_key = list(sequences.keys())[0]
             if "holdings" not in sequences[email_key]:
                 sequences[email_key]["holdings"] = holdings
-            if verbose:
-                print(f"\n[邮件] 正在发送报告: {email_key}...")
             send_report(model_key=email_key)
+            print("✅")
         except Exception as e:
+            print("❌")
             if verbose:
                 print(f"\n[邮件] 发送失败: {e}")
 
@@ -2354,6 +2357,12 @@ def run_from_predictions(
         # 当前价格
         today_actual_trades = [t for t in report_data["trades"] if t["date"] == latest_date_str and t["action"] in ("买入", "卖出")]
         is_rebalance_day = len(today_actual_trades) > 0
+        if not is_rebalance_day:
+            all_dates = sorted(raw_df["日期"].unique())
+            start_idx = next((i for i, d in enumerate(all_dates) if d >= pd.Timestamp(start_date)), None)
+            today_idx = next((i for i, d in enumerate(all_dates) if d >= pd.Timestamp(latest_date_str)), None)
+            if start_idx is not None and today_idx is not None and (today_idx - start_idx) % rebalance_days == 0:
+                is_rebalance_day = True
         pnl_positions = {p["stock_id"]: p for p in report_data.get("today_pnl", {}).get("positions", [])}
 
         # 加载 ETF 名称
