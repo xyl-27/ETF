@@ -1265,6 +1265,27 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
             if ec_seg_f:
                 disp = hkey.replace("search_", "").replace("_exp_", " ")
                 hist_equity[disp] = ec_seg_f
+        # 上期持仓（最近一次调仓前的持仓）
+        pre_holdings = []
+        if prev_rb_date:
+            prev_rb_ts = pd.Timestamp(prev_rb_date)
+            all_trading_dates = sorted(raw_df["日期"].unique())
+            trading_before = [d for d in all_trading_dates if d < prev_rb_date]
+            day_before_rb = trading_before[-1].strftime("%Y-%m-%d") if trading_before else None
+            if day_before_rb:
+                pre_positions = _rebuild_positions(trades, day_before_rb)
+                for stock_id, p in pre_positions.items():
+                    sub = raw_df[raw_df["股票代码"] == stock_id]
+                    tc_s = sub.loc[sub["日期"] == today_ts, "收盘"]
+                    price = tc_s.values[0] if not tc_s.empty else 0
+                    pre_holdings.append({
+                        "stock_id": stock_id,
+                        "name": etf_names.get(stock_id, ""),
+                        "price": price,
+                        "price_display": price,
+                        "shares": p["shares"],
+                        "cost": p.get("cost", 0),
+                    })
         try:
             html = build_report_html(
                 date=cur_date,
@@ -1272,6 +1293,7 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
                 total_value=today_total,
                 cash=cash,
                 holdings=holdings,
+                pre_holdings=pre_holdings,
                 trades_list=today_trades_list,
                 metrics=metrics,
                 next_rebalance=next_rb,
