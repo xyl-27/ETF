@@ -2474,8 +2474,12 @@ def run_from_predictions(
         # 发送邮件
         try:
             if verbose:
-                _dn = {"juejin": "掘金", "average": "平均", "voting": "投票"}
-                model_display = _dn.get(report_key, report_key.replace("search_", "").replace("_exp_", " "))
+                _dn = {"average": "平均", "voting": "投票"}
+                if report_key == "juejin":
+                    _rk = next((k for k in sequences if k not in ("juejin", "average", "voting")), report_key)
+                    model_display = _dn.get(_rk, _rk.replace("search_", "").replace("_exp_", " "))
+                else:
+                    model_display = _dn.get(report_key, report_key.replace("search_", "").replace("_exp_", " "))
                 print(f"\n[邮件] 发送报告: {model_display}...")
             send_report(model_key=report_key)
         except Exception as e:
@@ -2510,7 +2514,7 @@ def run_from_predictions(
 # 模式3: 从已保存的 backtest_state.json 生成日报（无模型无回测）
 # ============================================================
 
-def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capital=100000, trade_mode="open"):
+def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capital=100000, trade_mode="open", rebalance_days=5):
     """读取 backtest_state.json 直接生成日报，不执行任何模型或回测。"""
     from send_report import send_report
 
@@ -2584,6 +2588,12 @@ def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capit
                     t["model_key"] = key
                     all_today_trades.append(t)
         is_rebalance_day = len(all_today_trades) > 0
+        if not is_rebalance_day:
+            all_dates = sorted(raw_df["日期"].unique())
+            start_idx = next((i for i, d in enumerate(all_dates) if d >= pd.Timestamp(start_date)), None)
+            today_idx = next((i for i, d in enumerate(all_dates) if d >= pd.Timestamp(latest_date_str)), None)
+            if start_idx is not None and today_idx is not None and (today_idx - start_idx) % rebalance_days == 0:
+                is_rebalance_day = True
 
         # 收盘交易模式下，调仓日显示调仓前持仓（新持仓明天再出现）
         if trade_mode == "close" and is_rebalance_day:
@@ -2748,12 +2758,20 @@ def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capit
         # 同步到 report 根层
         report_data["metrics"] = _rk_metrics
 
+        # 补齐 next_rebalance_date（掘金序列可能没有）
+        next_rebalance_date = report_data.get("metrics", {}).get("next_rebalance_date", "")
+        if not next_rebalance_date:
+            all_dates = sorted(raw_df["日期"].unique())
+            idx = next((i for i, d in enumerate(all_dates) if d >= pd.Timestamp(latest_date_str)), None)
+            if idx is not None and idx + rebalance_days < len(all_dates):
+                next_rebalance_date = all_dates[idx + rebalance_days].strftime("%Y-%m-%d")
+
         # 构建 latest_report.json
         source = "掘金" if report_key == "juejin" else "本地回测"
         report = {
             "date": latest_date_str,
             "is_rebalance_day": is_rebalance_day,
-            "next_rebalance_date": report_data.get("metrics", {}).get("next_rebalance_date", ""),
+            "next_rebalance_date": next_rebalance_date,
             "today_trades": all_today_trades,
             "all_today_trades": all_today_trades,
             "metrics": report_data.get("metrics", {}),
@@ -2776,8 +2794,12 @@ def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capit
 
         # 发送邮件
         try:
-            _dn = {"juejin": "掘金", "average": "平均", "voting": "投票"}
-            model_display = _dn.get(report_key, report_key.replace("search_", "").replace("_exp_", " "))
+            _dn = {"average": "平均", "voting": "投票"}
+            if report_key == "juejin":
+                _rk = next((k for k in sequences if k not in ("juejin", "average", "voting")), report_key)
+                model_display = _dn.get(_rk, _rk.replace("search_", "").replace("_exp_", " "))
+            else:
+                model_display = _dn.get(report_key, report_key.replace("search_", "").replace("_exp_", " "))
             print(f"\n[邮件] 发送报告: {model_display}...")
             send_report(model_key=report_key, verbose=verbose)
         except Exception as e:

@@ -654,7 +654,7 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
     # 填充模板
     html = _load_template()
     mode_label = "开盘交易" if trade_mode == "open" else "收盘交易"
-    juejin_badge = '<span style="display:inline-block;background:#e74c3c;color:#fff;font-size:10px;font-weight:bold;padding:1px 6px;border-radius:3px;margin-left:6px;">掘金</span>' if "掘金" in model_display else ""
+    juejin_badge = '<span style="display:inline-block;background:#e74c3c;color:#fff;font-size:10px;font-weight:bold;padding:1px 6px;border-radius:3px;margin-left:6px;">掘金</span>' if model_key == "juejin" else ""
     source_tag = f' | 来源: {source}' if source else ""
     html = html.replace("{{MODEL_INFO}}", f"模型: {model_display}{juejin_badge}{source_tag} | 日期: {date} | 模式: {mode_label} | 下个调仓日: {next_rebalance}")
     html = html.replace("{{TOTAL_BAR}}", total_bar)
@@ -737,8 +737,12 @@ def send_report(model_key=None, verbose=False):
     today_pnl_positions = today_pnl_data.get("positions", [])
 
     next_rebalance = report.get("next_rebalance_date", "")
-    _display_names = {"juejin": "掘金", "average": "平均", "voting": "投票"}
-    model_display = _display_names.get(model_key, model_key.replace("search_", "").replace("_exp_", " "))
+    _display_names = {"average": "平均", "voting": "投票"}
+    if model_key in ("juejin",):
+        real_key = next((k for k in sequences if k not in ("juejin", "average", "voting")), model_key)
+        model_display = _display_names.get(real_key, real_key.replace("search_", "").replace("_exp_", " "))
+    else:
+        model_display = _display_names.get(model_key, model_key.replace("search_", "").replace("_exp_", " "))
 
     model_stats_section = _build_model_stats_table(sequences)
 
