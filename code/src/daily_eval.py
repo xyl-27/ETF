@@ -924,7 +924,7 @@ def _health_color(score):
     return "red"
 
 
-def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_names, model_key="", rebalance_days=5):
+def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_names, model_key="", rebalance_days=5, trade_mode="open"):
     """为序列的每一个调仓日保存历史报告HTML"""
     trades = seq.get("trades", [])
     equity_curve = seq.get("equity_curve", [])
@@ -1273,6 +1273,9 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
                         "shares": p["shares"],
                         "cost": p.get("cost", 0),
                     })
+        # 主序列的调仓胜率
+        master_stats = hist_sequences.get(model_key, {}).get("model_stats", {}) if model_key else {}
+        hist_rebalance_win_rate = master_stats.get("total_win_rate_pct")
         try:
             html = build_report_html(
                 date=cur_date,
@@ -1292,6 +1295,9 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
                 equity_data=hist_equity,
                 scatter_section="",
                 health_section=health_section,
+                source="本地回测",
+                trade_mode=trade_mode,
+                rebalance_win_rate=hist_rebalance_win_rate,
             )
             suffix = "(调仓日)" if is_rebalance else ""
             history_path = history_dir / f"{cur_date}{suffix}.html"
@@ -2004,11 +2010,12 @@ def daily_eval(
             if verbose:
                 print(f"\n[历史] 生成各调仓日报告...")
             _save_history_reports(
-                sequences[report_key], sequences, str(DATA_FILE), initial_capital, etf_names, model_key=report_key, rebalance_days=rebalance_days
+                sequences[report_key], sequences, str(DATA_FILE), initial_capital, etf_names, model_key=report_key, rebalance_days=rebalance_days, trade_mode=trade_mode
             )
         except Exception as e:
-            if verbose:
-                print(f"\n[历史] 生成失败: {e}")
+            print(f"\n[历史] 生成失败: {e}")
+            import traceback
+            traceback.print_exc()
 
         for fn in ["equity_curve.csv", "daily_metrics.json", "trades_log.csv"]:
             fp = OUTPUT_DIR / fn
@@ -2537,10 +2544,11 @@ def run_from_predictions(
 
         # 历史报告
         try:
-            _save_history_reports(sequences[report_key], sequences, str(DATA_FILE), initial_capital, etf_names, model_key=report_key, rebalance_days=rebalance_days)
+            _save_history_reports(sequences[report_key], sequences, str(DATA_FILE), initial_capital, etf_names, model_key=report_key, rebalance_days=rebalance_days, trade_mode=trade_mode)
         except Exception as e:
-            if verbose:
-                print(f"\n[历史] 生成失败: {e}")
+            print(f"\n[历史] 生成失败: {e}")
+            import traceback
+            traceback.print_exc()
 
         if verbose:
             m = report_data["metrics"]
