@@ -627,7 +627,7 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
     total_pnl_abs = round(total_value - init_cap, 2)
     total_bar = f"""<div class="total-bar"><div><div style="font-size:12px;color:#666;">账户总值</div><div class="amt">¥{total_value:,.2f}</div></div><div class="dtl"><div>今日 <span class="chg {today_pnl_color}">{today_pnl_total:+.0f} ({today_pnl_pct:+.2f}%)</span></div><div style="font-size:11px;">累计收益 <span class="chg {total_pnl_color}">{total_pnl_abs:+,.0f} ({sr:+.2f}%)</span></div></div></div>"""
 
-    # 指标 3x4 表格
+    # 指标 4x4 表格
     sr_v = _pct(metrics.get("strategy_return_pct", 0))
     ar_v = _pct(metrics.get("annualized_return_pct", 0))
     hs_v = _pct(metrics.get("hs300_return_pct", 0))
@@ -640,6 +640,15 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
     av_v = f"{metrics.get('annualized_volatility_pct', 0):.2f}%"
     td_v = str(metrics.get("total_days", 0))
     cs_v = f"¥{cash:,.0f}"
+    # 长期风险指标
+    var95_v = _pct(metrics.get("var_95", 0), suffix="%")
+    cvar95_v = _pct(metrics.get("cvar_95", 0), suffix="%")
+    ulcer_v = f"{metrics.get('ulcer_index', 0):.2f}%"
+    pf_v = metrics.get("profit_factor")
+    pf_v = f"{pf_v:.2f}" if pf_v is not None else "-"
+    rec_v = f"{metrics.get('max_recovery_days', 0)}天"
+    var99_v = _pct(metrics.get("var_99", 0), suffix="%")
+    cvar99_v = _pct(metrics.get("cvar_99", 0), suffix="%")
     def _cell(label, val, clr="#333"):
         return f"<td><div class=\"l\">{label}</div><div class=\"v\" style=\"color:{clr};\">{val}</div></td>"
     def _clr(v):
@@ -649,7 +658,8 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
     r1 = _cell("策略收益", sr_v, _clr(sr_v)) + _cell("年化收益", ar_v, _clr(ar_v)) + _cell("沪深300", hs_v, _clr(hs_v)) + _cell("超额收益", er_v, _clr(er_v))
     r2 = _cell("调仓胜率", wr_v) + _cell("最大回撤", md_v) + _cell("夏普比率", sh_v) + _cell("卡玛比率", ca_v)
     r3 = _cell("索提诺", so_v) + _cell("年化波动", av_v) + _cell("总交易日", td_v) + _cell("现金", cs_v)
-    metrics_rows = f"<tr>{r1}</tr><tr>{r2}</tr><tr>{r3}</tr>"
+    r4 = _cell("VaR(95%)", var95_v) + _cell("CVaR(95%)", cvar95_v) + _cell("溃疡指数(Ulcer)", ulcer_v) + _cell("盈亏比(Profit Factor)", pf_v)
+    metrics_rows = f"<tr>{r1}</tr><tr>{r2}</tr><tr>{r3}</tr><tr>{r4}</tr>"
 
     # 填充模板
     html = _load_template()
@@ -661,6 +671,33 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
     html = html.replace("{{METRICS_ROWS}}", metrics_rows)
     html = html.replace("{{WINDOW_ROWS}}", window_rows)
     html = html.replace("{{DD_ROWS}}", dd_rows)
+
+    # 长期风险指标表格
+    var95 = metrics.get("var_95")
+    cvar95 = metrics.get("cvar_95")
+    var99 = metrics.get("var_99")
+    cvar99 = metrics.get("cvar_99")
+    ulcer = metrics.get("ulcer_index")
+    pf = metrics.get("profit_factor")
+    rec = metrics.get("max_recovery_days")
+    lr_rows = ""
+    if any(v is not None for v in [var95, cvar95, var99, cvar99, ulcer, pf, rec]):
+        lr_cells = [
+            ("VaR(95%)", _pct(var95) if var95 is not None else "-", "#333"),
+            ("CVaR(95%)", _pct(cvar95) if cvar95 is not None else "-", "#333"),
+            ("VaR(99%)", _pct(var99) if var99 is not None else "-", "#333"),
+            ("CVaR(99%)", _pct(cvar99) if cvar99 is not None else "-", "#333"),
+        ]
+        lr_row1 = "".join(_cell(l, v, c) for l, v, c in lr_cells)
+        lr_cells2 = [
+            ("溃疡指数", f"{ulcer:.2f}%" if ulcer is not None else "-", "#333"),
+            ("盈亏比", f"{pf:.2f}" if pf is not None else "-", "#333"),
+            ("最大恢复天数", f"{rec}天" if rec else "-", "#333"),
+            ("", "", "#333"),
+        ]
+        lr_row2 = "".join(_cell(l, v, c) for l, v, c in lr_cells2)
+        lr_rows = f"<h3>长期风险</h3><div class=\"metrics\"><table><tr>{lr_row1}</tr><tr>{lr_row2}</tr></table></div>"
+    html = html.replace("{{LR_SECTION}}", lr_rows)
     html = html.replace("{{MODEL_STATS_SECTION}}", model_stats_section)
     html = html.replace("{{HEALTH_SECTION}}", health_section)
     html = html.replace("{{HOLDINGS_TITLE}}", f"当前持仓 ({len(holdings)} 只)")

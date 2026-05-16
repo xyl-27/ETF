@@ -295,6 +295,47 @@ def _extract_drawdowns(vals, dates, max_periods=5):
     return periods[:max_periods]
 
 
+def _compute_longterm_risk_metrics(daily_rets, cum, dates, dd_periods):
+    """计算长期风险指标：VaR, CVaR, Ulcer Index, Profit Factor, 最大恢复天数"""
+    if len(daily_rets) < 5:
+        return {}
+    daily_rets_arr = np.array(daily_rets)
+    n = len(daily_rets_arr)
+
+    # VaR / CVaR
+    sorted_rets = np.sort(daily_rets_arr)
+    def _var_cvar(percentile):
+        idx = max(1, int(n * (1 - percentile / 100)))
+        var_val = float(sorted_rets[idx - 1])
+        cvar_val = float(np.mean(sorted_rets[:idx])) if idx > 0 else var_val
+        return var_val, cvar_val
+    var_95, cvar_95 = _var_cvar(95)
+    var_99, cvar_99 = _var_cvar(99)
+
+    # Ulcer Index: sqrt(mean(drawdown^2)) for drawdown periods
+    running_max = np.maximum.accumulate(cum)
+    dd_series = (cum - running_max) / running_max * 100
+    ulcer = float(np.sqrt(np.mean(dd_series ** 2)))
+
+    # Profit Factor
+    gains = daily_rets_arr[daily_rets_arr > 0].sum()
+    losses = abs(daily_rets_arr[daily_rets_arr < 0].sum())
+    profit_factor = float(gains / losses) if losses > 0 else float("inf")
+
+    # 最大恢复天数
+    recovery_days = max((dp.get("recovery_days") or 0 for dp in dd_periods), default=0)
+
+    return {
+        "var_95": round(float(var_95) * 100, 4),
+        "cvar_95": round(float(cvar_95) * 100, 4),
+        "var_99": round(float(var_99) * 100, 4),
+        "cvar_99": round(float(cvar_99) * 100, 4),
+        "ulcer_index": round(ulcer, 4),
+        "profit_factor": round(profit_factor, 4) if profit_factor != float("inf") else None,
+        "max_recovery_days": recovery_days,
+    }
+
+
 def run_backtest_sequence(
     data_file: str,
     start_date: str,
@@ -413,6 +454,8 @@ def run_backtest_sequence(
         sortino = float((np.mean(daily_rets) / downside_std) * np.sqrt(252)) if downside_std != 0 else 0.0
         # 计算多段回撤（前5大）
         dd_periods = _extract_drawdowns(vals, dates)
+        # 长期风险指标
+        risk_metrics = _compute_longterm_risk_metrics(daily_rets, cum, dates, dd_periods)
         return {
             "strategy_return_pct": round(total_ret, 4),
             "annualized_return_pct": round(annualized_ret_pct, 4),
@@ -431,6 +474,7 @@ def run_backtest_sequence(
             "annualized_volatility_pct": round(annualized_vol, 4),
             "total_days": n_days,
             "latest_value": round(vals[-1], 2),
+            **risk_metrics,
         }
 
     # -- 整体指标 --
@@ -1101,6 +1145,7 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
             ds_std = float(np.std(downside)) if len(downside) > 1 else daily_std
             sortino = float((np.mean(daily_rets) / ds_std) * np.sqrt(252)) if ds_std != 0 else 0
             dd_periods = _extract_drawdowns(vals, [e["date"] for e in ec_segment])
+            risk_metrics = _compute_longterm_risk_metrics(daily_rets, cum, [e["date"] for e in ec_segment], dd_periods)
             return {
                 "strategy_return_pct": round(total_ret, 4),
                 "annualized_return_pct": round(ann_ret * 100, 4),
@@ -1114,6 +1159,7 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
                 "annualized_volatility_pct": round(ann_vol, 4),
                 "total_days": n_days,
                 "latest_value": round(vals[-1], 2),
+                **risk_metrics,
             }
 
         metrics = _compute_metrics(ec_seg, initial_capital)
@@ -2814,6 +2860,17 @@ def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capit
                     _rk_metrics["hs300_return_pct"] = 0
                 _sr = _rk_metrics.get("strategy_return_pct", 0)
                 _rk_metrics["excess_return_pct"] = round(_sr - _rk_metrics["hs300_return_pct"], 2)
+        # 补齐长期风险指标（从 equity curve 重算）
+        if _ec and len(_ec) >= 5:
+            _ec_vals = [e["total_value"] for e in _ec]
+            _ec_dates = [e["date"] for e in _ec]
+            _r_cum = np.array(_ec_vals) / _ec_vals[0]
+            _r_rets = np.diff(_ec_vals) / np.array(_ec_vals[:-1])
+            _r_dd_periods = _extract_drawdowns(_ec_vals, _ec_dates)
+            _r_risk = _compute_longterm_risk_metrics(_r_rets, _r_cum, _ec_dates, _r_dd_periods)
+            for _rk, _rv in _r_risk.items():
+                if _rk not in _rk_metrics:
+                    _rk_metrics[_rk] = _rv
         rk_seq["metrics"] = _rk_metrics
         # 同步到 report 根层
         report_data["metrics"] = _rk_metrics
