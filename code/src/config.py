@@ -3,6 +3,8 @@ sequence_length = 60
 feature_num = "39"
 model_type = "tcn"
 val_months = 3
+val_start_date = "2026-01-01"
+val_end_date = "2026-03-31"
 topk = 3
 N = 74
 config = {
@@ -18,6 +20,8 @@ config = {
     "top_k": topk,
     "top5_weight": 2.0,
     "val_months": val_months,
+    "val_start_date": val_start_date,
+    "val_end_date": val_end_date,
     "output_dir": f"./model/search_{model_type}_{N}_{topk}",
     "output_base": "./model",
     "data_path": "./etf_data",

@@ -35,6 +35,7 @@ code/__pycache__/
 
 # 训练模型
 model/
+model_backup/
 
 # 数据文件
 data/

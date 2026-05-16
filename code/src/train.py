@@ -1026,50 +1026,53 @@ def save_predictions(top_stocks, output_path):
     print(f"预测结果已保存到: {output_path}")
 
 
-def split_train_val_by_last_month(df, sequence_length, val_months=2, val_folds=1):
-    """按最后val_months做验证集划分，并为验证集补充序列上下文。
+def split_train_val_by_last_month(df, sequence_length, val_months=2, val_folds=1,
+                                   val_start_date=None, val_end_date=None):
+    """按最后val_months或固定日期做验证集划分。
 
     Args:
         df: 数据DataFrame
         sequence_length: 序列长度
-        val_months: 验证集月数
+        val_months: 验证集月数（val_start_date为None时生效）
         val_folds: 验证集折数，1则不使用时间序列交叉验证
+        val_start_date: 固定验证集开始日期（如"2026-01-01"），不为None时忽略val_months
+        val_end_date: 固定验证集结束日期（如"2026-03-31"）
     """
     df = df.copy()
     df["日期"] = pd.to_datetime(df["日期"])
     df = df.sort_values(["日期", "股票代码"]).reset_index(drop=True)
 
     last_date = df["日期"].max()
-    val_start = (last_date - pd.DateOffset(months=val_months)).normalize()
 
-    # 验证集需要保留前 sequence_length-1 个交易日作为序列上下文
+    if val_start_date is not None:
+        val_start = pd.to_datetime(val_start_date).normalize()
+        val_end = pd.to_datetime(val_end_date).normalize() if val_end_date else last_date
+    else:
+        val_start = (last_date - pd.DateOffset(months=val_months)).normalize()
+        val_end = last_date
+
     val_context_start = val_start - pd.tseries.offsets.BDay(sequence_length - 1)
 
     train_df = df[df["日期"] < val_start].copy()
-    val_df = df[df["日期"] >= val_context_start].copy()
+    val_df = df[(df["日期"] >= val_context_start) & (df["日期"] <= val_end)].copy()
 
     print(f"全量数据范围: {df['日期'].min().date()} 到 {last_date.date()}")
-    print(
-        f"训练集范围: {train_df['日期'].min().date()} 到 {train_df['日期'].max().date()}"
-    )
-    print(
-        f"验证集目标范围(最后{val_months}个月): {val_start.date()} 到 {last_date.date()}"
-    )
-    print(
-        f"验证集实际取数范围(含序列上下文): {val_df['日期'].min().date()} 到 {val_df['日期'].max().date()}"
-    )
+    print(f"训练集范围: {train_df['日期'].min().date()} 到 {train_df['日期'].max().date()}")
+    if val_start_date is not None:
+        print(f"验证集目标范围(固定日期): {val_start.date()} 到 {val_end.date()}")
+    else:
+        print(f"验证集目标范围(最后{val_months}个月): {val_start.date()} 到 {val_end.date()}")
+    print(f"验证集实际取数范围(含序列上下文): {val_df['日期'].min().date()} 到 {val_df['日期'].max().date()}")
 
     if val_folds > 1:
         print(f"[时间序列交叉验证] 验证集折数: {val_folds}, 每折长度: {val_months}个月")
-        # 保存val_folds信息供后续使用
         train_df.attrs["val_folds"] = val_folds
         train_df.attrs["val_months"] = val_months
 
-    # 恢复为字符串
     train_df["日期"] = train_df["日期"].dt.strftime("%Y-%m-%d")
     val_df["日期"] = val_df["日期"].dt.strftime("%Y-%m-%d")
 
-    return train_df, val_df, val_start
+    return train_df, val_df, val_start, val_end
 
 
 # 主程序
@@ -1134,11 +1137,13 @@ def main():
         "前收盘_前复权": "前收盘",
         "振幅_前复权": "振幅", "涨跌额_前复权": "涨跌额", "涨跌幅_前复权": "涨跌幅",
     })
-    train_df, val_df, val_start = split_train_val_by_last_month(
+    train_df, val_df, val_start, val_end = split_train_val_by_last_month(
         full_df,
         config["sequence_length"],
         config["val_months"],
         config.get("val_folds", 1),
+        val_start_date=config.get("val_start_date"),
+        val_end_date=config.get("val_end_date"),
     )
 
     # 获取所有股票ID，建立映射
@@ -1205,19 +1210,18 @@ def main():
     else:
         val_first_sample_date = val_start
 
-    # 4.3 滑动验证集: 使用最后2个月数据，但过滤掉验证集起始日期之前的数据
+    # 4.3 滑动验证集: 使用验证期内数据
     print("\n[验证集-滑动]")
     full_df_dates = pd.to_datetime(full_df["日期"])
-    last_date = full_df_dates.max()
     val_context_start = val_start - pd.tseries.offsets.BDay(
         config["sequence_length"] - 1
     )
     full_df["日期"] = full_df_dates
     val_sliding_df = full_df[
-        (full_df["日期"] >= val_context_start) & (full_df["日期"] <= last_date)
+        (full_df["日期"] >= val_context_start) & (full_df["日期"] <= val_end)
     ]
     print(
-        f"滑动验证取数范围: {val_context_start.strftime('%Y-%m-%d')} 到 {last_date.strftime('%Y-%m-%d')}"
+        f"滑动验证取数范围: {val_context_start.strftime('%Y-%m-%d')} 到 {val_end.strftime('%Y-%m-%d')}"
     )
     print(
         f"滑动验证原始数据: {len(val_sliding_df)} 行, {val_sliding_df['日期'].nunique()} 唯一日期"

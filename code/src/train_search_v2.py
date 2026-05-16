@@ -60,8 +60,10 @@ def preprocess_and_save(config, search_dir):
     print(f"Loading data from {data_file_path}...")
     full_df = pd.read_csv(data_file_path)
 
-    train_df, val_df, val_start = split_train_val_by_last_month(
-        full_df, config["sequence_length"], config["val_months"]
+    train_df, val_df, val_start, val_end = split_train_val_by_last_month(
+        full_df, config["sequence_length"], config["val_months"],
+        val_start_date=config.get("val_start_date"),
+        val_end_date=config.get("val_end_date"),
     )
 
     all_stock_ids = full_df["股票代码"].unique()
@@ -80,19 +82,18 @@ def preprocess_and_save(config, search_dir):
     train_data[features] = scaler.fit_transform(train_data[features])
     val_data[features] = scaler.transform(val_data[features])
 
-    # 4.3 滑动验证集: 使用最后2个月数据，但过滤掉验证集起始日期之前的数据
+    # 4.3 滑动验证集: 使用验证期内数据
     print("\n[验证集-滑动]")
     full_df_dates = pd.to_datetime(full_df["日期"])
-    last_date = full_df_dates.max()
     val_context_start = val_start - pd.tseries.offsets.BDay(
         config["sequence_length"] - 1
     )
     full_df["日期"] = full_df_dates
     val_sliding_df = full_df[
-        (full_df["日期"] >= val_context_start) & (full_df["日期"] <= last_date)
+        (full_df["日期"] >= val_context_start) & (full_df["日期"] <= val_end)
     ]
     print(
-        f"滑动验证取数范围: {val_context_start.strftime('%Y-%m-%d')} 到 {last_date.strftime('%Y-%m-%d')}"
+        f"滑动验证取数范围: {val_context_start.strftime('%Y-%m-%d')} 到 {val_end.strftime('%Y-%m-%d')}"
     )
 
     val_sliding_data, _ = preprocess_val_data(val_sliding_df, stockid2idx=stockid2idx)
