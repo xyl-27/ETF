@@ -162,12 +162,10 @@ def load_etf_data(path=None, dtype=None):
 def update_etf_data(verbose: bool = True) -> bool:
     script_path = str(PROJECT_ROOT / "get_etf_data.py")
     if not os.path.exists(script_path):
-        if verbose:
-            print("[数据更新] 未找到 get_etf_data.py，跳过")
+        print("[数据更新] 未找到 get_etf_data.py，跳过")
         return False
 
-    if verbose:
-        print("[数据更新] 运行 get_etf_data.py 获取最新数据...")
+    print("[数据更新] 运行 get_etf_data.py 获取最新数据...")
 
     try:
         result = subprocess.run(
@@ -177,21 +175,20 @@ def update_etf_data(verbose: bool = True) -> bool:
             timeout=600,
         )
         if result.returncode == 0:
-            if verbose:
-                print("[数据更新] ETF数据获取成功")
+            print("[数据更新] ETF数据获取成功")
             return True
         else:
             print(f"[数据更新] 失败 (exit code: {result.returncode})")
-            if not verbose and result.stderr:
-                print(result.stderr.decode()[:500])
+            if result.stderr:
+                err = result.stderr.decode("utf-8", errors="replace")[:1000]
+                if err.strip():
+                    print(err)
             return False
     except subprocess.TimeoutExpired:
-        if verbose:
-            print("[数据更新] 超时 (10分钟)，跳过")
+        print("[数据更新] 超时 (10分钟)，跳过")
         return False
     except Exception as e:
-        if verbose:
-            print(f"[数据更新] 异常: {e}")
+        print(f"[数据更新] 异常: {e}")
         return False
 
 
@@ -1173,6 +1170,7 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
         chart_data_url = _history_chart_b64(all_sequences, hs300_raw, cur_date, sorted_dates[0], initial_capital)
 
         from send_report import build_report_html, _build_model_stats_table, _build_health_table, _build_pred_signals_table
+        from regenerate_history import build_market_monitor_section
         hist_sequences = {}
         for hkey, hseq in all_sequences.items():
             hist_trades = [t for t in hseq.get("trades", []) if t["date"] <= cur_date]
@@ -1280,6 +1278,8 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
         hist_ph = [p for p in seq.get("predictions_history", []) if p.get("date", "") <= cur_date]
         hist_seq_data = {**seq, "predictions_history": hist_ph}
         pred_signals_section = _build_pred_signals_table(hist_seq_data, cur_date)
+        holdings_at_date = {h["stock_id"] for h in holdings}
+        market_monitor_section = build_market_monitor_section(raw_df, seq, cur_date, holdings_at_date, etf_names)
         try:
             html = build_report_html(
                 date=cur_date,
@@ -1300,6 +1300,7 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
                 scatter_section="",
                 health_section=health_section,
                 pred_signals_section=pred_signals_section,
+                market_monitor_section=market_monitor_section,
                 source="本地回测",
                 trade_mode=trade_mode,
                 rebalance_win_rate=hist_rebalance_win_rate,
@@ -2909,8 +2910,46 @@ if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
 
     if args.update_only:
-        update_etf_data(verbose=args.debug)
-        print("数据更新完成。")
+        update_etf_data(verbose=True)
+        try:
+            import pandas as pd
+            _df = pd.read_csv(str(DATA_FILE))
+            _dates = sorted(_df["日期"].unique())
+            _last = _dates[-1]
+            _prev = _dates[-2] if len(_dates) >= 2 else None
+            _last_dt = pd.to_datetime(_last)
+            print(f"\n数据文件: {DATA_FILE.name}")
+            print(f"  股票数量: {_df['股票代码'].nunique()}")
+            print(f"  总交易日: {len(_dates)}")
+            print(f"  日期范围: {_dates[0]} ~ {_last}")
+            # 数据质量检查
+            _issues = []
+            if _last_dt.weekday() >= 5:
+                _issues.append(f"最新日期 {_last} 是{['周六','周日'][_last_dt.weekday()-5]}，非交易日")
+            if _prev:
+                _cur = _df[_df["日期"] == _last]
+                _prv = _df[_df["日期"] == _prev]
+                _merged = _cur[["股票代码","开盘","收盘","最高","最低"]].merge(
+                    _prv[["股票代码","收盘"]].rename(columns={"收盘":"prev_close"}), on="股票代码")
+                _all_flat = (_merged["收盘"] == _merged["开盘"]).all()
+                _all_vs_prev = (_merged["收盘"] == _merged["prev_close"]).all()
+                if _all_flat and _all_vs_prev:
+                    _issues.append(f"最新日期 {_last} 所有 {len(_merged)} 只股票 open=close=high=low=昨收，数据无效（可能是盘前或休市抓取）")
+                elif _all_flat:
+                    _flat_pct = (_merged["收盘"] == _merged["开盘"]).mean() * 100
+                    _issues.append(f"最新日期 {_last} {_flat_pct:.0f}% 的股票 open=close，数据可能不完整")
+                if len(_merged) > 0:
+                    _total_chg = (_merged["收盘"] - _merged["prev_close"]).abs().sum()
+                    if _total_chg == 0:
+                        _issues.append(f"最新日期 {_last} 所有股票收盘价和前一交易日完全相同，数据疑似无效")
+            if _issues:
+                print(f"  ⚠️ 数据警告:")
+                for _msg in _issues:
+                    print(f"    - {_msg}")
+                print(f"  💡 建议等盘中或收盘后重新运行 --update-only")
+        except Exception as _e:
+            print(f"\n无法读取数据文件: {_e}")
+        print("\n数据更新完成。")
     elif args.from_state:
         run_from_backtest_state(verbose=args.debug, start_date=args.start_date, trade_mode=args.trade_mode)
     elif args.predictions_only:

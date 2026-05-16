@@ -41,26 +41,64 @@ def merge_etf_data(base_path=None, new_path=None, backup=True):
     print(f"\n基础数据范围: {df_base['日期'].min().date()} ~ {max_base_date.date()} ({len(df_base)} 条)")
     print(f"增量数据范围: {df_new['日期'].min().date()} ~ {df_new['日期'].max().date()} ({len(df_new)} 条)")
 
-    df_incremental = df_new[df_new["日期"] > max_base_date]
+    # 删除 base 中与新文件重复日期的旧数据，再用新文件整体替换
+    # （修复盘前抓取 flat 数据被锁定的问题：第二次下载的正确数据可以覆盖已有日期）
+    new_dates = set(df_new["日期"].unique())
+    df_base_clean = df_base[~df_base["日期"].isin(new_dates)]
+    df_merged = pd.concat([df_base_clean, df_new], ignore_index=True)
 
-    if df_incremental.empty:
+    overlap_rows = df_base["日期"].isin(new_dates).sum()
+    new_dates_set = new_dates - set(df_base["日期"].unique())
+    if overlap_rows == 0 and not new_dates_set:
         print("没有需要更新的数据")
         return False
-
-    print(f"新增数据: {len(df_incremental)} 条 ({df_incremental['日期'].min().date()} ~ {df_incremental['日期'].max().date()})")
+    if new_dates_set:
+        print(f"新增交易日: {sorted(new_dates_set)[0]} ~ {sorted(new_dates_set)[-1]} ({len(new_dates_set)} 天)")
+    if overlap_rows:
+        print(f"覆盖更新: {overlap_rows} 条记录（已有日期数据替换为新版本）")
 
     if backup:
         backup_path = base_path.with_suffix(".bak")
         df_base.to_csv(backup_path, index=False)
         print(f"已备份原文件: {backup_path}")
-
-    df_merged = pd.concat([df_base, df_incremental], ignore_index=True)
     df_merged["日期"] = df_merged["日期"].dt.strftime("%Y-%m-%d")
     df_merged = df_merged.sort_values(["股票代码", "日期"]).reset_index(drop=True)
 
     df_merged.to_csv(base_path, index=False)
     print(f"\n更新完成: {base_path}")
     print(f"总数据范围: {df_merged['日期'].min()} ~ {df_merged['日期'].max()} ({len(df_merged)} 条)")
+
+    # 数据质量检查
+    try:
+        _dates = sorted(df_merged["日期"].unique())
+        _last, _prev = _dates[-1], _dates[-2] if len(_dates) >= 2 else None
+        _last_dt = pd.to_datetime(_last)
+        _issues = []
+        if _last_dt.weekday() >= 5:
+            _issues.append(f"最新日期 {_last} 是{['周六','周日'][_last_dt.weekday()-5]}，非交易日")
+        if _prev:
+            _cur = df_merged[df_merged["日期"] == _last]
+            _prv = df_merged[df_merged["日期"] == _prev]
+            _merged = _cur[["股票代码","开盘","收盘","最高","最低"]].merge(
+                _prv[["股票代码","收盘"]].rename(columns={"收盘":"prev_close"}), on="股票代码")
+            _all_flat = (_merged["收盘"] == _merged["开盘"]).all()
+            _all_vs_prev = (_merged["收盘"] == _merged["prev_close"]).all()
+            if _all_flat and _all_vs_prev:
+                _issues.append(f"最新日期 {_last} 所有 {len(_merged)} 只股票 open=close=high=low=昨收，数据无效（可能是盘前或休市抓取）")
+            elif _all_flat:
+                _flat_pct = (_merged["收盘"] == _merged["开盘"]).mean() * 100
+                _issues.append(f"最新日期 {_last} {_flat_pct:.0f}% 的股票 open=close，数据可能不完整")
+            _total_chg = (_merged["收盘"] - _merged["prev_close"]).abs().sum()
+            if _total_chg == 0:
+                _issues.append(f"最新日期 {_last} 所有股票收盘价和前一交易日完全相同，数据疑似无效")
+        if _issues:
+            print("⚠️ 数据质量警告:")
+            for _msg in _issues:
+                print(f"  - {_msg}")
+            print("💡 建议等盘中或收盘后重新运行")
+    except Exception as _e:
+        print(f"数据质量检查失败: {_e}")
+
     return True
 
 def login_with_cache(username, password):

@@ -16,7 +16,7 @@ from send_report import (
     _compute_health_score, _build_health_table, _add_window, _compute_max_drawdown,
     _load_etf_names, _xueqiu_url, PROJECT_ROOT,
 )
-from daily_eval import _compute_model_stats, _resolve_report_key
+from daily_eval import _compute_model_stats, _resolve_report_key, _extract_drawdowns
 
 STATE_PATH = PROJECT_ROOT / "output" / "backtest_state.json"
 HISTORY_DIR = PROJECT_ROOT / "output" / "history_report"
@@ -183,9 +183,54 @@ def build_market_monitor_section(raw_df, seq, target_date, holdings_at_date, etf
                 })
         prev_holdings_data.sort(key=lambda x: x["rank"])
 
+    # Compute per-regime stats from model equity curve
+    ec = seq.get("equity_curve", [])
+    ec_trunc = [e for e in ec if e["date"] <= target_date]
+    stats = {}
+    if len(ec_trunc) >= 3:
+        hs_period["regime"] = ""
+        hs_period.loc[hs_period["rolling_20d"] > 5, "regime"] = "bull"
+        hs_period.loc[hs_period["rolling_20d"] < -5, "regime"] = "bear"
+        hs_period.loc[(hs_period["rolling_20d"] <= 5) & (hs_period["rolling_20d"] >= -5), "regime"] = "sideways"
+        regime_dict = dict(zip(hs_period["日期"].dt.strftime("%Y-%m-%d"), hs_period["regime"]))
+        ec_dates = [e["date"] for e in ec_trunc]
+        ec_values = [e["total_value"] for e in ec_trunc]
+        records = []
+        for i, d in enumerate(ec_dates):
+            reg = regime_dict.get(d)
+            if reg and reg in ("bull", "bear", "sideways"):
+                model_ret = (ec_values[i] / ec_values[i - 1] - 1) * 100 if i > 0 else 0
+                records.append({"date": d, "model_return": model_ret, "regime": reg, "model_value": ec_values[i]})
+        if records:
+            df = pd.DataFrame(records)
+            for regime_key in ["bull", "bear", "sideways"]:
+                sub = df[df["regime"] == regime_key]
+                if len(sub) < 3:
+                    continue
+                model_total = (sub["model_value"].iloc[-1] / sub["model_value"].iloc[0] - 1) * 100
+                beat_rate = (sub["model_return"] > 0).mean()
+                stats[regime_key] = {
+                    "days": len(sub),
+                    "model_return": round(model_total, 2),
+                    "hs300_return": 0,
+                    "excess_return": round(model_total, 2),
+                    "beat_rate": round(beat_rate, 4),
+                    "model_win_rate": round(beat_rate, 4),
+                }
+            model_total_all = (ec_values[-1] / ec_values[0] - 1) * 100
+            win_all = (df["model_return"] > 0).mean()
+            stats["all"] = {
+                "days": len(df),
+                "model_return": round(model_total_all, 2),
+                "hs300_return": 0,
+                "excess_return": round(model_total_all, 2),
+                "beat_rate": round(win_all, 4),
+                "model_win_rate": round(win_all, 4),
+            }
+
     # Build HTML
     from market_monitor import build_regime_table_html, build_etf_rankings_html
-    regime_html = build_regime_table_html({}, {
+    regime_html = build_regime_table_html(stats, {
         "regime": regime,
         "rolling_20d_return": r20 if not pd.isna(r20) else 0,
         "rolling_vol": vol if not pd.isna(vol) else 0,
@@ -276,8 +321,8 @@ def simulate_state_at_date(seq, target_date, raw_df, initial_capital=100000):
             continue
         today_close = sub.iloc[-1]["收盘"]
         yesterday_close = sub.iloc[-2]["收盘"]
-        pos_pnl = (today_close - pinfo["buy_price"]) * pinfo["shares"] if pinfo["buy_price"] else 0
-        pnl_pct = ((today_close / pinfo["buy_price"]) - 1) * 100 if pinfo["buy_price"] else 0
+        pos_pnl = (today_close - yesterday_close) * pinfo["shares"] if yesterday_close else 0
+        pnl_pct = ((today_close / yesterday_close) - 1) * 100 if yesterday_close else 0
         today_pnl_positions.append({
             "stock_id": sid,
             "shares": pinfo["shares"],
@@ -329,6 +374,10 @@ def simulate_state_at_date(seq, target_date, raw_df, initial_capital=100000):
         "sortino_ratio": round(sortino, 2),
         "total_days": n_days,
     }
+
+    dd_periods = _extract_drawdowns(ec_values, ec_dates)
+    if dd_periods:
+        metrics["drawdown_periods"] = dd_periods
 
     # Add window metrics
     if len(ec_values) >= 4:
@@ -492,6 +541,10 @@ def build_report(report_state, seq_key, all_sequences, raw_df):
     today_pnl_total = report_state["today_pnl"]["total_pnl"]
     today_pnl_positions = report_state["today_pnl"]["positions"]
 
+    # 调仓胜率
+    master_stats = sequences_summary.get(seq_key, {}).get("model_stats", {})
+    rebalance_win_rate = master_stats.get("total_win_rate_pct")
+
     html = build_report_html(
         date=report_state["date"],
         model_display=model_display,
@@ -510,6 +563,8 @@ def build_report(report_state, seq_key, all_sequences, raw_df):
         trade_mode="open",
         pred_signals_section=pred_signals_section,
         market_monitor_section=report_state.get("market_monitor_section", ""),
+        rebalance_win_rate=rebalance_win_rate,
+        source="本地回测",
     )
     return html
 
