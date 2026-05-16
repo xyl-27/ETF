@@ -144,16 +144,10 @@ def fetch_single_etf(code, end_date, start_date="2019-01-01", download_instrumen
 
     bars = bars.rename(columns={
         "open": "开盘", "high": "最高", "low": "最低", "close": "收盘",
-        "volume": "成交量", "amount": "成交额", "pre_close": "前收盘",
+        "volume": "成交量", "amount": "成交额",
     })
     bars["股票代码"] = code
     bars["日期"] = bars.index
-
-    if "前收盘" not in bars.columns:
-        bars["前收盘"] = bars["收盘"].shift(1)
-    bars["涨跌额"] = bars["收盘"] - bars["前收盘"]
-    bars["涨跌幅"] = (bars["涨跌额"] / bars["前收盘"] * 100).round(2)
-    bars["振幅"] = ((bars["最高"] - bars["最低"]) / bars["前收盘"] * 100).round(2)
 
     if download_instruments:
         inst = fetch_history_instruments(symbol, start_date, end_date)
@@ -162,6 +156,35 @@ def fetch_single_etf(code, end_date, start_date="2019-01-01", download_instrumen
             for col in ("upper_limit", "lower_limit", "is_suspended", "adj_factor", "turn_rate"):
                 if col in inst.columns:
                     bars[col] = inst[col]
+
+        # 保存原始价格（复权前）
+        for pc in ("开盘", "收盘", "最高", "最低"):
+            bars[f"{pc}_原始"] = bars[pc].copy()
+        if "pre_close" in bars.columns:
+            bars["前收盘_原始"] = bars["pre_close"].copy()
+
+        # 前复权: 仅调整当日价格，前收盘由 shift 得到
+        if "adj_factor" in bars.columns and bars["adj_factor"].notna().any():
+            af = bars["adj_factor"]
+            latest_af = af.dropna().iloc[-1]
+            if latest_af != 0:
+                ratio = af / latest_af
+                for pc in ("开盘", "收盘", "最高", "最低"):
+                    if pc in bars.columns:
+                        bars[pc] = (bars[pc] * ratio).round(6)
+                # 成交量也做前复权（与价格反向）：拆分后份额变多，成交量需放大
+                # 公式: adj_vol = raw_vol * latest_af / af = raw_vol / ratio
+                bars["成交量"] = (bars["成交量"] / ratio).round(0)
+                # 换手率同步调整
+                if "turn_rate" in bars.columns and bars["turn_rate"].notna().any():
+                    bars["turn_rate"] = bars["turn_rate"] / ratio
+
+        # 前收盘 = 前一日复权收盘
+        bars["前收盘"] = bars["收盘"].shift(1)
+        bars["涨跌额"] = bars["收盘"] - bars["前收盘"]
+        bars["涨跌幅"] = (bars["涨跌额"] / bars["前收盘"] * 100).round(2)
+        bars["振幅"] = ((bars["最高"] - bars["最低"]) / bars["前收盘"] * 100).round(2)
+
         for jq_col, gm_col in [("涨停价", "upper_limit"), ("跌停价", "lower_limit"),
                                 ("换手率", "turn_rate")]:
             bars[jq_col] = bars.get(gm_col) if gm_col in bars.columns else None
@@ -229,10 +252,6 @@ def save_csv(df, path):
         "开盘_原始", "收盘_原始", "最高_原始", "最低_原始", "前收盘_原始",
     ]
     df["日期"] = df["日期"].dt.tz_localize(None)
-
-    for raw_col in ("开盘_原始", "收盘_原始", "最高_原始", "最低_原始", "前收盘_原始"):
-        base = raw_col.replace("_原始", "")
-        df[raw_col] = df[base] if base in df.columns else None
 
     missing_cols = [c for c in cols_out if c not in df.columns]
     for c in missing_cols:
