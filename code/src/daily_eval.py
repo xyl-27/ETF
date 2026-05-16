@@ -39,6 +39,16 @@ os.chdir(PROJECT_ROOT)
 sys.path.insert(0, str(PROJECT_ROOT / "code" / "src"))
 
 from backtest import BacktestEngine, ETFBacktester
+
+# GM Python 路径（用于数据下载，该 Python 装有 gm SDK）
+# 可通过环境变量 GM_PYTHON 覆盖，默认 D:\opt\python3.12.4\python.exe
+_GM_PYTHON_DEFAULT = "D:\\opt\\python3.12.4\\python.exe"
+GM_PYTHON = os.environ.get("GM_PYTHON", _GM_PYTHON_DEFAULT)
+# WSL 路径转换
+if os.name == "posix" and ":" in GM_PYTHON:
+    drive = GM_PYTHON[0].lower()
+    rest = GM_PYTHON[2:].replace("\\", "/")
+    GM_PYTHON = f"/mnt/{drive}{rest}"
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.ticker import FuncFormatter
@@ -160,16 +170,28 @@ def load_etf_data(path=None, dtype=None):
 # ============================================================
 
 def update_etf_data(verbose: bool = True) -> bool:
-    script_path = str(PROJECT_ROOT / "get_etf_data.py")
+    script_path = str(PROJECT_ROOT / "juejin" / "download_etf_data.py")
     if not os.path.exists(script_path):
-        print("[数据更新] 未找到 get_etf_data.py，跳过")
+        print("[数据更新] 未找到 juejin/download_etf_data.py，跳过")
         return False
 
-    print("[数据更新] 运行 get_etf_data.py 获取最新数据...")
+    gm_python = GM_PYTHON
+    if not os.path.exists(gm_python):
+        print(f"[数据更新] GM Python 不可用: {gm_python}")
+        print("[数据更新] 请设置 GM_PYTHON 环境变量指向带有 gm SDK 的 Python 路径")
+        return False
+
+    data_file = PROJECT_ROOT / "etf_data" / "etf_74.csv"
+    if data_file.exists():
+        cmd = [gm_python, script_path, "--update"]
+        print("[数据更新] 运行 download_etf_data.py --update 增量更新...")
+    else:
+        cmd = [gm_python, script_path, "--start-date", "2022-01-01"]
+        print("[数据更新] 运行 download_etf_data.py 全量下载 (2022-01-01 起)...")
 
     try:
         result = subprocess.run(
-            [sys.executable, script_path],
+            cmd,
             cwd=str(PROJECT_ROOT),
             capture_output=not verbose,
             timeout=600,

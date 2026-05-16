@@ -196,38 +196,106 @@ def run_notebook_and_download(page, notebook_url, timeout=180):
     frame = page.frame_locator("#research")
     print("✓ 已切换到 iframe")
     
-    # 点击重启并运行全部
-    print("点击重启并运行全部按钮...")
-    run_btn = frame.locator('button[title="重启内核,然后重新运行整个代码(显示确认对话框)"]')
-    if run_btn.count() > 0:
-        run_btn.first.click()
-        print("✓ 已点击重启按钮")
-        time.sleep(2)
-        
-        # 点击确认按钮
-        confirm_btn = frame.locator('button:has-text("重启并运行所有单元格")')
-        if confirm_btn.count() > 0:
-            confirm_btn.first.click()
-            print("✓ 已确认重启并运行")
+    # 先清除所有输出，避免匹配到上一次运行的缓存文本
+    try:
+        frame.evaluate('Jupyter.notebook.clear_all_output()')
+        print("✓ 已清除旧输出")
+    except Exception:
+        print("  (清除旧输出失败，继续)")
     
-    # 等待完成提示
+    # 触发重启并运行全部 — 优先用 JS API，失败则回退点按钮
+    triggered = False
+    try:
+        frame.evaluate('''
+            (function() {
+                var old = window.confirm;
+                window.confirm = function() { return true; };
+                Jupyter.notebook.restart_run_all();
+                setTimeout(function() { window.confirm = old; }, 60000);
+            })()
+        ''')
+        print("✓ 已通过 JS API 触发重启并运行全部")
+        triggered = True
+    except Exception:
+        pass
+    
+    if not triggered:
+        # 备选：点击按钮
+        print("JS API 不可用，尝试点击按钮...")
+        for sel in [
+            'button[title*=重启]',
+            'button[title*="Restart"]',
+            'button:has(.fa-repeat)',
+        ]:
+            btn = frame.locator(sel)
+            if btn.count() > 0:
+                btn.first.click()
+                print(f"✓ 已点击重启按钮")
+                time.sleep(2)
+                # 确认对话框
+                for csel in [
+                    'button:has-text("重启并运行所有单元格")',
+                    'button:has-text("Restart & Run All")',
+                    'button:has-text("确认")',
+                ]:
+                    cbtn = frame.locator(csel)
+                    if cbtn.count() > 0:
+                        cbtn.first.click()
+                        print("✓ 已确认重启")
+                        break
+                triggered = True
+                break
+    
+    if not triggered:
+        print("⚠ 未找到重启按钮，尝试直接运行全部单元格...")
+        try:
+            frame.evaluate('Jupyter.notebook.execute_all_cells()')
+            print("✓ 已触发运行全部单元格")
+        except Exception:
+            print("❌ 无法触发执行")
+    
+    # 等待完成提示（此时旧输出已被清除，收到的提示一定是本次运行的）
     print("等待数据获取完成...")
-    while True:
-        outputs = frame.locator(".output_subarea.output_text")
-        for i in range(outputs.count()):
-            try:
+    deadline = time.time() + timeout
+    found = False
+    while time.time() < deadline:
+        try:
+            outputs = frame.locator(".output_subarea.output_text")
+            for i in range(outputs.count()):
                 text = outputs.nth(i).inner_text()
                 if "数据获取完成" in text:
                     print(f"\n✓ {text.strip()}")
-                    time.sleep(12)
+                    found = True
                     break
-            except:
+        except Exception:
+            pass
+        if found:
+            break
+        print(".", end="", flush=True)
+        time.sleep(5)
+    
+    if not found:
+        # 检查是否有错误输出
+        errors = frame.locator(".output_error, .output_stderr")
+        err_text = ""
+        for i in range(min(errors.count(), 5)):
+            try:
+                err_text += errors.nth(i).inner_text()[:200] + "\n"
+            except Exception:
                 pass
-        else:
-            print(".", end="", flush=True)
-            time.sleep(5)
-            continue
-        break
+        if err_text.strip():
+            print(f"\n⚠ 检测到错误输出:\n{err_text.strip()}")
+        # 检查内核状态
+        try:
+            busy = frame.evaluate('Jupyter.notebook.kernel && Jupyter.notebook.kernel.is_busy()')
+            print(f"内核忙碌: {busy}")
+        except Exception:
+            pass
+        print(f"\n❌ 未检测到完成信号（超时 {timeout}s）")
+        return None
+    
+    # 等待文件落盘
+    time.sleep(12)
     
     # 直接通过文件URL下载
     print("\n下载文件...")
@@ -235,36 +303,58 @@ def run_notebook_and_download(page, notebook_url, timeout=180):
     cookies = page.context.cookies()
     cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
     
-    # 文件下载URL（根据你的截图）
-    file_url = "https://www.joinquant.com/user/73090038144/files/ETF/etf_74.csv?download=1"
-    
     headers = {
         'Cookie': cookie_str,
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     }
     
+    # 尝试下载 — notebook 保存到 etf_data_74_new.csv，备选旧文件名
+    for try_url in [
+        "https://www.joinquant.com/user/73090038144/files/ETF/etf_data_74_new.csv?download=1",
+        "https://www.joinquant.com/user/73090038144/files/ETF/etf_74.csv?download=1",
+    ]:
+        try:
+            response = requests.get(try_url, headers=headers, stream=True)
+            if response.status_code == 200:
+                file_url = try_url
+                break
+            else:
+                print(f"  HTTP {response.status_code}: {try_url.split('?')[0].rsplit('/',1)[1]}")
+        except Exception:
+            continue
+    else:
+        print("❌ 所有下载链接均失败")
+        return None
+    
     try:
-        response = requests.get(file_url, headers=headers, stream=True)
+        print(f"  下载: {file_url.split('?')[0].rsplit('/',1)[1]}")
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        target_file = NEW_FILE
         
-        if response.status_code == 200:
-            DATA_DIR.mkdir(parents=True, exist_ok=True)
-            target_file = NEW_FILE
-            
-            # 保存文件
-            with open(target_file, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            
-            print(f"✅ 文件已下载: {target_file}")
-            print(f"文件大小: {target_file.stat().st_size / 1024:.2f} KB")
-
-            # 自动合并到 etf_74.csv
-            merge_etf_data()
-            return str(target_file)
-        else:
-            print(f"❌ 下载失败: HTTP {response.status_code}")
-            return None
-            
+        # 保存文件
+        with open(target_file, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+        
+        print(f"✅ 文件已下载: {target_file}")
+        print(f"文件大小: {target_file.stat().st_size / 1024:.2f} KB")
+        
+        # 数据质量检查：检测 flat 数据
+        try:
+            _check = pd.read_csv(target_file)
+            _last_date = _check["日期"].max()
+            _last = _check[_check["日期"] == _last_date]
+            _all_flat = (_last["开盘"] == _last["收盘"]).all() if "开盘" in _last.columns else False
+            if _all_flat:
+                print(f"⚠️ 警告: 最新日期 {_last_date} 数据 flat（开盘=收盘），下载可能不完整")
+                print(f"   建议重新运行或手动下载")
+        except Exception:
+            pass
+        
+        # 自动合并到 etf_74.csv
+        merge_etf_data()
+        return str(target_file)
+        
     except Exception as e:
         print(f"❌ 下载异常: {e}")
         return None
@@ -277,7 +367,7 @@ if __name__ == "__main__":
     page, playwright, browser = login_with_cache(USERNAME, PASSWORD)
     
     try:
-        downloaded_file = run_notebook_and_download(page, NOTEBOOK_URL, 9)
+        downloaded_file = run_notebook_and_download(page, NOTEBOOK_URL, timeout=300)
         if downloaded_file:
             print(f"下载完成: {downloaded_file}")
         else:
