@@ -52,7 +52,7 @@ def preprocess_and_save(config, search_dir):
     feature_num = config["feature_num"]
     data_path = config["data_path"]
     data_file = config.get("data_file", "train.csv")
-    data_file_path = os.path.join(data_path, data_file)
+    data_file_path = os.path.join(data_path, data_file).replace("\\", "/")
 
     if not os.path.exists(data_file_path):
         raise FileNotFoundError(f"Data file not found: {data_file_path}")
@@ -197,9 +197,9 @@ def preprocess_and_save(config, search_dir):
         "val_sliding_hs300_rets": val_sliding_hs300_rets,
     }
 
-    preprocessed_path = os.path.join(search_dir, "preprocessed_data.pkl")
+    preprocessed_path = os.path.join(search_dir, "preprocessed_data.pkl").replace("\\", "/")
     joblib.dump(preprocessed_data, preprocessed_path)
-    joblib.dump(scaler, os.path.join(search_dir, "scaler.pkl"))
+    joblib.dump(scaler, os.path.join(search_dir, "scaler.pkl").replace("\\", "/"))
 
     print(f"Preprocessed data saved to {preprocessed_path}")
     print(f"Train samples: {len(train_sequences)}")
@@ -632,6 +632,17 @@ def main(args):
         config["search_metric"] = args.search_metric
     if args.save_predictions:
         config["save_predictions"] = True
+    if args.val_start_date is not None:
+        config["val_start_date"] = args.val_start_date
+    if args.val_end_date is not None:
+        config["val_end_date"] = args.val_end_date
+
+    # Recompute output_dir after CLI overrides
+    mt = config["model_type"]
+    n = config.get("N", 74)
+    tk = config.get("top_k", 3)
+    date_tag = f"_{config['val_start_date']}_{config['val_end_date']}" if config.get("val_start_date") else ""
+    config["output_dir"] = f"./model/search_{mt}_{n}_{tk}{date_tag}"
 
     # Clear any previous GPU memory state
     if torch.cuda.is_available():
@@ -641,25 +652,11 @@ def main(args):
     gc.collect()
 
     data_file = config.get("data_file", "data.csv")
-    topk = config.get("top_k", 5)
-    model_type = config.get("model_type", "tcn")
     file_prefix = data_file.split("_")[1].split(".")[0]
     search_method = args.search_method or config.get("search_method", "bayesian")
     method_prefix = "grid" if search_method == "grid" else "bayes"
-    search_dir = f"./model/{method_prefix}_{model_type}_{file_prefix}_{topk}"
+    search_dir = config["output_dir"].replace("search_", f"{method_prefix}_")
     os.makedirs(search_dir, exist_ok=True)
-
-    # 兼容旧 search_ 前缀目录
-    old_search_dir = f"./model/search_{model_type}_{file_prefix}_{topk}"
-    if args.resume and os.path.exists(old_search_dir) and not os.path.exists(os.path.join(search_dir, "preprocessed_data.pkl")):
-        print(f"Migrating preprocessed data from legacy directory: {old_search_dir}")
-        import shutil
-        for fname in ["preprocessed_data.pkl", "scaler.pkl", "search_results.json", "optuna_study.db"]:
-            src = os.path.join(old_search_dir, fname)
-            if os.path.exists(src):
-                dst = os.path.join(search_dir, fname)
-                shutil.copy2(src, dst)
-                print(f"  Copied {fname}")
 
     preprocessed_path = os.path.join(search_dir, "preprocessed_data.pkl")
 
@@ -956,6 +953,8 @@ if __name__ == "__main__":
     parser.add_argument("--topk", type=int, default=3)
     parser.add_argument("--sequence-length", type=int, default=60)
     parser.add_argument("--N", type=int, default=74)
+    parser.add_argument("--val-start-date", type=str, default=None, help="验证集开始日期，如 2025-01-01")
+    parser.add_argument("--val-end-date", type=str, default=None, help="验证集结束日期，如 2025-12-31")
     parser.add_argument("--search-method", type=str, default="bayesian", choices=["grid", "bayesian"])
     parser.add_argument("--n-trials", type=int, default=160)
     parser.add_argument("--search-metric", type=str, default="ndcg")

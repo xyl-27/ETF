@@ -7,6 +7,7 @@ val_start_date = "2026-01-01"
 val_end_date = "2026-03-31"
 topk = 3
 N = 74
+_date_tag = f"_{val_start_date}_{val_end_date}" if val_start_date else ""
 config = {
     "sequence_length": sequence_length,
     "batch_size": 4,
@@ -22,7 +23,7 @@ config = {
     "val_months": val_months,
     "val_start_date": val_start_date,
     "val_end_date": val_end_date,
-    "output_dir": f"./model/search_{model_type}_{N}_{topk}",
+    "output_dir": f"./model/search_{model_type}_{N}_{topk}{_date_tag}",# 参考
     "output_base": "./model",
     "data_path": "./etf_data",
     "data_file": "etf_74_train.csv",
