@@ -8,6 +8,9 @@ from .gru import RankingGRU
 from .itransformer import RankingiTransformer
 from .dlinear import RankingDLinear, series_decomp
 from .timesnet import RankingTimesNet
+from .nlinear import RankingNLinear
+from .patchtst import RankingPatchTST
+from .mamba_simple import RankingMamba
 
 from .factory import create_model
 
@@ -25,5 +28,8 @@ __all__ = [
     "RankingDLinear",
     "series_decomp",
     "RankingTimesNet",
+    "RankingNLinear",
+    "RankingPatchTST",
+    "RankingMamba",
     "create_model",
 ]

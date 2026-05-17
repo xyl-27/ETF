@@ -33,5 +33,17 @@ def create_model(model_type, input_dim, config, num_stocks):
         from .timesnet import RankingTimesNet
 
         return RankingTimesNet(input_dim, config, num_stocks)
+    elif model_type == "nlinear":
+        from .nlinear import RankingNLinear
+
+        return RankingNLinear(input_dim, config, num_stocks)
+    elif model_type == "patchtst":
+        from .patchtst import RankingPatchTST
+
+        return RankingPatchTST(input_dim, config, num_stocks)
+    elif model_type == "mamba":
+        from .mamba_simple import RankingMamba
+
+        return RankingMamba(input_dim, config, num_stocks)
     else:
         raise ValueError(f"Unknown model type: {model_type}")

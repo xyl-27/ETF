@@ -84,6 +84,25 @@ MODEL_CONFIGS = {
         "kernel_size": 25,
         "dropout": 0.1,
     },
+    "nlinear": {
+        "d_model": 64,
+        "dropout": 0.1,
+    },
+    "patchtst": {
+        "d_model": 128,
+        "num_layers": 2,
+        "nhead": 4,
+        "patch_len": 8,
+        "patch_stride": 4,
+        "dropout": 0.1,
+    },
+    "mamba": {
+        "d_model": 128,
+        "num_layers": 2,
+        "d_state": 16,
+        "dt_rank": 8,
+        "dropout": 0.1,
+    },
 }
 
 
@@ -186,6 +205,29 @@ PARAM_GRID = {
         dropout_values=[0.1, 0.2],
         extra_params={"kernel_size": 25},
     ),
+    "nlinear": generate_param_grid(
+        "nlinear",
+        learning_rates=[1e-5, 5e-5, 1e-4],
+        d_models=[32, 64, 128],
+        num_layers_range=[1],
+        dropout_values=[0.1, 0.2],
+    ),
+    "patchtst": generate_param_grid(
+        "patchtst",
+        learning_rates=[1e-5, 5e-5, 1e-4],
+        d_models=[64, 128, 256],
+        num_layers_range=[1, 2, 3],
+        dropout_values=[0.1, 0.2],
+        extra_params={"nhead": 4, "patch_len": 8, "patch_stride": 4},
+    ),
+    "mamba": generate_param_grid(
+        "mamba",
+        learning_rates=[1e-5, 5e-5, 1e-4],
+        d_models=[64, 128, 256],
+        num_layers_range=[1, 2, 3],
+        dropout_values=[0.1, 0.2],
+        extra_params={"d_state": 16, "dt_rank": 8},
+    ),
 }
 
 
@@ -262,6 +304,29 @@ def get_search_space(model_type):
             learning_rate_range=(1e-5, 1e-4),
             kernel_size_values=[25],
         ),
+        "nlinear": dict(
+            d_models=[32, 64, 128],
+            num_layers_range=(1, 1),
+            dropout_values=(0.1, 0.2),
+            learning_rate_range=(1e-5, 1e-4),
+        ),
+        "patchtst": dict(
+            d_models=[64, 128, 256],
+            num_layers_range=(1, 3),
+            dropout_values=(0.1, 0.2),
+            learning_rate_range=(1e-5, 1e-4),
+            nhead_values=[4],
+            patch_len_values=[8],
+            patch_stride_values=[4],
+        ),
+        "mamba": dict(
+            d_models=[64, 128, 256],
+            num_layers_range=(1, 3),
+            dropout_values=(0.1, 0.2),
+            learning_rate_range=(1e-5, 1e-4),
+            d_state_values=[16],
+            dt_rank_values=[8],
+        ),
     }
 
     r = ranges.get(model_type, ranges["dlinear"])
@@ -299,6 +364,26 @@ def get_search_space(model_type):
         if r.get("fft_top_k_values"):
             params["fft_top_k"] = trial.suggest_categorical(
                 "fft_top_k", r["fft_top_k_values"],
+            )
+
+        if r.get("patch_len_values"):
+            params["patch_len"] = trial.suggest_categorical(
+                "patch_len", r["patch_len_values"],
+            )
+
+        if r.get("patch_stride_values"):
+            params["patch_stride"] = trial.suggest_categorical(
+                "patch_stride", r["patch_stride_values"],
+            )
+
+        if r.get("d_state_values"):
+            params["d_state"] = trial.suggest_categorical(
+                "d_state", r["d_state_values"],
+            )
+
+        if r.get("dt_rank_values"):
+            params["dt_rank"] = trial.suggest_categorical(
+                "dt_rank", r["dt_rank_values"],
             )
 
         return params
