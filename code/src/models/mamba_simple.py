@@ -32,7 +32,7 @@ class SSMBlock(nn.Module):
 
         A = -torch.exp(self.A_log)
 
-        h = torch.zeros(B, D, d_state, device=x.device, dtype=x.float())
+        h = torch.zeros(B, D, d_state, device=x.device, dtype=x.dtype)
         y = []
         for t in range(L):
             delta_t = delta[:, t, :].unsqueeze(-1)
