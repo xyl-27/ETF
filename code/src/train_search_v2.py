@@ -941,7 +941,8 @@ if __name__ == "__main__":
     import argparse
 
     # 默认搜索的模型类型（不传 --model-type 时全部搜索）
-    SEARCH_MODEL_TYPES = ["itransformer", "gru", "tcn", "dlinear", "lstm", "timesnet", "nlinear", "patchtst", "mamba"]
+    # SEARCH_MODEL_TYPES = ["itransformer", "gru", "tcn", "dlinear", "lstm", "timesnet", "nlinear", "patchtst", "mamba"]
+    SEARCH_MODEL_TYPES = ["patchtst", "mamba"]
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="config")
@@ -956,7 +957,7 @@ if __name__ == "__main__":
     parser.add_argument("--val-start-date", type=str, default=None, help="验证集开始日期，如 2025-01-01")
     parser.add_argument("--val-end-date", type=str, default=None, help="验证集结束日期，如 2025-12-31")
     parser.add_argument("--search-method", type=str, default="bayesian", choices=["grid", "bayesian"])
-    parser.add_argument("--n-trials", type=int, default=160)
+    parser.add_argument("--n-trials", type=int, default=80)
     parser.add_argument("--search-metric", type=str, default="ndcg")
     parser.add_argument("--fresh", action="store_true", help="删除旧的 Optuna study，重新开始")
     parser.add_argument("--save-predictions", action="store_true", help="保存每 epoch 的预测结果 npy 文件（默认不保存）")

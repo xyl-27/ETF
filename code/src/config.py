@@ -36,69 +36,69 @@ config = {
 
 MODEL_CONFIGS = {
     "transformer": {
-        "d_model": 128,
+        "d_model": 64,
         "nhead": 4,
-        "num_layers": 2,
+        "num_layers": 1,
         "dim_feedforward": 256,
         "dropout": 0.1,
     },
     "lstm": {
-        "d_model": 128,
-        "num_layers": 2,
+        "d_model": 64,
+        "num_layers": 1,
         "nhead": 4,
-        "num_experts": 4,
+        "num_experts": None,
         "dropout": 0.1,
     },
     "tcn": {
-        "d_model": 256,
-        "num_layers": 3,
+        "d_model": 64,
+        "num_layers": 2,
         "kernel_size": 3,
         "nhead": 4,
-        "num_experts": 3,
+        "num_experts": None,
         "dropout": 0.1,
     },
     "gru": {
-        "d_model": 128,
-        "num_layers": 2,
+        "d_model": 64,
+        "num_layers": 1,
         "nhead": 4,
         "num_experts": None,
         "dropout": 0.1,
     },
     "itransformer": {
-        "d_model": 256,
-        "num_layers": 2,
-        "nhead": 8,
+        "d_model": 64,
+        "num_layers": 1,
+        "nhead": 4,
         "num_experts": None,
-        "dropout": 0.2,
+        "dropout": 0.1,
     },
     "timesnet": {
-        "d_model": 128,
-        "d_ff": 512,
-        "num_layers": 2,
-        "num_kernels": 6,
+        "d_model": 32,
+        "d_ff": 32,
+        "num_layers": 1,
+        "num_kernels": 3,
         "fft_top_k": 1,
         "dropout": 0.1,
     },
     "dlinear": {
-        "d_model": 64,
+        "d_model": 32,
         "kernel_size": 25,
         "dropout": 0.1,
     },
     "nlinear": {
-        "d_model": 64,
+        "d_model": 32,
         "dropout": 0.1,
     },
     "patchtst": {
-        "d_model": 128,
-        "num_layers": 2,
+        "d_model": 64,
+        "num_layers": 1,
         "nhead": 4,
         "patch_len": 8,
         "patch_stride": 4,
         "dropout": 0.1,
     },
     "mamba": {
-        "d_model": 128,
-        "num_layers": 2,
+        "d_model": 64,
+        "num_layers": 1,
         "d_state": 16,
         "dt_rank": 8,
         "dropout": 0.1,
@@ -150,81 +150,81 @@ PARAM_GRID = {
     "transformer": generate_param_grid(
         "transformer",
         learning_rates=[1e-5, 5e-5, 1e-4],
-        d_models=[128],
-        num_layers_range=[2, 3],
+        d_models=[64, 128],
+        num_layers_range=[1, 2, 3],
         dropout_values=[0.1, 0.2],
-        extra_params={"nhead": 4},
+        extra_params={"nhead": 4, "dim_feedforward": 256},
     ),
     "lstm": generate_param_grid(
         "lstm",
-        learning_rates=[1e-5, 5e-5, 1e-4],
-        d_models=[64, 128, 256],
+        learning_rates=[5e-5, 1e-4, 3e-4],
+        d_models=[64, 128],
         num_layers_range=[1, 2],
         dropout_values=[0.1, 0.2],
-        num_experts_values=[None, 3, 4],
+        num_experts_values=[None, 3],
     ),
     "tcn": generate_param_grid(
         "tcn",
-        learning_rates=[1e-5, 5e-5, 1e-4],
-        d_models=[128, 256],
-        num_layers_range=[3, 4],
+        learning_rates=[5e-5, 1e-4, 3e-4],
+        d_models=[64, 128],
+        num_layers_range=[2, 3, 4],
         dropout_values=[0.1, 0.2],
         extra_params={"kernel_size": 3},
-        num_experts_values=[None, 2, 3],
+        num_experts_values=[None, 3],
     ),
     "gru": generate_param_grid(
         "gru",
-        learning_rates=[1e-5, 5e-5, 1e-4],
-        d_models=[64, 128, 256],
+        learning_rates=[5e-5, 1e-4, 3e-4],
+        d_models=[64, 128],
         num_layers_range=[1, 2],
         dropout_values=[0.1, 0.2],
-        num_experts_values=[None, 3, 4],
+        num_experts_values=[None, 3],
     ),
     "itransformer": generate_param_grid(
         "itransformer",
         learning_rates=[1e-5, 5e-5, 1e-4],
-        d_models=[128, 256],
-        num_layers_range=[2, 3],
+        d_models=[64, 128],
+        num_layers_range=[1, 2],
         dropout_values=[0.1, 0.2],
-        extra_params={"nhead": 8},
-        num_experts_values=[None, 3, 4],
+        extra_params={"nhead": 4},
+        num_experts_values=[None, 3],
     ),
     "timesnet": generate_param_grid(
         "timesnet",
-        learning_rates=[1e-5, 5e-5, 1e-4],
-        d_models=[64, 128, 256],
-        num_layers_range=[2, 3],
+        learning_rates=[1e-4, 3e-4, 5e-4],
+        d_models=[32, 64],
+        num_layers_range=[1, 2],
         dropout_values=[0.1, 0.2],
-        extra_params={"num_kernels": 6, "fft_top_k": 1},
+        extra_params={"num_kernels": 3, "fft_top_k": 1},
     ),
     "dlinear": generate_param_grid(
         "dlinear",
-        learning_rates=[1e-5, 5e-5, 1e-4],
-        d_models=[64, 128, 256],
+        learning_rates=[1e-4, 3e-4, 1e-3],
+        d_models=[32, 64, 128],
         num_layers_range=[1],
         dropout_values=[0.1, 0.2],
         extra_params={"kernel_size": 25},
     ),
     "nlinear": generate_param_grid(
         "nlinear",
-        learning_rates=[1e-5, 5e-5, 1e-4],
-        d_models=[32, 64, 128],
+        learning_rates=[1e-4, 3e-4, 1e-3],
+        d_models=[32, 64],
         num_layers_range=[1],
         dropout_values=[0.1, 0.2],
     ),
     "patchtst": generate_param_grid(
         "patchtst",
         learning_rates=[1e-5, 5e-5, 1e-4],
-        d_models=[64, 128, 256],
-        num_layers_range=[1, 2, 3],
+        d_models=[64, 128],
+        num_layers_range=[1, 2],
         dropout_values=[0.1, 0.2],
-        extra_params={"nhead": 4, "patch_len": 8, "patch_stride": 4},
+        extra_params={"nhead": 4},
     ),
     "mamba": generate_param_grid(
         "mamba",
-        learning_rates=[1e-5, 5e-5, 1e-4],
-        d_models=[64, 128, 256],
-        num_layers_range=[1, 2, 3],
+        learning_rates=[5e-5, 1e-4, 3e-4],
+        d_models=[64, 128],
+        num_layers_range=[1, 2],
         dropout_values=[0.1, 0.2],
         extra_params={"d_state": 16, "dt_rank": 8},
     ),
@@ -254,76 +254,76 @@ def get_search_space(model_type):
     # 各模型类型的参数范围（与 PARAM_GRID 对齐）
     ranges = {
         "transformer": dict(
-            d_models=[128],
-            num_layers_range=(2, 3),
-            dropout_values=(0.1, 0.2),
-            learning_rate_range=(1e-5, 1e-4),
-        ),
-        "itransformer": dict(
-            d_models=[128, 256],
-            num_layers_range=(2, 3),
-            dropout_values=(0.1, 0.2),
-            learning_rate_range=(1e-5, 1e-4),
-            nhead_values=[8],
-            num_experts_values=[None, 3, 4],
-        ),
-        "lstm": dict(
-            d_models=[64, 128, 256],
-            num_layers_range=(1, 2),
-            dropout_values=(0.1, 0.2),
-            learning_rate_range=(1e-5, 1e-4),
-            num_experts_values=[None, 3, 4],
-        ),
-        "gru": dict(
-            d_models=[64, 128, 256],
-            num_layers_range=(1, 2),
-            dropout_values=(0.1, 0.2),
-            learning_rate_range=(1e-5, 1e-4),
-            num_experts_values=[None, 3, 4],
-        ),
-        "tcn": dict(
-            d_models=[128, 256],
-            num_layers_range=(3, 4),
-            dropout_values=(0.1, 0.2),
-            learning_rate_range=(1e-5, 1e-4),
-            kernel_size_values=[3],
-            num_experts_values=[None, 2, 3],
-        ),
-        "timesnet": dict(
-            d_models=[64, 128, 256],
-            num_layers_range=(2, 3),
-            dropout_values=(0.1, 0.2),
-            learning_rate_range=(1e-5, 1e-4),
-            num_kernels_values=[6],
-            fft_top_k_values=[1],
-        ),
-        "dlinear": dict(
-            d_models=[64, 128, 256],
-            num_layers_range=(1, 1),
-            dropout_values=(0.1, 0.2),
-            learning_rate_range=(1e-5, 1e-4),
-            kernel_size_values=[25],
-        ),
-        "nlinear": dict(
-            d_models=[32, 64, 128],
-            num_layers_range=(1, 1),
-            dropout_values=(0.1, 0.2),
-            learning_rate_range=(1e-5, 1e-4),
-        ),
-        "patchtst": dict(
-            d_models=[64, 128, 256],
+            d_models=[64, 128],
             num_layers_range=(1, 3),
             dropout_values=(0.1, 0.2),
             learning_rate_range=(1e-5, 1e-4),
             nhead_values=[4],
-            patch_len_values=[8],
-            patch_stride_values=[4],
+            dim_feedforward_values=[128, 256],
         ),
-        "mamba": dict(
-            d_models=[64, 128, 256],
-            num_layers_range=(1, 3),
+        "itransformer": dict(
+            d_models=[64, 128],
+            num_layers_range=(1, 2),
             dropout_values=(0.1, 0.2),
             learning_rate_range=(1e-5, 1e-4),
+            nhead_values=[4],
+            num_experts_values=[None, 3],
+        ),
+        "lstm": dict(
+            d_models=[64, 128],
+            num_layers_range=(1, 2),
+            dropout_values=(0.1, 0.2),
+            learning_rate_range=(5e-5, 3e-4),
+            num_experts_values=[None, 3],
+        ),
+        "gru": dict(
+            d_models=[64, 128],
+            num_layers_range=(1, 2),
+            dropout_values=(0.1, 0.2),
+            learning_rate_range=(5e-5, 3e-4),
+            num_experts_values=[None, 3],
+        ),
+        "tcn": dict(
+            d_models=[64, 128],
+            num_layers_range=(2, 4),
+            dropout_values=(0.1, 0.2),
+            learning_rate_range=(5e-5, 3e-4),
+            kernel_size_values=[3],
+            num_experts_values=[None, 3],
+        ),
+        "timesnet": dict(
+            d_models=[32, 64],
+            num_layers_range=(1, 2),
+            dropout_values=(0.1, 0.2),
+            learning_rate_range=(1e-4, 5e-4),
+            num_kernels_values=[3],
+            fft_top_k_values=[1],
+        ),
+        "dlinear": dict(
+            d_models=[32, 64, 128],
+            num_layers_range=(1, 1),
+            dropout_values=(0.1, 0.2),
+            learning_rate_range=(1e-4, 1e-3),
+            kernel_size_values=[25],
+        ),
+        "nlinear": dict(
+            d_models=[32, 64],
+            num_layers_range=(1, 1),
+            dropout_values=(0.1, 0.2),
+            learning_rate_range=(1e-4, 1e-3),
+        ),
+        "patchtst": dict(
+            d_models=[64, 128],
+            num_layers_range=(1, 2),
+            dropout_values=(0.1, 0.2),
+            learning_rate_range=(1e-5, 1e-4),
+            nhead_values=[4],
+        ),
+        "mamba": dict(
+            d_models=[64, 128],
+            num_layers_range=(1, 2),
+            dropout_values=(0.1, 0.2),
+            learning_rate_range=(5e-5, 3e-4),
             d_state_values=[16],
             dt_rank_values=[8],
         ),
@@ -342,9 +342,15 @@ def get_search_space(model_type):
             "dropout", r["dropout_values"][0], r["dropout_values"][1],
         )
 
-        if model_type in ("transformer", "itransformer"):
-            nhead = r.get("nhead_values", [8])
-            params["nhead"] = trial.suggest_categorical("nhead", nhead)
+        if r.get("nhead_values"):
+            params["nhead"] = trial.suggest_categorical(
+                "nhead", r["nhead_values"],
+            )
+
+        if r.get("dim_feedforward_values"):
+            params["dim_feedforward"] = trial.suggest_categorical(
+                "dim_feedforward", r["dim_feedforward_values"],
+            )
 
         if r.get("num_experts_values"):
             params["num_experts"] = trial.suggest_categorical(
@@ -364,26 +370,6 @@ def get_search_space(model_type):
         if r.get("fft_top_k_values"):
             params["fft_top_k"] = trial.suggest_categorical(
                 "fft_top_k", r["fft_top_k_values"],
-            )
-
-        if r.get("patch_len_values"):
-            params["patch_len"] = trial.suggest_categorical(
-                "patch_len", r["patch_len_values"],
-            )
-
-        if r.get("patch_stride_values"):
-            params["patch_stride"] = trial.suggest_categorical(
-                "patch_stride", r["patch_stride_values"],
-            )
-
-        if r.get("d_state_values"):
-            params["d_state"] = trial.suggest_categorical(
-                "d_state", r["d_state_values"],
-            )
-
-        if r.get("dt_rank_values"):
-            params["dt_rank"] = trial.suggest_categorical(
-                "dt_rank", r["dt_rank_values"],
             )
 
         return params
