@@ -809,7 +809,22 @@ def send_report(model_key=None, verbose=False):
     market_monitor_section = ""
     try:
         from market_monitor import run_market_monitor
-        _, _, mm_html = run_market_monitor(verbose=verbose)
+        cur_set = {h["stock_id"] for h in holdings} if holdings else None
+        prev_set = {h["stock_id"] for h in pre_holdings} if pre_holdings else None
+        # 从 predictions_history 取调仓日
+        # 当前调仓日：从持仓的 buy_date 取最新（实际交易发生的日期）
+        cur_rb_date = max(h["buy_date"] for h in holdings) if holdings else ""
+        # 上期调仓日：从所有买入交易中取倒数第二个调仓日
+        prev_rb_date = ""
+        if cur_rb_date:
+            buy_dates = sorted(set(t["date"] for t in seq_data.get("trades", [])
+                                   if t["action"] == "买入" and t["date"] < cur_rb_date), reverse=True)
+            prev_rb_date = buy_dates[0] if buy_dates else ""
+        _, _, mm_html = run_market_monitor(
+            verbose=verbose,
+            current_holdings_set=cur_set, prev_holdings_set=prev_set,
+            current_rebalance_date=cur_rb_date, prev_rebalance_date=prev_rb_date,
+        )
         market_monitor_section = mm_html
     except Exception as e:
         print(f"  [市场监控] 生成失败: {e}")

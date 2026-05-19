@@ -942,7 +942,7 @@ if __name__ == "__main__":
 
     # 默认搜索的模型类型（不传 --model-type 时全部搜索）
     # SEARCH_MODEL_TYPES = ["itransformer", "gru", "tcn", "dlinear", "lstm", "timesnet", "nlinear", "patchtst", "mamba"]
-    SEARCH_MODEL_TYPES = ["patchtst", "mamba"]
+    SEARCH_MODEL_TYPES = [ "mamba","timesnet"]
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="config")

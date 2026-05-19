@@ -91,7 +91,7 @@ def build_market_monitor_section(raw_df, seq, target_date, holdings_at_date, etf
             bear_count += 1
         else:
             sideways_count += 1
-    breadth_str = f"🟢牛市 {bull_count/total_valid*100:.0f}% / 🟡震荡 {sideways_count/total_valid*100:.0f}% / 🔴熊市 {bear_count/total_valid*100:.0f}% (共{total_valid}只ETF)" if total_valid > 0 else ""
+    breadth_str = f"🔴牛市 {bull_count/total_valid*100:.0f}% / 🟡震荡 {sideways_count/total_valid*100:.0f}% / 🟢熊市 {bear_count/total_valid*100:.0f}% (共{total_valid}只ETF)" if total_valid > 0 else ""
 
     regime_labels_display = {"bull": "牛市 ↑", "bear": "熊市 ↓", "sideways": "震荡 →"}
 

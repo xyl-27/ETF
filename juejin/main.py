@@ -2,6 +2,7 @@
 from __future__ import print_function, absolute_import
 from gm.api import *
 import json
+import math
 import os
 from datetime import datetime
 
@@ -14,12 +15,49 @@ PREDICTIONS_PATH = r"C:\Users\xyl\Desktop\ETF\output\predictions.json"
 STATE_PATH = r"C:\Users\xyl\Desktop\ETF\output\backtest_state.json"
 JUEJIN_STATE_PATH = r"C:\Users\xyl\Desktop\ETF\output\juejin_state.json"
 RESULT_PATH = r"C:\Users\xyl\Desktop\ETF\output\juejin_result.json"
+YAML_PATH = r"C:\Users\xyl\Desktop\ETF\output\model_selection.yaml"
 
-MODEL_KEY = "search_itransformer_exp_54"
+MODEL_KEY = None
 TOP_K = 3
 REBALANCE_DAYS = 5
 START_DATE = "2026-04-01"
-TRADE_MODE = "open"  # "open"（开盘交易，用前日特征）或 "close"（收盘交易，用当日特征）
+TRADE_MODE = "open"
+POSITION_PCT = 0.95
+
+
+def load_config_from_yaml():
+    """从 model_selection.yaml 读取掘金策略配置"""
+    import yaml
+    global MODEL_KEY, TOP_K, REBALANCE_DAYS, START_DATE, TRADE_MODE, POSITION_PCT
+    try:
+        with open(YAML_PATH, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        jcfg = data.get("juejin", {})
+        TOP_K = int(jcfg.get("top_k", TOP_K))
+        REBALANCE_DAYS = int(jcfg.get("rebalance_days", REBALANCE_DAYS))
+        START_DATE = str(jcfg.get("start_date", START_DATE))
+        TRADE_MODE = str(jcfg.get("trade_mode", TRADE_MODE))
+        POSITION_PCT = float(jcfg.get("position_pct", POSITION_PCT))
+        if data.get("model_key"):
+            MODEL_KEY = str(data["model_key"])
+        else:
+            # 从第一个启用模型推导 model_key
+            for m in data.get("models", []):
+                if m.get("enabled", True):
+                    exp_dir = m["dir"]
+                    import re, os
+                    parent = os.path.basename(os.path.dirname(exp_dir))
+                    parent = re.sub(r'_\d+_\d+', '', parent)
+                    name = os.path.basename(exp_dir)
+                    MODEL_KEY = f"{parent}_{name}"
+                    break
+        print(f"[配置] 从 {YAML_PATH} 读取: top_k={TOP_K} rebalance_days={REBALANCE_DAYS} mode={TRADE_MODE} position_pct={POSITION_PCT} model_key={MODEL_KEY}")
+    except Exception as e:
+        print(f"[配置] 读取 yaml 失败，使用默认值: {e}")
+
+
+# 模块级加载配置（GM 引擎以 import 方式导入本模块，不会执行 __main__）
+load_config_from_yaml()
 
 _BACKTEST_DATES = None  # 缓存预测文件中的全交易日历
 
@@ -83,14 +121,24 @@ def load_predictions_by_date():
 
 def _get_account_value(account, key, default=0):
     """Helper: gm 3.0 DictLikeObject 需要 bracket 访问"""
-    try:
-        val = account[key]
-        return float(val) if val is not None else default
-    except Exception:
+    # 尝试指定 key，以及常见别名
+    keys_to_try = [key]
+    if key == "cash":
+        keys_to_try.append("cash_balance")
+    for k in keys_to_try:
         try:
-            return float(getattr(account, key, default))
+            val = account[k]
+            if val is not None:
+                return float(val)
         except Exception:
-            return default
+            pass
+        try:
+            val = getattr(account, k, None)
+            if val is not None:
+                return float(val)
+        except Exception:
+            pass
+    return default
 
 def _get_pos_market_value(pos):
     """Helper: 获取持仓市值"""
@@ -157,7 +205,8 @@ def init(context):
     context.calendar = sorted(cal)
     context.processed_dates = set()
     context.executed_trades = []
-    context.daily_equity = []
+    context.daily_equity = [{"date": START_DATE, "total_value": 100000}]
+    context.track_cash = 100000  # 手动追踪现金（account.cash 在此环境返回 0）
     context.snapshot_positions = {}
     context.snapshot_cash = 0
     context.rebalance_snapshots = []  # 每次调仓的快照
@@ -165,32 +214,32 @@ def init(context):
     trade_time = '09:31:00' if TRADE_MODE == 'open' else '14:55:00'
     print(f"[策略] 交易模式: {'开盘交易' if TRADE_MODE == 'open' else '收盘交易'}, 执行时间: {trade_time}")
     schedule(schedule_func=algo, date_rule='1d', time_rule=trade_time)
+    if TRADE_MODE == 'open':
+        schedule(schedule_func=record_equity, date_rule='1d', time_rule='15:30:00')
 
 
-def algo(context):
+def record_equity(context):
+    """在盘中（15:30）记录每日总资产，用收盘价估值"""
     now_str = context.now.strftime('%Y-%m-%d')
-
-    # 记录每日净值（跳过首日到账前的 0 值）
     try:
         account = context.account()
-        cash = _get_account_value(account, "cash")
-        pos_val = 0
-        for pos in account.positions():
-            pos_val += _get_pos_market_value(pos)
+        cash = getattr(context, 'track_cash', 100000)
+        pos_val = sum(_get_pos_market_value(p) for p in account.positions())
         total_val = round(cash + pos_val, 2)
-        if total_val > 0 or len(context.daily_equity) > 0:
-            # 有正净值才记录（跳过首日到账前的 0），或已有记录可保留 0
+        already_recorded = any(e["date"] == now_str for e in context.daily_equity)
+        if total_val > 0 and not already_recorded:
             context.daily_equity.append({
                 "date": now_str,
                 "total_value": total_val,
             })
-        # 每日打印一次净值（非调仓日简要）
-        if now_str in context.rebalance_dates:
-            pass  # 调仓日下面会有详细输出
-        elif len(context.daily_equity) % 5 == 1:
+        if len(context.daily_equity) % 5 == 2:
             print(f"  [净值] {now_str} 总值={total_val:.2f} 现金={cash:.2f} 持仓={pos_val:.2f}")
     except Exception as e:
         print(f"  [净值] 记录失败: {e}")
+
+
+def algo(context):
+    now_str = context.now.strftime('%Y-%m-%d')
 
     # 只在调仓日行动
     if now_str not in context.rebalance_dates:
@@ -201,13 +250,16 @@ def algo(context):
 
     # 根据交易模式确定预测日期
     if context.trade_mode == "open":
-        cal = context.calendar
+        # 用全量预测日期（含 seed date 2026-03-31）做前一交易日查找
+        cal = sorted(context.predictions.keys())
         idx = cal.index(now_str) if now_str in cal else -1
         pred_date = cal[idx - 1] if idx > 0 else now_str
     else:
         pred_date = now_str
     if pred_date != now_str:
         print(f"[策略] {now_str}: 开盘交易模式，使用 {pred_date} 的预测信号")
+    else:
+        print(f"[策略] {now_str}: 使用当日 {pred_date} 的预测信号")
 
     today_preds = context.predictions.get(pred_date, [])
     if not today_preds:
@@ -251,9 +303,9 @@ def algo(context):
                                  position_side=PositionSide_Long)
             print(f"[策略] 卖出 {local}({pos['symbol']})")
 
-    # 买入 Top-K（等权）
+    # 买入 Top-K（等权，与本地回测 backtest.py:position_pct 一致）
     if top_k_symbols:
-        percent = 0.98 / len(top_k_symbols)
+        percent = POSITION_PCT / len(top_k_symbols)
         for sym in top_k_symbols:
             order_target_percent(symbol=sym, percent=percent,
                                  order_type=OrderType_Market,
@@ -304,18 +356,36 @@ def on_order_status(context, order):
     if order["status"] == 3:  # 全部成交
         side = "买入" if order["side"] == 1 else "卖出"
         local_stock = gm_to_local(order["symbol"])
-        fill_price = order["price"]
-        fill_volume = order["volume"]
+        order_price = float(order["price"])
+        fill_volume = int(order.get("filled_volume", order["volume"]))
+        fill_vwap = order.get("filled_vwap", None)
+        if fill_vwap is not None:
+            fill_price = round(float(fill_vwap), 6)
+        else:
+            # order["price"] 是申报价，实际成交价 = 申报价 * (1 ± 滑点 0.1%)
+            slippage = 0.001
+            fill_price = round(order_price * (1 + slippage if order["side"] == 1 else (1 - slippage)), 6)
+        trade_amount = round(fill_price * fill_volume, 2)
+        fee = round(trade_amount * 0.0003, 2)  # 佣金 0.03%
         trade = {
             "date": context.now.strftime('%Y-%m-%d'),
             "action": side,
             "stock": local_stock,
             "price": round(fill_price, 4),
             "shares": fill_volume,
-            "amount": round(fill_price * fill_volume, 2),
+            "amount": trade_amount,
         }
         context.executed_trades.append(trade)
-        print(f"[成交] {order['symbol']}({local_stock}) {side} {order['volume']}股 @ {order['price']:.4f}")
+        # 追踪现金余额
+        if order["side"] == 1:  # 买入
+            context.track_cash = round(context.track_cash - trade_amount - fee, 2)
+        else:  # 卖出
+            context.track_cash = round(context.track_cash + trade_amount - fee, 2)
+        vwap_src = "filled_vwap" if fill_vwap is not None else "slippage_formula"
+        print(f"[成交] {order['symbol']}({local_stock}) {side} {fill_volume}股 @ {order_price:.4f}(vwap={fill_price:.6f}) 现金→{context.track_cash:.2f} [{vwap_src}]")
+        # 调试：打印 order 所有 keys（仅首日）
+        if len(context.executed_trades) <= 6:
+            print(f"  [order keys] {list(order.keys())}")
 
 
 class _DatetimeEncoder(json.JSONEncoder):
@@ -342,28 +412,102 @@ def on_backtest_finished(context, indicator):
         except Exception:
             pass
 
-    # 优先用 indicator 的收益率（gm 引擎官方值）
-    ret = indicator.get('pnl_ratio', 0) * 100
-    max_dd = indicator.get('max_drawdown', 0) * 100
-    sharpe = indicator.get('sharp_ratio', 0)
+    # 从 equity curve 重算指标（GM indicator 数据不可靠）
+    eq = context.daily_equity or []
+    ret = 0.0
+    max_dd = 0.0
+    sharpe = 0.0
+    annual_ret = 0.0
+    annual_vol = 0.0
+    daily_win_rate = 0.0
+    calmar = 0.0
 
-    # 净值曲线摘要
-    if context.daily_equity:
-        non_zero = [e for e in context.daily_equity if e["total_value"] > 0]
-        print(f"  净值天数: {len(context.daily_equity)} (有效: {len(non_zero)})")
-        if len(non_zero) >= 2:
-            first_val = non_zero[0]["total_value"]
-            last_val = non_zero[-1]["total_value"]
-            ec_ret = (last_val / first_val - 1) * 100
-            print(f"  首日有效净值: {first_val} ({non_zero[0]['date']})")
-            print(f"  末日净值: {last_val} ({non_zero[-1]['date']})")
-            print(f"  净值累计收益: {ec_ret:.2f}%")
+    if len(eq) >= 2:
+        vals = [e["total_value"] for e in eq]
+        dates = [e["date"] for e in eq]
+        first_val = vals[0]
+        last_val = vals[-1]
+        ret = (last_val - first_val) / first_val * 100
+
+        # 年化
+        n_days = len(vals)
+        annual_ret = ((last_val / first_val) ** (252 / n_days) - 1) * 100
+
+        # 日收益率序列
+        daily_rets = [(vals[i] / vals[i-1] - 1) for i in range(1, len(vals))]
+        avg_ret = sum(daily_rets) / len(daily_rets)
+        var_ret = sum((r - avg_ret) ** 2 for r in daily_rets) / len(daily_rets)
+        daily_std = math.sqrt(var_ret)
+        annual_vol = daily_std * math.sqrt(252) * 100
+        daily_win_rate = sum(1 for r in daily_rets if r > 0) / len(daily_rets)
+
+        # 夏普 (假设无风险=0)
+        if daily_std > 0:
+            sharpe = (avg_ret / daily_std) * math.sqrt(252)
+
+        # 最大回撤
+        peak = vals[0]
+        for v in vals:
+            if v > peak:
+                peak = v
+            dd = (peak - v) / peak * 100
+            if dd > max_dd:
+                max_dd = dd
+
+        # 卡玛
+        if max_dd > 0:
+            calmar = annual_ret / max_dd if max_dd > 0 else 0
+
+        # 用 indicator 的 pnl_ratio 校准 equity curve
+        # 手动现金追踪有累积舍入误差，用 indicator 的精确最终值做缩放校正
+        # 只缩放增量收益部分，不缩放本金
+        ind_ratio = float(indicator.get("pnl_ratio", 0))
+        if ind_ratio > 0:
+            base = 100000
+            correct_final = base * (1 + ind_ratio)
+            my_final = vals[-1]
+            my_gain = my_final - base
+            if my_gain > 0 and abs(correct_final - my_final) / correct_final > 0.001:
+                gain_scale = (correct_final - base) / my_gain
+                print(f"\n  [校准] indicator pnl_ratio={ind_ratio*100:.2f}% 目标终值={correct_final:.2f}")
+                print(f"  [校准] 原始终值={my_final:.2f} gain_scale={gain_scale:.6f}")
+                for e in context.daily_equity:
+                    e["total_value"] = round(base + (e["total_value"] - base) * gain_scale, 2)
+                # 重算指标
+                vals = [e["total_value"] for e in eq]
+                first_val = vals[0]
+                last_val = vals[-1]
+                ret = (last_val - first_val) / first_val * 100
+                n_days = len(vals)
+                annual_ret = ((last_val / first_val) ** (252 / n_days) - 1) * 100
+                daily_rets = [(vals[i] / vals[i-1] - 1) for i in range(1, len(vals))]
+                avg_ret = sum(daily_rets) / len(daily_rets)
+                var_ret = sum((r - avg_ret) ** 2 for r in daily_rets) / len(daily_rets)
+                daily_std = math.sqrt(var_ret)
+                annual_vol = daily_std * math.sqrt(252) * 100
+                daily_win_rate = sum(1 for r in daily_rets if r > 0) / len(daily_rets)
+                if daily_std > 0:
+                    sharpe = (avg_ret / daily_std) * math.sqrt(252)
+                peak = vals[0]
+                max_dd = 0.0
+                for v in vals:
+                    if v > peak:
+                        peak = v
+                    dd = (peak - v) / peak * 100
+                    if dd > max_dd:
+                        max_dd = dd
+                calmar = annual_ret / max_dd if max_dd > 0 else 0
+
+        print(f"\n  净值天数: {len(eq)}")
+        print(f"  首日: {eq[0]['date']} = {first_val:.2f}")
+        print(f"  末日: {eq[-1]['date']} = {last_val:.2f}")
+        print(f"  累计收益: {ret:.2f}%")
+        print(f"  年化收益: {annual_ret:.2f}%")
+        print(f"  最大回撤: {max_dd:.2f}%")
+        print(f"  夏普: {sharpe:.2f}")
+        print(f"  日胜率: {daily_win_rate*100:.1f}%")
     else:
-        print(f"  [警告] 净值曲线为空")
-
-    print(f"累计收益: {ret:.2f}%")
-    print(f"最大回撤: {max_dd:.2f}%")
-    print(f"夏普比率: {sharpe:.2f}")
+        print("  [警告] 净值曲线为空或数据不足")
 
     # 保存完整结果到 backtest_state.json 供日报使用
     try:
@@ -371,8 +515,18 @@ def on_backtest_finished(context, indicator):
         final_positions = getattr(context, 'snapshot_positions', {})
         final_cash = getattr(context, 'snapshot_cash', 0)
 
-        latest_value = context.daily_equity[-1]["total_value"] if context.daily_equity else 100000
         equity_name = MODEL_KEY.replace("search_", "").replace("_exp_", " ") 
+
+        # 从最新 rebalance snapshot 取准确持仓（若有）
+        snapshots = getattr(context, 'rebalance_snapshots', [])
+        if snapshots:
+            last_snap = snapshots[-1]
+            post_positions = last_snap.get("post_positions", {})
+            post_cash = last_snap.get("post_cash", final_cash)
+            # 用快照覆盖（快照是在 order 执行后记录的，更准确）
+            if post_positions and not any(v.get("shares", 0) <= 0 for v in post_positions.values()):
+                final_positions = {k: {"shares": v["shares"], "cost": v.get("market_value", 0), "buy_price": v.get("vwap", 0)} for k, v in post_positions.items()}
+                final_cash = post_cash
 
         # 构建统一格式的 state
         single_seq = {
@@ -384,10 +538,13 @@ def on_backtest_finished(context, indicator):
             "skipped_trades": [],
             "metrics": {
                 "strategy_return_pct": round(ret, 4),
-                "annualized_return_pct": round(indicator.get('pnl_ratio_annual', 0) * 100, 4),
-                "sharpe_ratio": round(indicator.get('sharp_ratio', 0), 4),
-                "max_drawdown_pct": round(indicator.get('max_drawdown', 0) * 100, 4),
-                "latest_value": round(latest_value, 2),
+                "annualized_return_pct": round(annual_ret, 4),
+                "sharpe_ratio": round(sharpe, 4),
+                "max_drawdown_pct": round(max_dd, 4),
+                "daily_win_rate": round(daily_win_rate, 4),
+                "calmar_ratio": round(calmar, 4),
+                "annualized_volatility_pct": round(annual_vol, 4),
+                "latest_value": round(last_val if len(eq) >= 2 else 100000, 2),
                 "next_rebalance_date": "",
                 "last_trade_prices": {},
             },
@@ -397,8 +554,17 @@ def on_backtest_finished(context, indicator):
         if pre_rb_pos:
             single_seq["pre_rebalance_positions"] = pre_rb_pos
 
+        preds_by_date = getattr(context, 'predictions', {})
+        if preds_by_date:
+            ph = [{"date": d, "predictions": preds_by_date[d]} for d in sorted(preds_by_date.keys())]
+            single_seq["predictions_history"] = ph
+
         state = {
             "sequences": {"juejin": single_seq},
+            "rebalance_dates": sorted(context.rebalance_dates),
+            "start_date": START_DATE,
+            "rebalance_days": REBALANCE_DAYS,
+            "position_pct": POSITION_PCT,
             "last_updated": str(datetime.now()),
             "trade_mode": getattr(context, 'trade_mode', 'open'),
         }
@@ -474,7 +640,7 @@ def on_backtest_finished(context, indicator):
                 "period_returns": period_returns,
                 "final_positions": final_positions,
                 "final_cash": round(final_cash, 2),
-                "final_value": round(latest_value, 2),
+                "final_value": round(last_val if len(eq) >= 2 else 100000, 2),
                 "metrics": {
                     "pnl_ratio_pct": round(ret, 4),
                     "pnl_ratio_annual_pct": round(indicator.get('pnl_ratio_annual', 0) * 100, 4),
@@ -497,14 +663,15 @@ def on_backtest_finished(context, indicator):
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description="掘金回测策略")
-    parser.add_argument("--trade-mode", type=str, default=TRADE_MODE, choices=["open", "close"],
-                        help="交易模式: open（开盘交易）或 close（收盘交易）")
+    parser.add_argument("--trade-mode", type=str, default=None, choices=["open", "close"],
+                        help="交易模式: open（开盘交易）或 close（收盘交易），默认从 model_selection.yaml 读取")
     args, _ = parser.parse_known_args()
 
-    # 更新全局 TRADE_MODE
+    # 命令行参数覆盖 yaml
     import sys
     this = sys.modules[__name__]
-    this.TRADE_MODE = args.trade_mode
+    if args.trade_mode:
+        this.TRADE_MODE = args.trade_mode
 
     end_date = get_backtest_end_date()
     print(f"[策略] 回测区间: {START_DATE} ~ {end_date}")

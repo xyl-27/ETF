@@ -28,7 +28,7 @@ flowchart TD
     D3b --> D3c[保存 backtest_state.json]
     D3c --> D3d[发送日报邮件]
 
-    C -->|--from-state| D4[Mode 4 从状态恢复]
+    C -->|--from-juejin| D4[Mode 4 从状态恢复]
     D4 --> D4a[读 backtest_state.json<br>合并 juejin_state.json]
     D4a --> D4b[_resolve_report_key<br>选主序列]
     D4b --> D4c[读 etf_74.csv<br>构造持仓+日报]
@@ -45,7 +45,7 @@ flowchart TD
 
 Any mode supports `--clear` to delete old output files first (preserves `model_selection.yaml`):
 ```bash
-python code/src/daily_eval.py --clear --from-state
+python code/src/daily_eval.py --clear --from-juejin
 ```
 
 ### Mode 0: Full pipeline (模型推理 + 回测 + 日报)
@@ -72,9 +72,9 @@ python code/src/daily_eval.py --from-predictions
 ```
 读 `predictions.json` → `run_backtest_sequence()`(6序列) → 保存 `backtest_state.json` → 生成并发送日报。
 
-### Mode 4: Report from backtest state (从回测状态生成日报)
+### Mode 4: Report from juejin state (从回测状态生成日报)
 ```bash
-python code/src/daily_eval.py --from-state
+python code/src/daily_eval.py --from-juejin
 ```
 读 `backtest_state.json` + 合并 `juejin_state.json` → `_resolve_report_key()` 选主序列 → 读 `etf_74.csv` → 构造持仓(close+调仓日→旧持仓) → 生成并发送日报。
 
@@ -101,8 +101,8 @@ python code/src/daily_eval.py --from-predictions --no-update
 # Step 3: run Juejin backtest (reads predictions.json, merges "juejin" sequence into state)
 python juejin/main.py
 
-# Step 4: generate report from backtest state (master: juejin → 掘金作主序列)
-python code/src/daily_eval.py --from-state
+# Step 4: generate report from juejin state (master: juejin → 掘金作主序列)
+python code/src/daily_eval.py --from-juejin
 ```
 
 ## Juejin Strategy
@@ -117,7 +117,7 @@ python code/src/daily_eval.py --from-state
 ### After Juejin backtest finishes
 ```bash
 # Generate report with juejin as master sequence:
-python code/src/daily_eval.py --from-state
+python code/src/daily_eval.py --from-juejin
 ```
 
 ### Sequence priority (report_key resolution)

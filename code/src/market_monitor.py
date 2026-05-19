@@ -208,8 +208,35 @@ def _rank_map_at_date(df, target_date_str, window=5):
     return {code: i + 1 for i, code in enumerate(ret.index)}
 
 
-def compute_top_etf_rankings(window=5):
-    """计算近期涨幅最大/最小的ETF排行，标记持仓"""
+def _load_etf_names():
+    names = {}
+    p = PROJECT_ROOT / "etf_data" / "etf_list_before_2022_74.csv"
+    if p.exists():
+        import csv
+        with open(p, encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                code = row.get("代码", "").strip()
+                name = row.get("名称", "").strip()
+                if code and name:
+                    names[code] = name
+    return names
+
+
+def compute_top_etf_rankings(window=5, current_holdings_set=None, prev_holdings_set=None,
+                              current_rebalance_date=None, prev_rebalance_date=None):
+    """计算近期涨幅最大/最小的ETF排行，标记持仓
+
+    Parameters
+    ----------
+    current_holdings_set : set[str] or None
+        当前持仓代码集。None 时从 backtest_state.json 读取。
+    prev_holdings_set : set[str] or None
+        上期持仓代码集。None 时从 backtest_state.json 推算。
+    current_rebalance_date : str or None
+        当前调仓日（YYYY-MM-DD），用于计算调仓时排名。
+    prev_rebalance_date : str or None
+        上期调仓日（YYYY-MM-DD），用于计算上期调仓时排名。
+    """
     df = pd.read_csv(DATA_PATH)
     df["日期"] = pd.to_datetime(df["日期"])
     dates = sorted(df["日期"].unique())
@@ -221,102 +248,114 @@ def compute_top_etf_rankings(window=5):
     pivot = period.pivot_table(index="股票代码", columns="日期", values="收盘")
     ret = (pivot.iloc[:, -1] / pivot.iloc[:, 0] - 1) * 100
     ret = ret.dropna().sort_values(ascending=False)
+
     # 加载持仓
-    try:
-        with open(STATE_PATH) as f:
-            state = json.load(f)
-        for k in state.get("sequences", state):
-            if k != "hs300":
-                holdings = set(state["sequences"][k].get("positions", {}).keys())
-                break
-        else:
+    holdings = current_holdings_set
+    if holdings is None:
+        try:
+            with open(STATE_PATH) as f:
+                state = json.load(f)
+            for k in state.get("sequences", state):
+                if k != "hs300":
+                    holdings = set(state["sequences"][k].get("positions", {}).keys())
+                    break
+            else:
+                holdings = set()
+        except Exception:
             holdings = set()
-    except Exception:
-        holdings = set()
-    # 加载ETF名称
-    etf_names = {}
-    etf_list_path = PROJECT_ROOT / "etf_data" / "etf_list_before_2022_74.csv"
-    if etf_list_path.exists():
-        import csv
-        with open(etf_list_path, encoding="utf-8-sig") as f:
-            for row in csv.DictReader(f):
-                code = row.get("代码", "").strip()
-                name = row.get("名称", "").strip()
-                if code and name:
-                    etf_names[code] = name
+
+    etf_names = _load_etf_names()
     top = []
     for code, r in ret.head(10).items():
         top.append({"code": code, "name": etf_names.get(code, ""), "return": round(r, 2), "held": code in holdings})
     bot = []
     for code, r in ret.tail(10).items():
         bot.append({"code": code, "name": etf_names.get(code, ""), "return": round(r, 2), "held": code in holdings})
-    # 持仓排行
-    rank_map = {code: i+1 for i, code in enumerate(ret.index)}
-    # 当前调仓日排名
-    rebalance_rank_map = {}
-    current_rebalance_date = ""
-    try:
-        seq = state["sequences"][k]
-        preds = seq.get("predictions_history", [])
-        if preds:
-            last_pred_date = preds[-1]["date"]
-            current_rebalance_date = last_pred_date
-            rebalance_rank_map = _rank_map_at_date(df, last_pred_date, window)
-    except Exception:
-        pass
+
+    rank_map = {code: i + 1 for i, code in enumerate(ret.index)}
+
+    # 当前持仓排行（含调仓时排名）
+    rebalance_rank_map = _rank_map_at_date(df, current_rebalance_date, window) if current_rebalance_date else {}
     holdings_data = []
     for code in sorted(holdings):
         r = ret.get(code)
         if r is not None:
-            rr = rebalance_rank_map.get(code, 0)
             holdings_data.append({
                 "code": code,
                 "name": etf_names.get(code, ""),
                 "return": round(r, 2),
-                "rank": rank_map[code],
-                "rank_at_rebalance": rr,
+                "rank": rank_map.get(code, 0),
+                "rank_at_rebalance": rebalance_rank_map.get(code, 0),
                 "total": len(ret),
-                "rebalance_date": current_rebalance_date,
+                "rebalance_date": current_rebalance_date or "",
             })
     holdings_data.sort(key=lambda x: x["rank"])
-    # 上期持仓：上一次调仓日的持仓及其当前表现
-    prev_rank_map = {}
+
+    # 上期持仓排行
     prev_holdings_data = []
-    try:
-        seq = state["sequences"][k]
-        preds = seq.get("predictions_history", [])
-        if len(preds) >= 2:
-            prev_date = preds[-2]["date"]
-            prev_rank_map = _rank_map_at_date(df, prev_date, window)
-            # 模拟到 prev_date 的持仓
-            held = set()
-            for t in seq.get("trades", []):
-                if t["date"] > prev_date:
+    if prev_holdings_set is not None:
+        prev_rank_map = _rank_map_at_date(df, prev_rebalance_date, window) if prev_rebalance_date else {}
+        eq_data = pd.read_csv(DATA_PATH)
+        eq_dates = sorted(eq_data["日期"].unique())
+        prev_idx = next((i for i, d in enumerate(eq_dates) if d >= (prev_rebalance_date or "")), len(eq_dates))
+        days_ago = len(eq_dates) - prev_idx if prev_rebalance_date else 0
+        for code in sorted(prev_holdings_set):
+            r = ret.get(code)
+            if r is not None:
+                prev_holdings_data.append({
+                    "code": code,
+                    "name": etf_names.get(code, ""),
+                    "return": round(r, 2),
+                    "rank": rank_map.get(code, 0),
+                    "rank_at_rebalance": prev_rank_map.get(code, 0),
+                    "total": len(ret),
+                    "days_ago": days_ago,
+                    "rebalance_date": prev_rebalance_date or "",
+                })
+        prev_holdings_data.sort(key=lambda x: x["rank"])
+    else:
+        # 从 state 推算
+        try:
+            with open(STATE_PATH) as f:
+                state = json.load(f)
+            for k in state.get("sequences", state):
+                if k != "hs300":
+                    seq = state["sequences"][k]
                     break
-                if t["action"] == "买入":
-                    held.add(t["stock"])
-                elif t["action"] == "卖出":
-                    held.discard(t["stock"])
-            # 距今天数（交易日）
-            eq_dates = sorted(set(e["date"] for e in seq.get("equity_curve", [])))
-            days_ago = sum(1 for d in eq_dates if d >= prev_date)
-            for code in sorted(held):
-                r = ret.get(code)
-                if r is not None:
-                    pr = prev_rank_map.get(code, 0)
-                    prev_holdings_data.append({
-                        "code": code,
-                        "name": etf_names.get(code, ""),
-                        "return": round(r, 2),
-                        "rank": rank_map[code],
-                        "rank_at_rebalance": pr,
-                        "total": len(ret),
-                        "days_ago": days_ago,
-                        "rebalance_date": prev_date,
-                    })
-            prev_holdings_data.sort(key=lambda x: x["rank"])
-    except Exception:
-        prev_holdings_data = []
+            else:
+                seq = {}
+            preds = seq.get("predictions_history", [])
+            if len(preds) >= 2:
+                prev_date = preds[-2]["date"]
+                prev_rank_map = _rank_map_at_date(df, prev_date, window)
+                held = set()
+                for t in seq.get("trades", []):
+                    if t["date"] > prev_date:
+                        break
+                    if t["action"] == "买入":
+                        held.add(t["stock"])
+                    elif t["action"] == "卖出":
+                        held.discard(t["stock"])
+                eq_dates = sorted(set(e["date"] for e in seq.get("equity_curve", [])))
+                days_ago = sum(1 for d in eq_dates if d >= prev_date)
+                for code in sorted(held):
+                    r = ret.get(code)
+                    if r is not None:
+                        pr = prev_rank_map.get(code, 0)
+                        prev_holdings_data.append({
+                            "code": code,
+                            "name": etf_names.get(code, ""),
+                            "return": round(r, 2),
+                            "rank": rank_map[code],
+                            "rank_at_rebalance": pr,
+                            "total": len(ret),
+                            "days_ago": days_ago,
+                            "rebalance_date": prev_date,
+                        })
+                prev_holdings_data.sort(key=lambda x: x["rank"])
+        except Exception:
+            prev_holdings_data = []
+
     date_range = f"{pivot.columns[0].strftime('%Y-%m-%d')}~{pivot.columns[-1].strftime('%Y-%m-%d')}"
     return top, bot, holdings_data, prev_holdings_data, str(pivot.columns[0].date()), str(pivot.columns[-1].date())
 
@@ -678,7 +717,7 @@ def build_regime_table_html(stats, current_regime=None, breadth_last=None):
         )
     if breadth_last:
         header_lines.append(
-            f"全池宽度: 🟢牛市 {breadth_last['bull_pct']:.0f}% / 🟡震荡 {breadth_last['sideways_pct']:.0f}% / 🔴熊市 {breadth_last['bear_pct']:.0f}% "
+            f"全池宽度: 🔴牛市 {breadth_last['bull_pct']:.0f}% / 🟡震荡 {breadth_last['sideways_pct']:.0f}% / 🟢熊市 {breadth_last['bear_pct']:.0f}% "
             f"(共{breadth_last['total']}只ETF)"
         )
     header_info = "<br>".join(header_lines)
@@ -736,7 +775,8 @@ def build_etf_rankings_html(top, bot, holdings_data, prev_holdings_data, date_ra
             clr = "#cc0000" if item["return"] >= 0 else "#009900"
             name_display = f'<br><span style="font-size:11px;color:#666;">{item["name"]}</span>' if item.get("name") else ''
             rr = item.get("rank_at_rebalance", 0)
-            rebalance_str = f"<br><span style='font-size:10px;color:#999;'>调仓时第{rr}名</span>" if rr else ""
+            rr_display = str(rr) if rr else "-"
+            rebalance_str = f"<br><span style='font-size:10px;color:#999;'>调仓时第{rr_display}名</span>"
             rows += f"""<tr>
                 <td><code>{item['code']}</code>{name_display}</td>
                 <td style="text-align:right;color:{clr};font-weight:bold;">{item['return']:+.2f}%</td>
@@ -745,14 +785,16 @@ def build_etf_rankings_html(top, bot, holdings_data, prev_holdings_data, date_ra
         return rows
 
     cur_date = holdings_data[0].get("rebalance_date", "") if holdings_data else ""
-    cur_label = f"📦 当前持仓（调仓日: {cur_date}）" if cur_date else "📦 当前持仓"
+    cur_date_display = cur_date if cur_date else "-"
+    cur_label = f"📦 当前持仓（调仓日: {cur_date_display}）"
     cur_sec = f"""<tr style="background:#fffde7;"><td colspan="3" style="font-weight:bold;color:#f57f17;">{cur_label}</td></tr>
 {holding_rows(holdings_data)}""" if holdings_data else ""
 
     prev_sec = ""
     if prev_holdings_data:
         prev_date = prev_holdings_data[0].get("rebalance_date", "")
-        prev_label = f"📋 上期持仓（{prev_date}）" if prev_date else "📋 上期持仓"
+        prev_date_display = prev_date if prev_date else "-"
+        prev_label = f"📋 上期持仓（{prev_date_display}）"
         prev_sec = f"""<tr style="background:#f3e5f5;"><td colspan="3" style="font-weight:bold;color:#7b1fa2;">{prev_label}</td></tr>
 {holding_rows(prev_holdings_data)}"""
 
@@ -770,8 +812,21 @@ def build_etf_rankings_html(top, bot, holdings_data, prev_holdings_data, date_ra
     </table>"""
 
 
-def run_market_monitor(seq_key=None, verbose=False):
-    """主函数：运行市场监控，返回 stats dict + chart path + HTML section"""
+def run_market_monitor(seq_key=None, verbose=False, current_holdings_set=None, prev_holdings_set=None,
+                       current_rebalance_date=None, prev_rebalance_date=None):
+    """主函数：运行市场监控，返回 stats dict + chart path + HTML section
+
+    Parameters
+    ----------
+    current_holdings_set : set[str] or None
+        当前持仓代码集，传给 compute_top_etf_rankings。
+    prev_holdings_set : set[str] or None
+        上期持仓代码集，传给 compute_top_etf_rankings。
+    current_rebalance_date : str or None
+        当前调仓日，传给 compute_top_etf_rankings。
+    prev_rebalance_date : str or None
+        上期调仓日，传给 compute_top_etf_rankings。
+    """
     if verbose:
         print("=" * 50)
         print("Market Monitor")
@@ -811,7 +866,10 @@ def run_market_monitor(seq_key=None, verbose=False):
         print(f"  Chart saved: {chart_path}")
 
     regime_html = build_regime_table_html(stats, current_regime, breadth_last)
-    top, bot, holdings_data, prev_holdings_data, rank_start, rank_end = compute_top_etf_rankings()
+    top, bot, holdings_data, prev_holdings_data, rank_start, rank_end = compute_top_etf_rankings(
+        current_holdings_set=current_holdings_set, prev_holdings_set=prev_holdings_set,
+        current_rebalance_date=current_rebalance_date, prev_rebalance_date=prev_rebalance_date,
+    )
     rank_date = f"{rank_start}~{rank_end}" if rank_start else ""
     rank_html = build_etf_rankings_html(top, bot, holdings_data, prev_holdings_data, rank_date) if top else ""
     if verbose:
@@ -840,9 +898,9 @@ def run_market_monitor(seq_key=None, verbose=False):
         rolling_chart = OUTPUT_DIR / "market_rolling_20d.png"
         plot_rolling_20d(dates, values, rolling_chart)
         subplot_html = f"""
-        <div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:10px;">
-            <div style="flex:1;min-width:300px;"><img src="{_img_to_b64(breadth_chart)}" style="width:100%;border:1px solid #ddd;border-radius:5px;"></div>
-            <div style="flex:1;min-width:300px;"><img src="{_img_to_b64(rolling_chart)}" style="width:100%;border:1px solid #ddd;border-radius:5px;"></div>
+        <div style="margin-top:10px;">
+            <div style="margin-bottom:10px;"><img src="{_img_to_b64(breadth_chart)}" style="width:100%;border:1px solid #ddd;border-radius:5px;"></div>
+            <div><img src="{_img_to_b64(rolling_chart)}" style="width:100%;border:1px solid #ddd;border-radius:5px;"></div>
         </div>"""
     except Exception as e:
         print(f"  [子图] 生成失败: {e}")

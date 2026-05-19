@@ -1577,7 +1577,7 @@ def daily_eval(
                     print(f"    {status}: {_make_model_key(m)} ({m['model_file']})")
             single_models = enabled_models
             if not verbose:
-                print(f"{len(enabled_models)}个模型")
+                print(f"{len(enabled_models)}个模型 (最新: {latest_date_str})")
         else:
             config_module = __import__(config_name, fromlist=["config"])
             config = config_module.config.copy()
@@ -2088,7 +2088,6 @@ def daily_eval(
             )
         except Exception as e:
             print(f"\n[历史] 生成失败: {e}")
-            import traceback
             traceback.print_exc()
 
         for fn in ["equity_curve.csv", "daily_metrics.json", "trades_log.csv"]:
@@ -2346,6 +2345,17 @@ def generate_predictions_only(
         }
         with open(PREDICTIONS_PATH, "w", encoding="utf-8") as f:
             json.dump(all_predictions, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
+
+        # 同步保存一份到实盘文件夹
+        live_pred_path = Path("juejin/live/predictions.json")
+        try:
+            live_pred_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(live_pred_path, "w", encoding="utf-8") as f:
+                json.dump(all_predictions, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
+            if verbose:
+                print(f"  → 同步至 {live_pred_path}")
+        except Exception as e:
+            print(f"  [警告] 同步至实盘文件夹失败: {e}")
 
         if verbose:
             total = sum(len(v) for v in all_predictions.values())
@@ -2621,7 +2631,6 @@ def run_from_predictions(
             _save_history_reports(sequences[report_key], sequences, str(DATA_FILE), initial_capital, etf_names, model_key=report_key, rebalance_days=rebalance_days, trade_mode=trade_mode)
         except Exception as e:
             print(f"\n[历史] 生成失败: {e}")
-            import traceback
             traceback.print_exc()
 
         if verbose:
@@ -2642,47 +2651,36 @@ def run_from_predictions(
 
 
 # ============================================================
-# 模式3: 从已保存的 backtest_state.json 生成日报（无模型无回测）
+# 模式3: 从已保存的 juejin_state.json 生成日报（无模型无回测）
 # ============================================================
 
-def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capital=100000, trade_mode="open", rebalance_days=5):
-    """读取 backtest_state.json 直接生成日报，不执行任何模型或回测。"""
+def run_from_juejin(verbose=True, start_date="2026-04-01", initial_capital=100000, trade_mode="open", rebalance_days=5):
+    """读取 juejin_state.json 直接生成日报，不执行任何模型或回测。"""
     from send_report import send_report
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    if not STATE_PATH.exists():
-        print(f"错误: 未找到 {STATE_PATH}")
-        print("请先运行 juejin/main.py 或 daily_eval 生成回测状态")
+    if not JUEJIN_STATE_PATH.exists():
+        print(f"错误: 未找到 {JUEJIN_STATE_PATH}")
+        print("请先运行 juejin/main.py 生成掘金回测状态")
         return None
 
     if verbose:
         print(f"\n{'='*60}")
-        print(f"[{timestamp}] 从 backtest_state.json 生成日报")
+        print(f"[{timestamp}] 从 {JUEJIN_STATE_PATH.name} 生成日报")
         print(f"{'='*60}")
 
     try:
-        with open(STATE_PATH, "r", encoding="utf-8") as f:
+        with open(JUEJIN_STATE_PATH, "r", encoding="utf-8") as f:
             state = json.load(f)
 
         sequences = state.get("sequences", {})
         if not sequences:
-            print("错误: backtest_state.json 中无序列数据")
+            print("错误: juejin_state.json 中无序列数据")
             return None
 
-        # 加载掘金回测结果（如有），合并到 sequences
-        if JUEJIN_STATE_PATH.exists():
-            try:
-                with open(JUEJIN_STATE_PATH, "r", encoding="utf-8") as f:
-                    juejin_state = json.load(f)
-                juejin_seq = juejin_state.get("sequences", {}).get("juejin")
-                if juejin_seq:
-                    sequences["juejin"] = juejin_seq
-                if verbose:
-                    print(f"  加载掘金回测结果: {JUEJIN_STATE_PATH}")
-            except Exception as e:
-                if verbose:
-                    print(f"  加载掘金回测结果失败: {e}")
+        if verbose:
+            print(f"  加载掘金回测结果: {JUEJIN_STATE_PATH}")
 
         # 选主序列（遵循 model_selection.yaml 的 master 设置）
         report_key = _resolve_report_key(sequences)
@@ -2853,7 +2851,7 @@ def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capit
         if not rk_seq.get("cash"):
             _total_mkt_val = sum(h["shares"] * h["price"] for h in holdings if h["price"])
             _total_value = sequences_summary[report_key].get("metrics", {}).get("latest_value", 0)
-            rk_seq["cash"] = round(max(0, _total_value - _total_mkt_val), 2)
+            rk_seq["cash"] = round(_total_value - _total_mkt_val, 2)
 
         _rk_metrics = rk_seq.get("metrics", {})
         _ec = rk_seq.get("equity_curve", [])
@@ -2864,7 +2862,6 @@ def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capit
                 _r = (_ec[i]["total_value"] / _ec[i - 1]["total_value"] - 1)
                 _daily_rets.append(_r)
             if _daily_rets:
-                import numpy as np
                 _rk_metrics["daily_win_rate"] = round(sum(1 for r in _daily_rets if r > 0) / len(_daily_rets), 4)
                 _rk_metrics["annualized_volatility_pct"] = round(np.std(_daily_rets) * np.sqrt(252) * 100, 4)
                 _rk_metrics["calmar_ratio"] = round(_rk_metrics.get("annualized_return_pct", 0) / 100 / max(abs(_rk_metrics.get("max_drawdown_pct", 1) / 100), 0.01), 2) if _rk_metrics.get("annualized_return_pct") else 0
@@ -2900,10 +2897,27 @@ def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capit
         # 补齐 next_rebalance_date（掘金序列可能没有）
         next_rebalance_date = report_data.get("metrics", {}).get("next_rebalance_date", "")
         if not next_rebalance_date:
-            all_dates = sorted(raw_df["日期"].unique())
-            idx = next((i for i, d in enumerate(all_dates) if d >= pd.Timestamp(latest_date_str)), None)
-            if idx is not None and idx + rebalance_days < len(all_dates):
-                next_rebalance_date = all_dates[idx + rebalance_days].strftime("%Y-%m-%d")
+            rb_dates = state.get("rebalance_dates", [])
+            if rb_dates:
+                for d in rb_dates:
+                    if d >= latest_date_str:
+                        next_rebalance_date = d
+                        break
+            if not next_rebalance_date:
+                all_dates = sorted(raw_df["日期"].unique())
+                start_idx = next((i for i, d in enumerate(all_dates) if d >= pd.Timestamp(start_date)), None)
+                today_idx = next((i for i, d in enumerate(all_dates) if d >= pd.Timestamp(latest_date_str)), None)
+                if start_idx is not None and today_idx is not None:
+                    for offset in range(0, len(all_dates) - start_idx + rebalance_days, rebalance_days):
+                        rb_idx = start_idx + offset
+                        if rb_idx >= len(all_dates):
+                            date_diff = rb_idx - today_idx
+                            from datetime import timedelta
+                            next_rebalance_date = (all_dates[-1] + timedelta(days=1)).strftime("%Y-%m-%d")
+                            break
+                        if rb_idx > today_idx:
+                            next_rebalance_date = all_dates[rb_idx].strftime("%Y-%m-%d")
+                            break
 
         # 构建 latest_report.json
         source = "掘金" if report_key == "juejin" else "本地回测"
@@ -2916,7 +2930,7 @@ def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capit
             "metrics": report_data.get("metrics", {}),
             "holdings": holdings,
             "pre_holdings": pre_holdings,
-            "cash": report_data.get("cash", rk_seq.get("cash", 0)),
+            "cash": rk_seq.get("cash", report_data.get("cash", 0)),
             "total_value": report_data.get("metrics", {}).get("latest_value", 0),
             "sequences": sequences_summary,
             "hs300_curve": hs300_curve,
@@ -2930,6 +2944,16 @@ def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capit
         if verbose:
             print(f"\n[日报] latest_report.json 已保存")
             print(f"  日期: {latest_date_str}, 持仓: {len(holdings)}, 交易: {len(all_today_trades)}, 上期持仓: {len(pre_holdings)}")
+
+        # 生成收益曲线图
+        plot_path = OUTPUT_DIR / "equity_curves.png"
+        try:
+            plot_equity_curves(sequences, str(DATA_FILE), initial_capital, str(plot_path))
+            if verbose:
+                print(f"  [图表] 收益曲线已保存: {plot_path}")
+        except Exception as e:
+            if verbose:
+                print(f"  [图表] 保存失败: {e}")
 
         # 发送邮件
         try:
@@ -2948,7 +2972,7 @@ def run_from_backtest_state(verbose=True, start_date="2026-04-01", initial_capit
         return report
 
     except Exception as e:
-        print(f"\n[错误] 从 backtest_state 生成日报失败: {e}")
+        print(f"\n[错误] 从 juejin_state 生成日报失败: {e}")
         traceback.print_exc()
         return None
 
@@ -2969,7 +2993,7 @@ if __name__ == "__main__":
     parser.add_argument("--predictions-only", action="store_true", help="仅保存预测信号，不执行回测")
     parser.add_argument("--from-predictions", action="store_true", help="从已保存的预测信号生成日报（跳过模型加载）")
     parser.add_argument("--update-only", action="store_true", help="仅更新ETF数据，不执行任何其他操作")
-    parser.add_argument("--from-state", action="store_true", help="从已保存的 backtest_state.json 生成日报（跳过模型和回测）")
+    parser.add_argument("--from-juejin", action="store_true", help="从已保存的 juejin_state.json 生成日报（跳过模型和回测）")
     parser.add_argument("--trade-mode", type=str, default="open", choices=["open", "close"], help="交易模式: open（开盘交易，用前日收盘特征）或 close（收盘交易，用当日收盘特征）")
     parser.add_argument("--clear", action="store_true", help="先清除旧输出文件")
     args = parser.parse_args()
@@ -3029,8 +3053,8 @@ if __name__ == "__main__":
         except Exception as _e:
             print(f"\n无法读取数据文件: {_e}")
         print("\n数据更新完成。")
-    elif args.from_state:
-        run_from_backtest_state(verbose=args.debug, start_date=args.start_date, trade_mode=args.trade_mode)
+    elif args.from_juejin:
+        run_from_juejin(verbose=args.debug, start_date=args.start_date, trade_mode=args.trade_mode)
     elif args.predictions_only:
         generate_predictions_only(
             config_name=args.config,
