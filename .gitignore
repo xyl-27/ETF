@@ -36,6 +36,7 @@ code/__pycache__/
 # 训练模型
 model/
 model_backup/
+ml_model/
 
 # 数据文件
 data/
@@ -54,6 +55,9 @@ notebooks/*.csv
 
 # 聚宽登录状态
 joinquant_state.json
+
+# CatBoost
+catboost_info/
 
 # 其他
 test.py
