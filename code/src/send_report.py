@@ -381,8 +381,10 @@ def _compute_rank_maps(target_date):
     return results
 
 
-def _build_pred_signals_table(seq_data, report_date):
-    """从 predictions_history 构建预测信号表（前10名）"""
+def _build_pred_signals_table(seq_data, report_date, weight_strategy="equal", strategy_params=None, top_k=3, position_pct=0.95):
+    """从 predictions_history 构建预测信号表（前10名），含权重策略仓位"""
+    from backtest import compute_weights
+
     ph_list = seq_data.get("predictions_history", [])
     if not ph_list:
         return ""
@@ -396,11 +398,15 @@ def _build_pred_signals_table(seq_data, report_date):
     if not latest_ph:
         return ""
 
-    preds = latest_ph["predictions"][:10]
+    all_preds = latest_ph["predictions"]
+    preds = all_preds[:10]
     ph_date = latest_ph["date"]
     cutoff_idx = min(3, len(preds) - 1) if preds else 0
     cutoff_score = preds[cutoff_idx]["score"] if preds and cutoff_idx >= 0 else 0
     score_std = max(np.std([p["score"] for p in preds]), 1e-12) if len(preds) > 1 else 1.0
+
+    # 按权重策略计算每只股票的分配比例
+    w_dict = compute_weights(all_preds, top_k, weight_strategy, strategy_params)
 
     etf_names = _load_etf_names()
     rank_map = _compute_rank_maps(report_date)
@@ -424,9 +430,12 @@ def _build_pred_signals_table(seq_data, report_date):
         adv_clr = "#cc0000" if advantage >= 0 else "#009900"
         score_str = f"{score:.4f}"
         name_display = f" ({name})" if name else ""
-        rows += f"""<tr><td style="text-align:right;font-weight:bold;">{rank}</td><td><a href="{_xueqiu_url(code)}" target="_blank" style="text-decoration:none;color:inherit;">{code}</a>{name_display}</td><td style="text-align:right;font-family:monospace;">{score_str}</td><td style="text-align:right;font-family:monospace;color:{adv_clr};font-weight:bold;">{adv_str}</td>{_rank_cell(code, 'rank_1d')}{_rank_cell(code, 'rank_5d')}</tr>"""
+        w = w_dict.get(code, 0) * position_pct * 100
+        w_str = f"{w:.2f}%" if w > 0 else "-"
+        w_clr = "#cc0000" if w > 0 else "#999"
+        rows += f"""<tr><td style="text-align:right;font-weight:bold;">{rank}</td><td><a href="{_xueqiu_url(code)}" target="_blank" style="text-decoration:none;color:inherit;">{code}</a>{name_display}</td><td style="text-align:right;font-family:monospace;">{score_str}</td><td style="text-align:right;font-family:monospace;color:{adv_clr};font-weight:bold;">{adv_str}</td><td style="text-align:right;font-family:monospace;color:{w_clr};font-weight:bold;">{w_str}</td>{_rank_cell(code, 'rank_1d')}{_rank_cell(code, 'rank_5d')}</tr>"""
 
-    return f"""<h3>预测信号 (Top10, {ph_date})</h3><table><thead><tr><th style="text-align:right;">排名</th><th>代码</th><th style="text-align:right;">Score</th><th style="text-align:right;">优势</th><th style="text-align:right;font-size:11px;">实时<br>排名</th><th style="text-align:right;font-size:11px;">近5日<br>排名</th></tr></thead><tbody>{rows}</tbody></table>"""
+    return f"""<h3>预测信号 (Top10, {ph_date})</h3><table><thead><tr><th style="text-align:right;">排名</th><th>代码</th><th style="text-align:right;">Score</th><th style="text-align:right;">优势</th><th style="text-align:right;font-size:11px;">仓位</th><th style="text-align:right;font-size:11px;">实时<br>排名</th><th style="text-align:right;font-size:11px;">近5日<br>排名</th></tr></thead><tbody>{rows}</tbody></table>"""
 
 
 def build_report_html(*, date, model_display, total_value, cash, holdings,
@@ -713,8 +722,12 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
             name = h.get("name") or code
             shares = h["shares"]
             price = h.get("price_display", h.get("price", 0))
-            pre_rows += f'<tr><td>{code}</td><td>{name}</td><td style="text-align:right;">{price:.3f}</td><td style="text-align:right;">{shares:,}</td></tr>'
-        pre_holdings_section = f'<h3>上期持仓 ({len(pre_holdings)} 只)</h3><table><thead><tr><th>代码</th><th>名称</th><th style="text-align:right;">现价</th><th style="text-align:right;">股数</th></tr></thead><tbody>{pre_rows}</tbody></table>'
+            cost = h.get("cost", h.get("buy_price", 0) * shares)
+            cost_per_share = cost / shares if shares > 0 else 0
+            mkt_val = shares * price
+            weight = (mkt_val / total_value * 100) if total_value > 0 and price else 0
+            pre_rows += f'<tr><td>{code}</td><td>{name}</td><td style="text-align:right;">{price:.3f}</td><td style="text-align:right;">{cost_per_share:.3f}</td><td style="text-align:right;">{shares:,}</td><td style="text-align:right;">{mkt_val:,.0f}</td><td style="text-align:right;font-weight:bold;">{weight:.2f}%</td></tr>'
+        pre_holdings_section = f'<h3>上期持仓 ({len(pre_holdings)} 只)</h3><table><thead><tr><th>代码</th><th>名称</th><th style="text-align:right;">现价</th><th style="text-align:right;">成本价</th><th style="text-align:right;">股数</th><th style="text-align:right;">市值</th><th style="text-align:right;">仓位</th></tr></thead><tbody>{pre_rows}</tbody></table>'
     html = html.replace("{{PRE_HOLDINGS_SECTION}}", pre_holdings_section)
 
     html = html.replace("{{TRADES_SECTION}}", trades_section)
@@ -804,8 +817,14 @@ def send_report(model_key=None, verbose=False):
 
     trade_mode = report.get("trade_mode", "open")
 
-    # 预测信号表
-    pred_signals_section = _build_pred_signals_table(seq_data, date)
+    # 预测信号表（含权重仓位）
+    pred_signals_section = _build_pred_signals_table(
+        seq_data, date,
+        weight_strategy=report.get("weight_strategy", "equal"),
+        strategy_params=report.get("strategy_params", {}),
+        top_k=report.get("top_k", 3),
+        position_pct=report.get("position_pct", 0.95),
+    )
 
     # 市场监控
     market_monitor_section = ""

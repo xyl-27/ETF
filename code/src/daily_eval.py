@@ -194,19 +194,38 @@ def update_etf_data(verbose: bool = True) -> bool:
         result = subprocess.run(
             cmd,
             cwd=str(PROJECT_ROOT),
-            capture_output=not verbose,
+            capture_output=True,
             timeout=600,
         )
-        if result.returncode == 0:
-            print("[数据更新] ETF数据获取成功")
-            return True
-        else:
-            print(f"[数据更新] 失败 (exit code: {result.returncode})")
-            if result.stderr:
-                err = result.stderr.decode("utf-8", errors="replace")[:1000]
-                if err.strip():
-                    print(err)
+        stdout = result.stdout.decode("utf-8", errors="replace")
+        stderr = result.stderr.decode("utf-8", errors="replace")
+        if verbose:
+            if stdout.strip():
+                print(stdout.strip())
+            if stderr.strip():
+                print(stderr.strip())
+
+        has_fail = "FAIL" in stdout or "调用失败" in stderr or result.returncode != 0
+        if has_fail:
+            print(f"[数据更新] 部分ETF下载失败（未登录掘金终端？）exit code: {result.returncode}")
+            fail_lines = [l for l in stdout.split("\n") if "FAIL" in l]
+            if fail_lines:
+                print(f"[数据更新] 失败: {len(fail_lines)} 只ETF")
+                for fl in fail_lines[:5]:
+                    print(f"  {fl.strip()}")
+                if len(fail_lines) > 5:
+                    print(f"  ... 共 {len(fail_lines)} 条失败")
             return False
+        else:
+            print("[数据更新] ETF数据获取成功")
+            if data_file.exists():
+                try:
+                    tmp = pd.read_csv(data_file)
+                    last_date = pd.to_datetime(tmp["日期"]).max().strftime("%Y-%m-%d")
+                    print(f"[数据更新] 最新日期: {last_date}")
+                except Exception:
+                    pass
+            return True
     except subprocess.TimeoutExpired:
         print("[数据更新] 超时 (10分钟)，跳过")
         return False
@@ -253,7 +272,8 @@ def _format_strategy_info(weight_strategy, strategy_params, top_k, position_pct,
     elif weight_strategy in ("risk_parity", "score_risk"):
         extra = f" w={sp.get('vol_window', 20)}"
     sname = {"equal": "等权", "softmax": "Softmax", "rank_linear": "线性排名",
-             "risk_parity": "风险平价", "score_risk": "评分风险"}.get(weight_strategy, weight_strategy)
+             "risk_parity": "风险平价", "score_risk": "评分风险",
+             "kelly": "Kelly", "liquidity": "流动性优先"}.get(weight_strategy, weight_strategy)
     return (
         f"策略: {sname}{extra}"
         f" | Top-K: {top_k}"
@@ -1572,12 +1592,17 @@ def _resolve_report_key(sequences):
 
 
 def _save_predictions(sequences, path=None):
-    """Save per-model predictions_history to JSON."""
+    """Save per-model predictions_history to JSON.
+
+    Keys are pred_date (the date for which features were computed),
+    NOT the rebalance date. This ensures compatibility with
+    _make_predictions_func_from_saved() used by --from-predictions mode.
+    """
     path = path or PREDICTIONS_PATH
     preds = {}
     for key, seq in sequences.items():
         ph = seq.get("predictions_history", [])
-        preds[key] = {entry["date"]: entry["predictions"] for entry in ph}
+        preds[key] = {entry.get("pred_date", entry["date"]): entry["predictions"] for entry in ph}
     with open(path, "w", encoding="utf-8") as f:
         json.dump(preds, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
     return preds
@@ -2129,6 +2154,10 @@ def daily_eval(
             "sequences": sequences_summary,
             "hs300_curve": hs300_curve,
             "trade_mode": trade_mode,
+            "weight_strategy": weight_strategy,
+            "strategy_params": strategy_params,
+            "top_k": top_k,
+            "position_pct": position_pct,
             "strategy_info": _format_strategy_info(
                 weight_strategy, strategy_params, top_k, position_pct,
                 config.get("commission", 0.0003), config.get("slippage", 0.001),
@@ -2693,6 +2722,10 @@ def run_from_predictions(
             "sequences": sequences_summary,
             "hs300_curve": hs300_curve,
             "trade_mode": trade_mode,
+            "weight_strategy": weight_strategy,
+            "strategy_params": strategy_params,
+            "top_k": top_k,
+            "position_pct": position_pct,
             "strategy_info": _format_strategy_info(
                 weight_strategy, strategy_params, top_k, position_pct,
                 config.get("commission", 0.0003), config.get("slippage", 0.001),
@@ -3025,6 +3058,10 @@ def run_from_juejin(verbose=True, start_date="2026-04-01", initial_capital=10000
 
         # 构建 latest_report.json
         source = "掘金" if report_key == "juejin" else "本地回测"
+        _ws = cfg.get("weight_strategy", "equal")
+        _sp = cfg.get("strategy_params", {})
+        _tk = cfg.get("top_k", 3)
+        _pp = cfg.get("position_pct", 0.95)
         report = {
             "date": latest_date_str,
             "is_rebalance_day": is_rebalance_day,
@@ -3040,9 +3077,12 @@ def run_from_juejin(verbose=True, start_date="2026-04-01", initial_capital=10000
             "hs300_curve": hs300_curve,
             "trade_mode": trade_mode,
             "source": source,
+            "weight_strategy": _ws,
+            "strategy_params": _sp,
+            "top_k": _tk,
+            "position_pct": _pp,
             "strategy_info": _format_strategy_info(
-                cfg.get("weight_strategy", "equal"), cfg.get("strategy_params", {}),
-                cfg.get("top_k", 3), cfg.get("position_pct", 0.95),
+                _ws, _sp, _tk, _pp,
                 cfg.get("commission", 0.0003), cfg.get("slippage", 0.001),
                 cfg.get("rebalance_days", 5),
             ),
@@ -3106,7 +3146,7 @@ if __name__ == "__main__":
     parser.add_argument("--position-pct", type=float, default=None, help="仓位比例")
     parser.add_argument("--debug", action="store_true", help="打印详细调试日志")
     parser.add_argument("--trade-mode", type=str, default=None, choices=["open", "close"], help="交易模式: open（开盘交易，用前日收盘特征）或 close（收盘交易，用当日收盘特征）")
-    parser.add_argument("--weight-strategy", type=str, default=None, choices=["equal", "softmax", "rank_linear", "risk_parity", "score_risk"], help="加权策略")
+    parser.add_argument("--weight-strategy", type=str, default=None, choices=["equal", "softmax", "rank_linear", "risk_parity", "score_risk", "kelly", "liquidity"], help="加权策略")
     parser.add_argument("--weight-temperature", type=float, default=None, help="softmax 温度参数，存入 strategy_params['temperature']")
     parser.add_argument("--volatility-window", type=int, default=None, help="波动率计算回看天数，存入 strategy_params['vol_window']")
     parser.add_argument("--clear", action="store_true", help="先清除旧输出文件")

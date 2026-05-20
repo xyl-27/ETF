@@ -218,6 +218,26 @@ def compute_volatility(price_data, stock_ids, current_date, window=20):
     return vol_dict
 
 
+def compute_liquidity(price_data, stock_ids, current_date, window=20):
+    """compute average turnover amount for each stock_id up to current_date.
+
+    returns dict[stock_id, avg_turnover_amount] (floor 1.0 to avoid div-by-zero).
+    """
+    if price_data is None:
+        return {}
+    hist = price_data[pd.to_datetime(price_data["日期"]) < pd.to_datetime(current_date)]
+    liq_dict = {}
+    for sid in stock_ids:
+        amounts = hist.loc[hist["股票代码"] == sid, "成交额"].values
+        if len(amounts) >= window:
+            liq_dict[sid] = max(float(np.nanmean(amounts[-window:])), 1.0)
+        elif len(amounts) > 0:
+            liq_dict[sid] = max(float(np.nanmean(amounts)), 1.0)
+        else:
+            liq_dict[sid] = 1.0
+    return liq_dict
+
+
 def compute_weights(predictions, top_k, weight_strategy="equal", strategy_params=None):
     """standalone: compute per-stock allocation weights for top_k stocks.
 
@@ -280,6 +300,33 @@ def compute_weights(predictions, top_k, weight_strategy="equal", strategy_params
             w = 1.0 / n
             return {p["stock_id"]: w for p in top_preds}
         return {p["stock_id"]: float(risk_adj[i] / total) for i, p in enumerate(top_preds)}
+
+    if weight_strategy == "kelly":
+        vol = sp.get("vol_dict", {})
+        scores = np.array([p["score"] for p in top_preds], dtype=np.float64)
+        smin, smax = scores.min(), scores.max()
+        if smax - smin < 1e-12:
+            w = 1.0 / n
+            return {p["stock_id"]: w for p in top_preds}
+        score_norm = (scores - smin) / (smax - smin)
+        kelly = np.array([
+            max(0, score_norm[i]) / (max(vol.get(p["stock_id"], 1.0), 0.001) ** 2 + 1e-12)
+            for i, p in enumerate(top_preds)
+        ])
+        total = kelly.sum()
+        if total <= 0:
+            w = 1.0 / n
+            return {p["stock_id"]: w for p in top_preds}
+        return {p["stock_id"]: float(kelly[i] / total) for i, p in enumerate(top_preds)}
+
+    if weight_strategy == "liquidity":
+        liq = sp.get("liq_dict", {})
+        vals = np.array([max(liq.get(p["stock_id"], 1.0), 1e-8) for p in top_preds], dtype=np.float64)
+        total = vals.sum()
+        if total <= 0:
+            w = 1.0 / n
+            return {p["stock_id"]: w for p in top_preds}
+        return {p["stock_id"]: float(vals[i] / total) for i, p in enumerate(top_preds)}
 
     raise ValueError(f"unknown weight_strategy: {weight_strategy}")
 
@@ -556,6 +603,7 @@ class BacktestEngine:
 
                 self.predictions_history.append({
                     "date": current_date.strftime("%Y-%m-%d"),
+                    "pred_date": pred_date.strftime("%Y-%m-%d"),
                     "predictions": predictions,
                 })
 
@@ -603,13 +651,20 @@ class BacktestEngine:
                             self._write_log(f"卖出: {stock}")
 
                 # 按加权策略分配权重
-                if self.weight_strategy in ("risk_parity", "score_risk"):
+                if self.weight_strategy in ("risk_parity", "score_risk", "kelly"):
                     top_ids = [p["stock_id"] for p in predictions[: self.top_k]]
                     vol_dict = compute_volatility(
                         price_data, top_ids, current_date,
                         self.strategy_params.get("vol_window", 20),
                     )
                     self.strategy_params["vol_dict"] = vol_dict
+                if self.weight_strategy == "liquidity":
+                    top_ids = [p["stock_id"] for p in predictions[: self.top_k]]
+                    liq_dict = compute_liquidity(
+                        price_data, top_ids, current_date,
+                        self.strategy_params.get("liq_window", 20),
+                    )
+                    self.strategy_params["liq_dict"] = liq_dict
                 weights = self._compute_weights(predictions, self.top_k)
 
                 for pred in predictions[: self.top_k]:
@@ -1196,6 +1251,8 @@ def run_backtest_from_predictions(
     initial_capital: float = 1000000,
     commission: float = 0.0003,
     slippage: float = 0.001,
+    weight_strategy: str = "equal",
+    strategy_params: dict = None,
     first_rebalance_date: str = None,
     trade_mode: str = "open",
     log: bool = False,
@@ -1239,6 +1296,8 @@ def run_backtest_from_predictions(
         slippage=slippage,
         top_k=top_k,
         position_pct=position_pct,
+        weight_strategy=weight_strategy,
+        strategy_params=strategy_params,
         log=log,
     )
 

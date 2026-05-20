@@ -23,7 +23,7 @@ slippage: 0.001              # 滑点
 
 # Top-K 与加权策略
 top_k: 3
-weight_strategy: "equal"     # equal | softmax | rank_linear | risk_parity | score_risk
+weight_strategy: "risk_parity"     # equal | softmax | rank_linear | risk_parity | score_risk
 strategy_params:
   temperature: 1.0           # softmax 温度
   vol_window: 20             # 波动率回看天数
