@@ -753,6 +753,13 @@ class ETFBacktester:
         with open(config_path, "r") as f:
             self.config = json.load(f)
 
+        from config import get_model_config
+
+        model_type = self.config.get("model_type", "transformer")
+        model_defaults = get_model_config(model_type)
+        model_defaults.update(self.config)
+        self.config = model_defaults
+
         # 动态获取股票数量
         if self.df is not None:
             num_stocks = self.df["股票代码"].nunique()

@@ -820,10 +820,15 @@ def send_report(model_key=None, verbose=False):
             buy_dates = sorted(set(t["date"] for t in seq_data.get("trades", [])
                                    if t["action"] == "买入" and t["date"] < cur_rb_date), reverse=True)
             prev_rb_date = buy_dates[0] if buy_dates else ""
+        # 用 seq_data 的 equity curve（来自 juejin / 主序列）而非本地 backtest_state.json
+        _ec = seq_data.get("equity_curve", [])
+        _ec_dates = [e["date"] for e in _ec]
+        _ec_vals = [e["total_value"] for e in _ec]
         _, _, mm_html = run_market_monitor(
             verbose=verbose,
             current_holdings_set=cur_set, prev_holdings_set=prev_set,
             current_rebalance_date=cur_rb_date, prev_rebalance_date=prev_rb_date,
+            ext_dates=_ec_dates, ext_values=_ec_vals,
         )
         market_monitor_section = mm_html
     except Exception as e:

@@ -2855,6 +2855,9 @@ def run_from_juejin(verbose=True, start_date="2026-04-01", initial_capital=10000
 
         _rk_metrics = rk_seq.get("metrics", {})
         _ec = rk_seq.get("equity_curve", [])
+        # 始终从 equity curve 重算策略收益（state 中的值可能来自旧版本）
+        if _ec and len(_ec) >= 2:
+            _rk_metrics["strategy_return_pct"] = round((_ec[-1]["total_value"] / _ec[0]["total_value"] - 1) * 100, 2)
         if not _rk_metrics.get("total_days") and _ec:
             _rk_metrics["total_days"] = len(_ec)
             _daily_rets = []

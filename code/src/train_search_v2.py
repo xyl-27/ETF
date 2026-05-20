@@ -220,7 +220,10 @@ def run_experiment(
 
     exp_config = config.copy()
     exp_config.update(config)  # 继承配置中的top_k等参数
-    exp_config.update(params)
+    model_type = params.get("model_type", exp_config.get("model_type", "transformer"))
+    model_defaults = config_module.get_model_config(model_type)
+    exp_config.update(model_defaults)  # 先写入模型默认参数（如 d_ff）
+    exp_config.update(params)  # 再用搜索参数覆盖
     exp_config["output_dir"] = output_dir
     exp_config["num_epochs"] = config.get("num_epochs", 15)
 
@@ -942,7 +945,7 @@ if __name__ == "__main__":
 
     # 默认搜索的模型类型（不传 --model-type 时全部搜索）
     # SEARCH_MODEL_TYPES = ["itransformer", "gru", "tcn", "dlinear", "lstm", "timesnet", "nlinear", "patchtst", "mamba"]
-    SEARCH_MODEL_TYPES = [ "mamba","timesnet"]
+    SEARCH_MODEL_TYPES = ["timesnet","dlinear","tcn","gru","itransformer"]
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="config")

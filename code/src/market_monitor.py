@@ -813,7 +813,8 @@ def build_etf_rankings_html(top, bot, holdings_data, prev_holdings_data, date_ra
 
 
 def run_market_monitor(seq_key=None, verbose=False, current_holdings_set=None, prev_holdings_set=None,
-                       current_rebalance_date=None, prev_rebalance_date=None):
+                       current_rebalance_date=None, prev_rebalance_date=None,
+                       ext_dates=None, ext_values=None):
     """主函数：运行市场监控，返回 stats dict + chart path + HTML section
 
     Parameters
@@ -826,6 +827,10 @@ def run_market_monitor(seq_key=None, verbose=False, current_holdings_set=None, p
         当前调仓日，传给 compute_top_etf_rankings。
     prev_rebalance_date : str or None
         上期调仓日，传给 compute_top_etf_rankings。
+    ext_dates : list[str] or None
+        外部 eq curve dates（来自 juejin 等），替代本地 backtest_state.json。
+    ext_values : list[float] or None
+        外部 eq curve values。
     """
     if verbose:
         print("=" * 50)
@@ -849,7 +854,10 @@ def run_market_monitor(seq_key=None, verbose=False, current_holdings_set=None, p
     if verbose:
         print(f"  Market breadth: bull={breadth_last['bull_pct']:.0f}%  sideways={breadth_last['sideways_pct']:.0f}%  bear={breadth_last['bear_pct']:.0f}%")
 
-    dates, values = load_backtest_equity(seq_key)
+    if ext_dates is not None and ext_values is not None:
+        dates, values = list(ext_dates), list(ext_values)
+    else:
+        dates, values = load_backtest_equity(seq_key)
     if dates is None or len(dates) < 10:
         if verbose:
             print("  Warning: backtest equity data too short or missing")

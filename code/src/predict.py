@@ -376,8 +376,15 @@ def predict_fusion(models_info, sequences_np, device, config, num_stocks, featur
                 exp_config = json.load(f)
             model_config.update(exp_config)
 
+        from config import get_model_config
+
+        model_type = model_config.get("model_type", "transformer")
+        model_defaults = get_model_config(model_type)
+        model_defaults.update(model_config)
+        model_config = model_defaults
+
         model = create_model(
-            model_config["model_type"],
+            model_type,
             input_dim=input_dim,
             config=model_config,
             num_stocks=num_stocks,
