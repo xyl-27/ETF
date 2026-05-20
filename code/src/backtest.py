@@ -198,6 +198,92 @@ class BacktestResult:
         plt.close()
 
 
+def compute_volatility(price_data, stock_ids, current_date, window=20):
+    """compute annualized volatility for each stock_id from price_data up to current_date.
+
+    returns dict[stock_id, annualized_vol] (floor 0.001 to avoid div-by-zero).
+    """
+    if price_data is None:
+        return {}
+    hist = price_data[pd.to_datetime(price_data["日期"]) < pd.to_datetime(current_date)]
+    vol_dict = {}
+    for sid in stock_ids:
+        closes = hist.loc[hist["股票代码"] == sid, "收盘"].values
+        if len(closes) >= window + 1:
+            rets = np.diff(closes[-(window + 1):]) / closes[-(window + 1):-1]
+            vol = float(np.nanstd(rets, ddof=1) * np.sqrt(252))
+            vol_dict[sid] = max(vol, 0.001)
+        else:
+            vol_dict[sid] = 1.0
+    return vol_dict
+
+
+def compute_weights(predictions, top_k, weight_strategy="equal", strategy_params=None):
+    """standalone: compute per-stock allocation weights for top_k stocks.
+
+    strategy_params dict carries strategy-specific fields:
+      - "temperature" (softmax)
+      - "vol_dict"    (risk_parity, score_risk)
+
+    returns dict[stock_id, weight] summing to 1.
+    """
+    sp = strategy_params or {}
+    top_preds = predictions[:top_k]
+    n = len(top_preds)
+    if n == 0:
+        return {}
+
+    if weight_strategy == "equal":
+        w = 1.0 / n
+        return {p["stock_id"]: w for p in top_preds}
+
+    if weight_strategy == "rank_linear":
+        total = n * (n + 1) / 2
+        weights = {}
+        for p in top_preds:
+            rank = p.get("rank", 1)
+            w = (n + 1 - rank) / total
+            weights[p["stock_id"]] = w
+        return weights
+
+    if weight_strategy == "softmax":
+        T = sp.get("temperature", 1.0)
+        scores = np.array([p["score"] for p in top_preds], dtype=np.float64)
+        scores -= scores.max()
+        exp_s = np.exp(scores / T)
+        total = exp_s.sum()
+        if total <= 0:
+            w = 1.0 / n
+            return {p["stock_id"]: w for p in top_preds}
+        return {p["stock_id"]: float(exp_s[i] / total) for i, p in enumerate(top_preds)}
+
+    if weight_strategy == "risk_parity":
+        vol = sp.get("vol_dict", {})
+        inv = {}
+        for p in top_preds:
+            iv = 1.0 / vol.get(p["stock_id"], 1.0)
+            inv[p["stock_id"]] = iv
+        total = sum(inv.values())
+        if total <= 0:
+            w = 1.0 / n
+            return {p["stock_id"]: w for p in top_preds}
+        return {sid: v / total for sid, v in inv.items()}
+
+    if weight_strategy == "score_risk":
+        vol = sp.get("vol_dict", {})
+        scores = np.array([p["score"] for p in top_preds], dtype=np.float64)
+        scores = scores - scores.min() + 1e-8
+        vols = np.array([vol.get(p["stock_id"], 1.0) for p in top_preds], dtype=np.float64)
+        risk_adj = scores / (vols * vols)
+        total = risk_adj.sum()
+        if total <= 0:
+            w = 1.0 / n
+            return {p["stock_id"]: w for p in top_preds}
+        return {p["stock_id"]: float(risk_adj[i] / total) for i, p in enumerate(top_preds)}
+
+    raise ValueError(f"unknown weight_strategy: {weight_strategy}")
+
+
 class BacktestEngine:
     """回测引擎"""
 
@@ -208,6 +294,8 @@ class BacktestEngine:
         slippage=0.001,
         top_k=5,
         position_pct=0.95,
+        weight_strategy="equal",
+        strategy_params=None,
         log=False,
         log_file=None,
     ):
@@ -216,6 +304,8 @@ class BacktestEngine:
         self.slippage = slippage
         self.top_k = top_k
         self.position_pct = position_pct
+        self.weight_strategy = weight_strategy
+        self.strategy_params = strategy_params or {}
         self.log = log
         self.log_file = log_file
 
@@ -331,6 +421,12 @@ class BacktestEngine:
             for st in self.positions
         )
         return self.cash + pos_value
+
+    def _compute_weights(self, predictions, top_k):
+        return compute_weights(
+            predictions, top_k,
+            self.weight_strategy, self.strategy_params,
+        )
 
     def run(
         self,
@@ -506,8 +602,15 @@ class BacktestEngine:
                         if self.log:
                             self._write_log(f"卖出: {stock}")
 
-                # 对所有 Top-K 等权再平衡（类似 order_target_percent）
-                target_value_per_stock = total_value * self.position_pct / self.top_k
+                # 按加权策略分配权重
+                if self.weight_strategy in ("risk_parity", "score_risk"):
+                    top_ids = [p["stock_id"] for p in predictions[: self.top_k]]
+                    vol_dict = compute_volatility(
+                        price_data, top_ids, current_date,
+                        self.strategy_params.get("vol_window", 20),
+                    )
+                    self.strategy_params["vol_dict"] = vol_dict
+                weights = self._compute_weights(predictions, self.top_k)
 
                 for pred in predictions[: self.top_k]:
                     stock = pred["stock_id"]
@@ -518,7 +621,8 @@ class BacktestEngine:
                     exec_price_buy = price * (1 + self.slippage)
                     exec_price_sell = price * (1 - self.slippage)
 
-                    target_shares = int(target_value_per_stock / exec_price_buy / 100) * 100
+                    target_value = total_value * self.position_pct * weights.get(stock, 0)
+                    target_shares = int(target_value / exec_price_buy / 100) * 100
                     if target_shares == 0:
                         continue
 
@@ -843,6 +947,8 @@ class ETFBacktester:
         top_k: int = 5,
         rebalance_days: int = 5,
         position_pct: float = 0.95,
+        weight_strategy: str = "equal",
+        strategy_params: dict = None,
         initial_capital: float = 1000000,
         commission: float = 0.0003,
         slippage: float = 0.001,
@@ -901,6 +1007,8 @@ class ETFBacktester:
             slippage=slippage,
             top_k=top_k,
             position_pct=position_pct,
+            weight_strategy=weight_strategy,
+            strategy_params=strategy_params,
             log=log,
             log_file=log_file,
         )
@@ -1205,6 +1313,8 @@ def run_backtest(
     top_k: int = 5,
     rebalance_days: int = 5,
     position_pct: float = 0.95,
+    weight_strategy: str = "equal",
+    strategy_params: dict = None,
     initial_capital: float = 1000000,
     commission: float = 0.0003,
     slippage: float = 0.001,
@@ -1280,6 +1390,8 @@ def run_backtest(
         top_k=top_k,
         rebalance_days=rebalance_days,
         position_pct=position_pct,
+        weight_strategy=weight_strategy,
+        strategy_params=strategy_params,
         initial_capital=initial_capital,
         commission=commission,
         slippage=slippage,

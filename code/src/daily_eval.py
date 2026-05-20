@@ -156,6 +156,7 @@ REPORT_PATH = OUTPUT_DIR / "latest_report.json"
 PORTFOLIO_PATH = OUTPUT_DIR / "portfolio.json"
 PREDICTIONS_PATH = OUTPUT_DIR / "predictions.json"
 MODEL_SELECTION_PATH = OUTPUT_DIR / "model_selection.yaml"
+CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 DATA_FILE = PROJECT_ROOT / "etf_data" / "etf_74.csv"
 
 
@@ -218,10 +219,17 @@ def update_etf_data(verbose: bool = True) -> bool:
 # 模型加载
 # ============================================================
 
-def load_model_selection(path: str) -> Tuple[List[Dict], str, bool, bool]:
-    import yaml
-    with open(path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
+def load_model_selection(path: str = None, cfg_dict: dict = None) -> Tuple[List[Dict], str, bool, bool]:
+    """从 config.yaml 或旧 model_selection.yaml 加载模型选择。
+
+    优先使用 cfg_dict（来自 load_full_config），否则读取 path。
+    """
+    if cfg_dict:
+        data = cfg_dict
+    else:
+        import yaml
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
     models = []
     master = data.get("master", "")
     average_enabled = data.get("average", data.get("fusion", False))
@@ -235,6 +243,61 @@ def load_model_selection(path: str) -> Tuple[List[Dict], str, bool, bool]:
                 "enabled": enabled,
             })
     return models, master, average_enabled, voting_enabled
+
+
+def _format_strategy_info(weight_strategy, strategy_params, top_k, position_pct, commission, slippage, rebalance_days):
+    sp = strategy_params or {}
+    extra = ""
+    if weight_strategy == "softmax":
+        extra = f" T={sp.get('temperature', 1.0)}"
+    elif weight_strategy in ("risk_parity", "score_risk"):
+        extra = f" w={sp.get('vol_window', 20)}"
+    sname = {"equal": "等权", "softmax": "Softmax", "rank_linear": "线性排名",
+             "risk_parity": "风险平价", "score_risk": "评分风险"}.get(weight_strategy, weight_strategy)
+    return (
+        f"策略: {sname}{extra}"
+        f" | Top-K: {top_k}"
+        f" | 仓位: {position_pct:.0%}"
+        f" | 费率: {commission*100:.2f}%"
+        f" | 滑点: {slippage*100:.1f}%"
+        f" | 调仓: {rebalance_days}天"
+    )
+
+
+def load_full_config(config_path=None) -> dict:
+    """读取 config.yaml，返回完整配置字典（含默认值）。"""
+    defaults = {
+        "mode": "full",
+        "update_data": True,
+        "start_date": "2026-04-01",
+        "rebalance_days": 5,
+        "trade_mode": "open",
+        "initial_capital": 100000,
+        "position_pct": 0.95,
+        "commission": 0.0003,
+        "slippage": 0.001,
+        "top_k": 3,
+        "weight_strategy": "equal",
+        "strategy_params": {},
+        "models": [],
+        "average": True,
+        "voting": True,
+        "master": "first",
+        "juejin": {},
+    }
+    path = Path(config_path) if config_path else CONFIG_PATH
+    if not path.exists():
+        return defaults
+    try:
+        import yaml
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        for k, v in data.items():
+            if k in defaults and v is not None:
+                defaults[k] = v
+    except Exception as e:
+        print(f"[配置] 读取 {path} 失败: {e}")
+    return defaults
 
 
 def find_best_model(output_dir: str) -> Optional[Tuple[str, str, float]]:
@@ -366,6 +429,8 @@ def run_backtest_sequence(
     top_k: int,
     rebalance_days: int,
     position_pct: float,
+    weight_strategy: str = "equal",
+    strategy_params: dict = None,
     initial_capital: float = 1000000,
     commission: float = 0.0003,
     slippage: float = 0.001,
@@ -387,6 +452,8 @@ def run_backtest_sequence(
         slippage=slippage,
         top_k=top_k,
         position_pct=position_pct,
+        weight_strategy=weight_strategy,
+        strategy_params=strategy_params,
         log=False,
     )
 
@@ -1465,7 +1532,7 @@ def _make_model_key(m):
 
 
 def _resolve_report_key(sequences):
-    """从 model_selection.yaml 确定主序列。
+    """从 config.yaml（优先）或 model_selection.yaml 确定主序列。
 
     优先级:
       1. master 显式指定且在 sequences 中存在 → 使用
@@ -1473,20 +1540,23 @@ def _resolve_report_key(sequences):
       3. master 未指定 → 兜底: juejin → average → voting → 第一个
     """
     master = ""
-    if os.path.exists(str(MODEL_SELECTION_PATH)):
-        try:
-            import yaml
-            with open(MODEL_SELECTION_PATH, "r", encoding="utf-8") as f:
-                sel = yaml.safe_load(f)
-            master = sel.get("master", "")
-            if master == "first":
-                models = sel.get("models", [])
-                for m in models:
-                    if m.get("enabled", True):
-                        master = _make_model_key(m.get("dir", ""))
-                        break
-        except Exception:
-            pass
+    for cfg_path in (CONFIG_PATH, MODEL_SELECTION_PATH):
+        if cfg_path.exists():
+            try:
+                import yaml
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    sel = yaml.safe_load(f)
+                master = sel.get("master", "")
+                if master == "first":
+                    models = sel.get("models", [])
+                    for m in models:
+                        if m.get("enabled", True):
+                            master = _make_model_key(m.get("dir", ""))
+                            break
+                if master:
+                    break
+            except Exception:
+                pass
     if master:
         if master in sequences:
             return master
@@ -1538,6 +1608,8 @@ def daily_eval(
     start_date: str = "2026-04-01",
     rebalance_days: int = 5,
     position_pct: float = 0.95,
+    weight_strategy: str = "equal",
+    strategy_params: dict = None,
     initial_capital: float = 100000,
     trade_mode: str = "open",
 ):
@@ -1566,8 +1638,12 @@ def daily_eval(
         average_enabled = False
         voting_enabled = False
         config = {"slippage": 0.001, "commission": 0.0003}
-        if os.path.exists(str(MODEL_SELECTION_PATH)):
-            single_models, master, average_enabled, voting_enabled = load_model_selection(str(MODEL_SELECTION_PATH))
+        if CONFIG_PATH.exists():
+            cfg_dict = load_full_config()
+            single_models, master, average_enabled, voting_enabled = load_model_selection(cfg_dict=cfg_dict)
+        elif os.path.exists(str(MODEL_SELECTION_PATH)):
+            single_models, master, average_enabled, voting_enabled = load_model_selection(path=str(MODEL_SELECTION_PATH))
+        if single_models:
             enabled_models = [m for m in single_models if m.get("enabled", True)]
             if verbose:
                 print()
@@ -1645,6 +1721,8 @@ def daily_eval(
                 top_k=top_k,
                 rebalance_days=rebalance_days,
                 position_pct=position_pct,
+                weight_strategy=weight_strategy,
+                strategy_params=strategy_params,
                 initial_capital=initial_capital,
                 commission=config.get("commission", 0.0003),
                 slippage=config.get("slippage", 0.001),
@@ -1678,6 +1756,8 @@ def daily_eval(
                 top_k=top_k,
                 rebalance_days=rebalance_days,
                 position_pct=position_pct,
+                weight_strategy=weight_strategy,
+                strategy_params=strategy_params,
                 initial_capital=initial_capital,
                 commission=config.get("commission", 0.0003),
                 slippage=config.get("slippage", 0.001),
@@ -1733,6 +1813,8 @@ def daily_eval(
                 top_k=top_k,
                 rebalance_days=rebalance_days,
                 position_pct=position_pct,
+                weight_strategy=weight_strategy,
+                strategy_params=strategy_params,
                 initial_capital=initial_capital,
                 commission=config.get("commission", 0.0003),
                 slippage=config.get("slippage", 0.001),
@@ -2047,6 +2129,11 @@ def daily_eval(
             "sequences": sequences_summary,
             "hs300_curve": hs300_curve,
             "trade_mode": trade_mode,
+            "strategy_info": _format_strategy_info(
+                weight_strategy, strategy_params, top_k, position_pct,
+                config.get("commission", 0.0003), config.get("slippage", 0.001),
+                rebalance_days,
+            ),
         }
 
         # 计算持仓变动（相对上一次调仓）
@@ -2196,13 +2283,17 @@ def generate_predictions_only(
         single_models = []
         average_enabled = False
         voting_enabled = False
-        if os.path.exists(str(MODEL_SELECTION_PATH)):
-            single_models, master, average_enabled, voting_enabled = load_model_selection(str(MODEL_SELECTION_PATH))
+        if CONFIG_PATH.exists():
+            cfg_dict = load_full_config()
+            single_models, master, average_enabled, voting_enabled = load_model_selection(cfg_dict=cfg_dict)
+        elif os.path.exists(str(MODEL_SELECTION_PATH)):
+            single_models, master, average_enabled, voting_enabled = load_model_selection(path=str(MODEL_SELECTION_PATH))
+        if single_models:
             enabled_models = [m for m in single_models if m.get("enabled", True)]
             if verbose:
                 print(f"  平均: {'开' if average_enabled else '关'}, 投票: {'开' if voting_enabled else '关'}, 模型数: {len(enabled_models)}")
             single_models = enabled_models
-        else:
+        if not single_models:
             config_module = __import__(config_name, fromlist=["config"])
             config = config_module.config.copy()
             output_dir = config.get("output_dir", "./model/default")
@@ -2382,6 +2473,8 @@ def run_from_predictions(
     start_date: str = "2026-04-01",
     rebalance_days: int = 5,
     position_pct: float = 0.95,
+    weight_strategy: str = "equal",
+    strategy_params: dict = None,
     initial_capital: float = 100000,
     config_name: str = "config",
     trade_mode: str = "open",
@@ -2440,6 +2533,8 @@ def run_from_predictions(
                 top_k=top_k,
                 rebalance_days=rebalance_days,
                 position_pct=position_pct,
+                weight_strategy=weight_strategy,
+                strategy_params=strategy_params,
                 initial_capital=initial_capital,
                 commission=config.get("commission", 0.0003),
                 slippage=config.get("slippage", 0.001),
@@ -2598,6 +2693,11 @@ def run_from_predictions(
             "sequences": sequences_summary,
             "hs300_curve": hs300_curve,
             "trade_mode": trade_mode,
+            "strategy_info": _format_strategy_info(
+                weight_strategy, strategy_params, top_k, position_pct,
+                config.get("commission", 0.0003), config.get("slippage", 0.001),
+                rebalance_days,
+            ),
         }
 
         with open(REPORT_PATH, "w", encoding="utf-8") as f:
@@ -2659,6 +2759,7 @@ def run_from_juejin(verbose=True, start_date="2026-04-01", initial_capital=10000
     from send_report import send_report
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cfg = load_full_config()
 
     if not JUEJIN_STATE_PATH.exists():
         print(f"错误: 未找到 {JUEJIN_STATE_PATH}")
@@ -2939,6 +3040,12 @@ def run_from_juejin(verbose=True, start_date="2026-04-01", initial_capital=10000
             "hs300_curve": hs300_curve,
             "trade_mode": trade_mode,
             "source": source,
+            "strategy_info": _format_strategy_info(
+                cfg.get("weight_strategy", "equal"), cfg.get("strategy_params", {}),
+                cfg.get("top_k", 3), cfg.get("position_pct", 0.95),
+                cfg.get("commission", 0.0003), cfg.get("slippage", 0.001),
+                cfg.get("rebalance_days", 5),
+            ),
         }
 
         with open(REPORT_PATH, "w", encoding="utf-8") as f:
@@ -2985,25 +3092,64 @@ if __name__ == "__main__":
     import multiprocessing as mp
 
     parser = argparse.ArgumentParser(description="每日定时测评")
-    parser.add_argument("--start-date", type=str, default="2026-04-01", help="测评起始日期")
-    parser.add_argument("--config", type=str, default="config", help="配置模块名")
-    parser.add_argument("--no-update", action="store_true", help="跳过数据更新")
-    parser.add_argument("--topk", type=int, default=3, help="Top-K推荐数量")
-    parser.add_argument("--rebalance-days", type=int, default=5, help="调仓频率(天)")
-    parser.add_argument("--position-pct", type=float, default=0.95, help="仓位比例")
-    parser.add_argument("--quiet", action="store_true", help="静默模式（已弃用，默认即精简）")
-    parser.add_argument("--debug", action="store_true", help="打印详细调试日志")
+    # --- 模式选择（CLI 优先于 config.yaml）---
     parser.add_argument("--predictions-only", action="store_true", help="仅保存预测信号，不执行回测")
     parser.add_argument("--from-predictions", action="store_true", help="从已保存的预测信号生成日报（跳过模型加载）")
     parser.add_argument("--update-only", action="store_true", help="仅更新ETF数据，不执行任何其他操作")
     parser.add_argument("--from-juejin", action="store_true", help="从已保存的 juejin_state.json 生成日报（跳过模型和回测）")
-    parser.add_argument("--trade-mode", type=str, default="open", choices=["open", "close"], help="交易模式: open（开盘交易，用前日收盘特征）或 close（收盘交易，用当日收盘特征）")
+    # --- 参数覆盖（默认 None，使用 config.yaml 的值）---
+    parser.add_argument("--start-date", type=str, default=None, help="测评起始日期")
+    parser.add_argument("--config", type=str, default=None, help="配置模块名")
+    parser.add_argument("--no-update", action="store_true", help="跳过数据更新")
+    parser.add_argument("--topk", type=int, default=None, help="Top-K推荐数量")
+    parser.add_argument("--rebalance-days", type=int, default=None, help="调仓频率(天)")
+    parser.add_argument("--position-pct", type=float, default=None, help="仓位比例")
+    parser.add_argument("--debug", action="store_true", help="打印详细调试日志")
+    parser.add_argument("--trade-mode", type=str, default=None, choices=["open", "close"], help="交易模式: open（开盘交易，用前日收盘特征）或 close（收盘交易，用当日收盘特征）")
+    parser.add_argument("--weight-strategy", type=str, default=None, choices=["equal", "softmax", "rank_linear", "risk_parity", "score_risk"], help="加权策略")
+    parser.add_argument("--weight-temperature", type=float, default=None, help="softmax 温度参数，存入 strategy_params['temperature']")
+    parser.add_argument("--volatility-window", type=int, default=None, help="波动率计算回看天数，存入 strategy_params['vol_window']")
     parser.add_argument("--clear", action="store_true", help="先清除旧输出文件")
     args = parser.parse_args()
 
+    # --- 加载 config.yaml（主配置源）---
+    cfg = load_full_config()
+
+    # --- CLI 参数覆盖 config.yaml ---
+    def _cli(key, cfg_key=None):
+        v = getattr(args, key, None)
+        return v if v is not None else cfg.get(cfg_key or key)
+
+    start_date = _cli("start_date")
+    top_k = _cli("topk", "top_k")
+    rebalance_days = _cli("rebalance_days")
+    position_pct = _cli("position_pct")
+    trade_mode = _cli("trade_mode")
+    weight_strategy = _cli("weight_strategy")
+    config_name = _cli("config") or "config"
+    update_data = cfg.get("update_data", True) and not args.no_update
+
+    # 策略参数
+    strategy_params = dict(cfg.get("strategy_params", {}))
+    if args.weight_temperature is not None:
+        strategy_params["temperature"] = args.weight_temperature
+    if args.volatility_window is not None:
+        strategy_params["vol_window"] = args.volatility_window
+
+    # --- 确定运行模式 ---
+    mode = cfg.get("mode", "full")
+    if args.update_only:
+        mode = "update_only"
+    elif args.predictions_only:
+        mode = "predictions_only"
+    elif args.from_predictions:
+        mode = "from_predictions"
+    elif args.from_juejin:
+        mode = "from_juejin"
+
     if args.clear:
         import glob
-        kept = {"model_selection.yaml"}
+        kept = {"config.yaml", "model_selection.yaml"}
         for fp in glob.glob(str(OUTPUT_DIR / "*")):
             if os.path.basename(fp) not in kept:
                 if os.path.isdir(fp):
@@ -3015,7 +3161,7 @@ if __name__ == "__main__":
 
     mp.set_start_method("spawn", force=True)
 
-    if args.update_only:
+    if mode == "update_only":
         update_etf_data(verbose=True)
         try:
             import pandas as pd
@@ -3028,7 +3174,6 @@ if __name__ == "__main__":
             print(f"  股票数量: {_df['股票代码'].nunique()}")
             print(f"  总交易日: {len(_dates)}")
             print(f"  日期范围: {_dates[0]} ~ {_last}")
-            # 数据质量检查
             _issues = []
             if _last_dt.weekday() >= 5:
                 _issues.append(f"最新日期 {_last} 是{['周六','周日'][_last_dt.weekday()-5]}，非交易日")
@@ -3040,7 +3185,7 @@ if __name__ == "__main__":
                 _all_flat = (_merged["收盘"] == _merged["开盘"]).all()
                 _all_vs_prev = (_merged["收盘"] == _merged["prev_close"]).all()
                 if _all_flat and _all_vs_prev:
-                    _issues.append(f"最新日期 {_last} 所有 {len(_merged)} 只股票 open=close=high=low=昨收，数据无效（可能是盘前或休市抓取）")
+                    _issues.append(f"最新日期 {_last} 所有 {len(_merged)} 只股票 open=close=high=low=昨收，数据无效")
                 elif _all_flat:
                     _flat_pct = (_merged["收盘"] == _merged["开盘"]).mean() * 100
                     _issues.append(f"最新日期 {_last} {_flat_pct:.0f}% 的股票 open=close，数据可能不完整")
@@ -3056,35 +3201,39 @@ if __name__ == "__main__":
         except Exception as _e:
             print(f"\n无法读取数据文件: {_e}")
         print("\n数据更新完成。")
-    elif args.from_juejin:
-        run_from_juejin(verbose=args.debug, start_date=args.start_date, trade_mode=args.trade_mode)
-    elif args.predictions_only:
+    elif mode == "from_juejin":
+        run_from_juejin(verbose=args.debug, start_date=start_date, trade_mode=trade_mode)
+    elif mode == "predictions_only":
         generate_predictions_only(
-            config_name=args.config,
-            top_k=args.topk,
+            config_name=config_name,
+            top_k=top_k,
             verbose=args.debug,
-            start_date=args.start_date,
-            rebalance_days=args.rebalance_days,
-            position_pct=args.position_pct,
+            start_date=start_date,
+            rebalance_days=rebalance_days,
+            position_pct=position_pct,
         )
-    elif args.from_predictions:
+    elif mode == "from_predictions":
         run_from_predictions(
-            top_k=args.topk,
+            top_k=top_k,
             verbose=args.debug,
-            start_date=args.start_date,
-            rebalance_days=args.rebalance_days,
-            position_pct=args.position_pct,
-            config_name=args.config,
-            trade_mode=args.trade_mode,
+            start_date=start_date,
+            rebalance_days=rebalance_days,
+            position_pct=position_pct,
+            weight_strategy=weight_strategy,
+            strategy_params=strategy_params,
+            config_name=config_name,
+            trade_mode=trade_mode,
         )
     else:
         daily_eval(
-            config_name=args.config,
-            update_data=not args.no_update,
-            top_k=args.topk,
+            config_name=config_name,
+            update_data=update_data,
+            top_k=top_k,
             verbose=args.debug,
-            start_date=args.start_date,
-            rebalance_days=args.rebalance_days,
-            position_pct=args.position_pct,
-            trade_mode=args.trade_mode,
+            start_date=start_date,
+            rebalance_days=rebalance_days,
+            position_pct=position_pct,
+            weight_strategy=weight_strategy,
+            strategy_params=strategy_params,
+            trade_mode=trade_mode,
         )

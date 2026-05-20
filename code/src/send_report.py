@@ -436,7 +436,8 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
                        equity_data=None, scatter_section="", health_section="",
                        trade_mode="open", pred_signals_section="",
                        market_monitor_section="", pre_holdings=None,
-                       rebalance_win_rate=None, source="", is_juejin=False):
+                       rebalance_win_rate=None, source="", is_juejin=False,
+                       strategy_info=""):
     """构建报告HTML，各组件已预先准备好"""
     # 排行数据
     _rank_map = _compute_rank_maps(date) if 'date' in locals() or date else {}
@@ -667,6 +668,7 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
     juejin_badge = '<span style="display:inline-block;background:#e74c3c;color:#fff;font-size:10px;font-weight:bold;padding:1px 6px;border-radius:3px;margin-left:6px;">掘金</span>' if is_juejin else ""
     source_tag = f' | 来源: {source}' if source else ""
     html = html.replace("{{MODEL_INFO}}", f"模型: {model_display}{juejin_badge}{source_tag} | 日期: {date} | 模式: {mode_label} | 下个调仓日: {next_rebalance}")
+    html = html.replace("{{STRATEGY_INFO}}", strategy_info if strategy_info else "")
     html = html.replace("{{TOTAL_BAR}}", total_bar)
     html = html.replace("{{METRICS_ROWS}}", metrics_rows)
     html = html.replace("{{WINDOW_ROWS}}", window_rows)
@@ -877,6 +879,7 @@ def send_report(model_key=None, verbose=False):
         rebalance_win_rate=rebalance_win_rate,
         source=source,
         is_juejin=(model_key == "juejin"),
+        strategy_info=report.get("strategy_info", ""),
     )
 
     msg = MIMEMultipart()

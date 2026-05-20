@@ -1,0 +1,67 @@
+# ============================================================
+# ETF 策略主配置
+# 放在项目根目录，是单一配置源。
+# CLI 参数可覆盖，但日常使用只需编辑此文件。
+# ============================================================
+
+# 运行模式: full | predictions_only | update_only | from_predictions | from_juejin
+mode: full
+
+# 是否更新数据（仅 mode=full 时有效）
+update_data: true
+
+# 日期与调仓
+start_date: "2026-04-01"
+rebalance_days: 5
+trade_mode: "open"           # open（开盘交易）| close（收盘交易）
+
+# 资金与成本
+initial_capital: 100000
+position_pct: 0.95           # 仓位比例
+commission: 0.0003           # 手续费率
+slippage: 0.001              # 滑点
+
+# Top-K 与加权策略
+top_k: 3
+weight_strategy: "equal"     # equal | softmax | rank_linear | risk_parity | score_risk
+strategy_params:
+  temperature: 1.0           # softmax 温度
+  vol_window: 20             # 波动率回看天数
+
+# ---- 模型与序列 ----
+
+# 模型列表
+models:
+  - dir: juejin/live/bayes_patchtst_74_3_2026-01-01_2026-03-31/exp_27
+    file: best_model_ndcg.pth
+    enabled: true
+  - dir: juejin/live/bayes_patchtst_74_3_2026-01-01_2026-03-31/exp_88
+    file: best_model_sliding.pth
+    enabled: true
+  - dir: juejin/live/bayes_patchtst_74_3_2026-01-01_2026-03-31/exp_100
+    file: best_model_ndcg.pth
+    enabled: true
+
+# 融合序列
+average: true                # 启用平均模型
+voting: true                 # 启用投票模型
+
+# 主序列
+#   first         → 自动选第一个启用模型
+#   juejin        → 掘金回测
+#   average       → 平均模型
+#   voting        → 投票模型
+#   <model_key>   → 指定模型
+master: "first"
+
+# ---- Juejin 掘金回测专属 ----
+# 此处配置覆盖顶层同名参数
+juejin:
+  top_k: 3
+  rebalance_days: 5
+  start_date: "2026-04-01"
+  trade_mode: "open"
+  position_pct: 0.95
+  weight_strategy: "equal"
+  strategy_params:
+    vol_window: 20

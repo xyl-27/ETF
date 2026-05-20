@@ -23,12 +23,16 @@ REBALANCE_DAYS = 5
 START_DATE = "2026-04-01"
 TRADE_MODE = "open"
 POSITION_PCT = 0.95
+WEIGHT_STRATEGY = "equal"
+STRATEGY_PARAMS = {}
+CACHED_CSV = None
+DATA_CSV_PATH = os.path.join(os.path.dirname(os.path.dirname(YAML_PATH)), "etf_data", "etf_74.csv")
 
 
 def load_config_from_yaml():
     """从 model_selection.yaml 读取掘金策略配置"""
     import yaml
-    global MODEL_KEY, TOP_K, REBALANCE_DAYS, START_DATE, TRADE_MODE, POSITION_PCT
+    global MODEL_KEY, TOP_K, REBALANCE_DAYS, START_DATE, TRADE_MODE, POSITION_PCT, WEIGHT_STRATEGY, STRATEGY_PARAMS, CACHED_CSV
     try:
         with open(YAML_PATH, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
@@ -38,6 +42,13 @@ def load_config_from_yaml():
         START_DATE = str(jcfg.get("start_date", START_DATE))
         TRADE_MODE = str(jcfg.get("trade_mode", TRADE_MODE))
         POSITION_PCT = float(jcfg.get("position_pct", POSITION_PCT))
+        WEIGHT_STRATEGY = str(jcfg.get("weight_strategy", WEIGHT_STRATEGY))
+        raw_params = jcfg.get("strategy_params", {})
+        STRATEGY_PARAMS = dict(raw_params)
+        if WEIGHT_STRATEGY == "softmax":
+            STRATEGY_PARAMS.setdefault("temperature", float(jcfg.get("weight_temperature", 1.0)))
+        if WEIGHT_STRATEGY in ("risk_parity", "score_risk"):
+            STRATEGY_PARAMS.setdefault("vol_window", int(raw_params.get("vol_window", 20)))
         if data.get("model_key"):
             MODEL_KEY = str(data["model_key"])
         else:
@@ -303,14 +314,35 @@ def algo(context):
                                  position_side=PositionSide_Long)
             print(f"[策略] 卖出 {local}({pos['symbol']})")
 
-    # 买入 Top-K（等权，与本地回测 backtest.py:position_pct 一致）
+    # 买入 Top-K（按加权策略分配仓位）
+    import sys
+    sys.path.insert(0, r"C:\Users\xyl\Desktop\ETF")
+    from src.backtest import compute_weights, compute_volatility
+
+    _params = dict(STRATEGY_PARAMS)
+    if WEIGHT_STRATEGY in ("risk_parity", "score_risk"):
+        import pandas as pd
+        global CACHED_CSV
+        if CACHED_CSV is None and os.path.exists(DATA_CSV_PATH):
+            CACHED_CSV = pd.read_csv(DATA_CSV_PATH, dtype={"股票代码": str})
+        if CACHED_CSV is not None:
+            top_ids = [p["stock_id"] for p in today_preds[:TOP_K]]
+            _params["vol_dict"] = compute_volatility(
+                CACHED_CSV, top_ids, str(context.now.date()),
+                _params.get("vol_window", 20),
+            )
+    _weights = compute_weights(today_preds, TOP_K, WEIGHT_STRATEGY, _params) if top_k_symbols else {}
     if top_k_symbols:
-        percent = POSITION_PCT / len(top_k_symbols)
         for sym in top_k_symbols:
+            local = gm_to_local(sym)
+            w = _weights.get(local, 0)
+            percent = POSITION_PCT * w
+            if percent <= 0:
+                continue
             order_target_percent(symbol=sym, percent=percent,
                                  order_type=OrderType_Market,
                                  position_side=PositionSide_Long)
-            print(f"[策略] 买入 {gm_to_local(sym)}({sym}) 目标权重 {percent:.2%}")
+            print(f"[策略] 买入 {local}({sym}) 目标权重 {percent:.2%}")
 
     print(f"[策略] 调仓完成")
 
