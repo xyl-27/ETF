@@ -73,12 +73,11 @@ def _intraday_y_rank(df, max_label=31):
     return ranks.values
 
 
-def prepare_data(processed, feature_columns, train_dates, val_dates):
+def prepare_data(processed, feature_columns, train_dates, val_dates=None):
     raw_cols = {"股票代码", "日期", "label"}
     feat_cols = [c for c in feature_columns if c in processed.columns and c not in raw_cols]
 
     train_df = processed[processed["日期"].isin(train_dates)].sort_values("日期").copy()
-    val_df = processed[processed["日期"].isin(val_dates)].sort_values("日期").copy()
 
     def _split(df):
         X = df[feat_cols].values.astype(np.float32)
@@ -89,8 +88,11 @@ def prepare_data(processed, feature_columns, train_dates, val_dates):
         return X, y_rank, y_cont, groups
 
     X_tr, y_rk, y_ct, g_tr = _split(train_df)
-    X_va, y_rv, y_cv, g_va = _split(val_df)
-    return X_tr, y_rk, y_ct, g_tr, X_va, y_rv, y_cv, g_va
+    if val_dates is not None:
+        val_df = processed[processed["日期"].isin(val_dates)].sort_values("日期").copy()
+        X_va, y_rv, y_cv, g_va = _split(val_df)
+        return X_tr, y_rk, y_ct, g_tr, X_va, y_rv, y_cv, g_va
+    return X_tr, y_rk, y_ct, g_tr
 
 
 def train_xgb_ranker(X_train, y_train, groups_train, X_val, y_val, groups_val, params):
@@ -112,11 +114,12 @@ def train_xgb_ranker(X_train, y_train, groups_train, X_val, y_val, groups_val, p
         "verbosity": 0,
         "tree_method": "hist",
     }
+    es = params.get("early_stop", 0)
     model = xgb.train(
         xgb_params, dtrain,
         num_boost_round=params["num_round"],
-        evals=[(dtrain, "train"), (dval, "val")],
-        early_stopping_rounds=params["early_stop"],
+        evals=[(dtrain, "train"), (dval, "val")] if es else None,
+        early_stopping_rounds=es or None,
         verbose_eval=False,
     )
     return model
@@ -130,20 +133,23 @@ def train_lgb_ranker(X_train, y_train, groups_train, X_val, y_val, groups_val, p
         "objective": params.get("lgb_objective", "lambdarank"),
         "metric": "ndcg",
         "ndcg_eval_at": [3],
-        "learning_rate": params["learning_rate"],
-        "max_depth": params["max_depth"],
+        "learning_rate": params.get("learning_rate", 0.05),
+        "max_depth": params.get("max_depth", 6),
         "num_leaves": params.get("num_leaves", 31),
-        "subsample": params["subsample"],
-        "feature_fraction": params["colsample_bytree"],
-        "lambda_l2": params["l2_reg"],
-        "seed": params["seed"],
+        "subsample": params.get("subsample", 0.8),
+        "feature_fraction": params.get("colsample_bytree", 0.8),
+        "lambda_l2": params.get("l2_reg", 1.0),
+        "seed": params.get("seed", 42),
         "verbosity": -1,
     }
+    cb = [lgb.log_evaluation(0)]
+    if params.get("early_stop", 0) > 0:
+        cb.append(lgb.early_stopping(params["early_stop"]))
     model = lgb.train(
         lgb_params, train_data,
         num_boost_round=params["num_round"],
-        valid_sets=[val_data],
-        callbacks=[lgb.early_stopping(params["early_stop"]), lgb.log_evaluation(0)],
+        valid_sets=[val_data] if params.get("early_stop", 0) > 0 else None,
+        callbacks=cb,
     )
     return model
 
@@ -300,6 +306,7 @@ def main():
     ))
     print(f"  Folds: {len(cv_splits)}")
     cv_results = {}
+    cv_best_iters = []
     for fid, tr_d, va_d in cv_splits:
         X_tr, y_rk, y_ct, g_tr, X_va, y_rv, y_cv, g_va = prepare_data(
             processed, feature_columns, tr_d, va_d
@@ -309,23 +316,35 @@ def main():
         metrics = evaluate_ranker(m, X_va, y_cv, g_va, top_k=3)
         print(f"    final_score={metrics['final_score']:.4f}  ndcg={metrics['ndcg']:.4f}  hit={metrics['hit_rate']:.4f}")
         cv_results[str(fid)] = metrics["final_score"]
+        bi = getattr(m, "best_iteration", getattr(m, "best_iteration_", None))
+        if bi is not None:
+            cv_best_iters.append(bi)
         fd = os.path.join(args.output_dir, f"fold_{fid}")
         os.makedirs(fd, exist_ok=True)
         joblib.dump(m, os.path.join(fd, "model.pkl"))
         with open(os.path.join(fd, "config.json"), "w") as f:
             json.dump({
-                "num_round": getattr(m, "best_iteration", getattr(m, "best_iteration_", args.num_round)),
+                "num_round": bi or args.num_round,
                 "train_dates": [str(d.date()) for d in [tr_d[0], tr_d[-1]]],
                 "val_dates": [str(d.date()) for d in [va_d[0], va_d[-1]]],
                 "metrics": metrics,
             }, f, indent=2)
 
-    # 3. Held-out validation
-    print(f"\n[3] Retrain on full pool → held-out eval {args.val_start}~{args.val_end}...")
-    X_tr, y_rk, y_ct, g_tr, X_va, y_rv, y_cv, g_va = prepare_data(
+    # 3. Retrain on full pool with fixed rounds (median of CV best iterations)
+    fixed_rounds = int(np.median(cv_best_iters)) if cv_best_iters else args.num_round
+    print(f"\n[3] Retrain on full pool ({fixed_rounds} fixed rounds, no early stopping)...")
+    print(f"    CV best iterations: {cv_best_iters} → median = {fixed_rounds}")
+    X_tr, y_rk, y_ct, g_tr = prepare_data(processed, feature_columns, pool_dates, None)[:4]
+    retrain_params = dict(params)
+    retrain_params["num_round"] = fixed_rounds
+    retrain_params["early_stop"] = 0
+    model = train_fn(X_tr, y_rk, g_tr, X_tr, y_rk, g_tr, retrain_params)
+
+    # Evaluate on held-out (pure test, never seen by model)
+    print(f"\n[4] Pure test eval on {args.val_start}~{args.val_end}...")
+    _, _, _, _, X_va, _, y_cv, g_va = prepare_data(
         processed, feature_columns, pool_dates, held_out_dates
     )
-    model = train_fn(X_tr, y_rk, g_tr, X_va, y_rv, g_va, params)
     held_out_metrics = evaluate_ranker(model, X_va, y_cv, g_va, top_k=3)
     print(f"  final_score={held_out_metrics['final_score']:.4f}")
     print(f"  ndcg@3={held_out_metrics['ndcg']:.4f}")
@@ -340,10 +359,12 @@ def main():
             "train_dates": [str(pool_dates[0].date()), str(pool_dates[-1].date())],
             "val_dates": [str(held_out_dates[0].date()), str(held_out_dates[-1].date())],
             "metrics": held_out_metrics,
-            "best_iteration": getattr(model, "best_iteration", getattr(model, "best_iteration_", None)),
-        }, f, indent=2)
+            "fixed_rounds": fixed_rounds,
+            "add_cs_features": args.add_cs_features,
+            "feature_columns": feature_columns,
+        }, f, indent=2, default=str)
 
-    # 4. Save configs
+    # 4. Save root config
     fs_list = list(cv_results.values())
     cv_mean = float(np.mean(fs_list))
     cv_std = float(np.std(fs_list))
@@ -354,6 +375,8 @@ def main():
             "num_features": len(feature_columns),
             "add_cs_features": args.add_cs_features,
             "cv_folds": len(cv_splits),
+            "cv_best_iters": cv_best_iters,
+            "fixed_rounds": fixed_rounds,
             "cv_metrics": {"final_score_mean": cv_mean, "final_score_std": cv_std},
             "held_out_metrics": held_out_metrics,
             "params": params,
@@ -363,8 +386,9 @@ def main():
         }, f, indent=2, default=str)
 
     print(f"\n{'='*60}")
-    print(f"CV final_score: {cv_mean:.4f} +/- {cv_std:.4f}")
-    print(f"Held-out final_score: {held_out_metrics['final_score']:.4f}")
+    print(f"CV final_score:      {cv_mean:.4f} +/- {cv_std:.4f}")
+    print(f"CV best iterations:  {cv_best_iters} → fixed={fixed_rounds}")
+    print(f"Test final_score:    {held_out_metrics['final_score']:.4f}")
     print(f"Output: {os.path.abspath(args.output_dir)}")
     print("Done!")
 

@@ -39,6 +39,7 @@ os.chdir(PROJECT_ROOT)
 sys.path.insert(0, str(PROJECT_ROOT / "code" / "src"))
 
 from backtest import BacktestEngine, ETFBacktester
+from ml_backtester import MLBacktester
 
 # GM Python 路径（用于数据下载，该 Python 装有 gm SDK）
 # 可通过环境变量 GM_PYTHON 覆盖，默认 D:\opt\python3.12.4\python.exe
@@ -259,6 +260,7 @@ def load_model_selection(path: str = None, cfg_dict: dict = None) -> Tuple[List[
             models.append({
                 "exp_dir": m.get("dir", ""),
                 "model_file": m.get("file", ""),
+                "type": m.get("type", "dl"),
                 "enabled": enabled,
             })
     return models, master, average_enabled, voting_enabled
@@ -1710,23 +1712,50 @@ def daily_eval(
 
         if verbose:
             print(f"\n[3/4] 加载并缓存数据...")
-        cached_data, cached_features = ETFBacktester.load_data_once(
-            data_path=str(DATA_FILE),
-            scaler_path=scaler_path,
-            feature_num=feature_num,
-            verbose=False,
-        )
+
+        model_types = set(m.get("type", "dl") for m in single_models)
+        has_ml = bool(model_types & {"xgb", "lightgbm", "catboost"})
+        has_dl = "dl" in model_types
+
+        cached_data = cached_features = None
+        ml_cached_data = None
+
+        if has_dl:
+            if verbose:
+                print(f"  加载 DL 数据...")
+            cached_data, cached_features = ETFBacktester.load_data_once(
+                data_path=str(DATA_FILE),
+                scaler_path=scaler_path,
+                feature_num=feature_num,
+                verbose=False,
+            )
+        if has_ml:
+            if verbose:
+                print(f"  加载 ML 数据...")
+            ml_cached_data = MLBacktester.load_data_once(
+                data_path=str(DATA_FILE),
+                add_cs_features=True,
+            )
 
         single_backtesters = []
         for m in single_models:
-            bt = ETFBacktester.from_cached_data(
-                model_dir=m["exp_dir"],
-                cached_data=cached_data,
-                cached_features=cached_features,
-                device=device,
-                model_file=m["model_file"],
-                verbose=False,
-            )
+            mtype = m.get("type", "dl")
+            if mtype in ("xgb", "lightgbm", "catboost"):
+                bt = MLBacktester.from_cached_data(
+                    model_dir=m["exp_dir"],
+                    cached_data=ml_cached_data,
+                    model_file=m["model_file"],
+                    verbose=False,
+                )
+            else:
+                bt = ETFBacktester.from_cached_data(
+                    model_dir=m["exp_dir"],
+                    cached_data=cached_data,
+                    cached_features=cached_features,
+                    device=device,
+                    model_file=m["model_file"],
+                    verbose=False,
+                )
             single_backtesters.append((m, bt))
 
         print(f"[3/4] 运行回测...")
@@ -2343,23 +2372,51 @@ def generate_predictions_only(
 
         if verbose:
             print(f"\n[3/4] 加载数据并缓存...")
-        first_model = single_models[0]
-        scaler_path = os.path.join(first_model["exp_dir"], "scaler.pkl")
-        config_path = os.path.join(first_model["exp_dir"], "config.json")
-        with open(config_path, "r") as f:
-            first_config = json.load(f)
-        feature_num = first_config["feature_num"]
 
-        cached_data, cached_features = ETFBacktester.load_data_once(
-            data_path=str(DATA_FILE), scaler_path=scaler_path, feature_num=feature_num, verbose=False,
-        )
+        model_types = set(m.get("type", "dl") for m in single_models)
+        has_ml = bool(model_types & {"xgb", "lightgbm", "catboost"})
+        has_dl = "dl" in model_types
+
+        cached_data = cached_features = None
+        ml_cached_data = None
+
+        if has_dl:
+            first_model = single_models[0]
+            scaler_path = os.path.join(first_model["exp_dir"], "scaler.pkl")
+            config_path = os.path.join(first_model["exp_dir"], "config.json")
+            with open(config_path, "r") as f:
+                first_config = json.load(f)
+            feature_num = first_config["feature_num"]
+
+            if verbose:
+                print(f"  加载 DL 数据...")
+            cached_data, cached_features = ETFBacktester.load_data_once(
+                data_path=str(DATA_FILE), scaler_path=scaler_path, feature_num=feature_num, verbose=False,
+            )
+
+        if has_ml:
+            if verbose:
+                print(f"  加载 ML 数据...")
+            ml_cached_data = MLBacktester.load_data_once(
+                data_path=str(DATA_FILE),
+                add_cs_features=True,
+            )
 
         single_backtesters = []
         for m in single_models:
-            bt = ETFBacktester.from_cached_data(
-                model_dir=m["exp_dir"], cached_data=cached_data, cached_features=cached_features,
-                device=device, model_file=m["model_file"], verbose=False,
-            )
+            mtype = m.get("type", "dl")
+            if mtype in ("xgb", "lightgbm", "catboost"):
+                bt = MLBacktester.from_cached_data(
+                    model_dir=m["exp_dir"],
+                    cached_data=ml_cached_data,
+                    model_file=m["model_file"],
+                    verbose=False,
+                )
+            else:
+                bt = ETFBacktester.from_cached_data(
+                    model_dir=m["exp_dir"], cached_data=cached_data, cached_features=cached_features,
+                    device=device, model_file=m["model_file"], verbose=False,
+                )
             single_backtesters.append((m, bt))
 
         if verbose:
