@@ -144,7 +144,7 @@ def train_lgb_ranker(X_train, y_train, groups_train, X_val, y_val, groups_val, p
     }
     cb = [lgb.log_evaluation(0)]
     if params.get("early_stop", 0) > 0:
-        cb.append(lgb.early_stopping(params["early_stop"]))
+        cb.append(lgb.early_stopping(params["early_stop"], verbose=False))
     model = lgb.train(
         lgb_params, train_data,
         num_boost_round=params["num_round"],
@@ -159,8 +159,8 @@ def train_cb_ranker(X_train, y_train, groups_train, X_val, y_val, groups_val, pa
     def _to_ids(groups):
         return np.repeat(np.arange(len(groups)), groups).astype(np.int32)
     train_pool = Pool(X_train, label=y_train, group_id=_to_ids(groups_train))
-    val_pool = Pool(X_val, label=y_val, group_id=_to_ids(groups_val))
-    model = CatBoost({
+    es = params.get("early_stop", 0)
+    cb_params = {
         "loss_function": "YetiRank",
         "learning_rate": params.get("learning_rate", 0.03),
         "depth": params.get("max_depth", 6),
@@ -168,11 +168,17 @@ def train_cb_ranker(X_train, y_train, groups_train, X_val, y_val, groups_val, pa
         "colsample_bylevel": params.get("colsample_bytree", 0.8),
         "l2_leaf_reg": params.get("l2_reg", 1.0),
         "random_seed": params.get("seed", 42),
-        "early_stopping_rounds": params.get("early_stop", 50),
         "verbose": False,
         "thread_count": -1,
-    })
-    model.fit(train_pool, eval_set=val_pool, plot=False)
+    }
+    if es > 0:
+        cb_params["early_stopping_rounds"] = es
+        val_pool = Pool(X_val, label=y_val, group_id=_to_ids(groups_val))
+        model = CatBoost(cb_params)
+        model.fit(train_pool, eval_set=val_pool, plot=False)
+    else:
+        model = CatBoost(cb_params)
+        model.fit(train_pool, plot=False)
     return model
 
 
@@ -220,6 +226,76 @@ def evaluate_ranker(model, X_val, y_val_cont, groups_val, top_k=3):
         "hit_rate": float(np.mean(hit_rates)) if hit_rates else 0.0,
         "mrr": float(np.mean(mrr_scores)) if mrr_scores else 0.0,
     }
+
+
+def compute_per_date_metrics(y_pred_2d, y_true_2d, top_k=3):
+    from scipy.stats import spearmanr
+    n_days = y_pred_2d.shape[0]
+    keys = [
+        "final_score", "ndcg", "hit_rate", "mrr",
+        "pred_return_sum", "max_return_sum", "random_return_sum",
+        "excess_return", "proximity_score", "rank_ic",
+        "precision", "recall",
+    ]
+    per_day = {k: [] for k in keys}
+    for i in range(n_days):
+        valid_true = y_true_2d[i]
+        valid_pred = y_pred_2d[i]
+        N = len(valid_true)
+        sorted_true = np.sort(valid_true)[::-1]
+        true_top = sorted_true[:top_k]
+        pred_top_idx = np.argsort(-valid_pred)[:top_k]
+        pred_top = valid_true[pred_top_idx]
+        true_top_idx = np.argsort(-valid_true)[:top_k]
+        # pred_return_sum / max_return_sum / random_return_sum
+        pred_sum = pred_top.sum()
+        max_sum = true_top.sum()
+        rand_sum = top_k * valid_true.mean()
+        per_day["pred_return_sum"].append(pred_sum)
+        per_day["max_return_sum"].append(max_sum)
+        per_day["random_return_sum"].append(rand_sum)
+        denom = max_sum - rand_sum
+        fs = (pred_sum - rand_sum) / denom if abs(denom) > 1e-6 else 0.0
+        per_day["final_score"].append(fs)
+        # excess_return
+        per_day["excess_return"].append(pred_sum - rand_sum)
+        # hit_rate
+        hit = len(set(pred_top_idx) & set(true_top_idx)) / top_k
+        per_day["hit_rate"].append(hit)
+        # ndcg
+        dcg = sum(valid_true[idx] / np.log2(r + 2) for r, idx in enumerate(pred_top_idx))
+        idcg = sum(valid_true[idx] / np.log2(r + 2) for r, idx in enumerate(true_top_idx))
+        ndcg_val = dcg / idcg if idcg > 0 else 0.0
+        per_day["ndcg"].append(ndcg_val)
+        # mrr
+        mrr = 0.0
+        for rank, idx in enumerate(pred_top_idx, 1):
+            if valid_true[idx] > 0:
+                mrr = 1.0 / rank
+                break
+        per_day["mrr"].append(mrr)
+        # proximity_score
+        percentiles = []
+        for idx in pred_top_idx:
+            worse = (valid_true <= valid_true[idx]).sum() / N
+            percentiles.append(worse)
+        avg_pct = np.mean(percentiles)
+        random_benchmark = 0.5
+        if avg_pct >= random_benchmark:
+            norm = 0.5 + (avg_pct - random_benchmark) / (1.0 - random_benchmark) * 0.5
+        else:
+            norm = avg_pct / random_benchmark * 0.5
+        per_day["proximity_score"].append(max(0.0, min(1.0, norm)))
+        # rank_ic
+        ic, _ = spearmanr(valid_pred, valid_true)
+        per_day["rank_ic"].append(0.0 if np.isnan(ic) else ic)
+        # precision / recall
+        pos_count = (pred_top > 0).sum()
+        total_pos = (valid_true > 0).sum()
+        per_day["precision"].append(pos_count / top_k)
+        per_day["recall"].append(pos_count / total_pos if total_pos > 0 else 0.0)
+    avg_metrics = {k: float(np.mean(v)) for k, v in per_day.items()}
+    return avg_metrics, per_day
 
 
 def main():
@@ -354,6 +430,52 @@ def main():
     final_dir = os.path.join(args.output_dir, "final")
     os.makedirs(final_dir, exist_ok=True)
     joblib.dump(model, os.path.join(final_dir, "model.pkl"))
+
+    # Per-date predictions & epoch_scores.txt (like DL pipeline)
+    import xgboost as xgb
+    import lightgbm as lgb
+    feat_cols = [c for c in feature_columns if c in processed.columns]
+    sliding_preds, sliding_targets = [], []
+    for d in held_out_dates:
+        day_data = processed[processed["日期"] == d].sort_values("股票代码")
+        if day_data.empty:
+            continue
+        X = day_data[feat_cols].values.astype(np.float32)
+        X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+        if isinstance(model, xgb.Booster):
+            y_pred = model.predict(xgb.DMatrix(X))
+        elif isinstance(model, lgb.Booster):
+            y_pred = model.predict(X, predict_disable_shape_check=True)
+        else:
+            y_pred = model.predict(X)
+        sliding_preds.append(y_pred)
+        sliding_targets.append(day_data["label"].values.astype(np.float32))
+    preds_arr = np.stack(sliding_preds)
+    targets_arr = np.stack(sliding_targets)
+    np.save(os.path.join(final_dir, "preds_sliding.npy"), preds_arr)
+    np.save(os.path.join(final_dir, "targets_sliding.npy"), targets_arr)
+    np.save(os.path.join(final_dir, "preds_weekly.npy"), preds_arr)
+    np.save(os.path.join(final_dir, "targets_weekly.npy"), targets_arr)
+    print(f"  预测文件: {len(sliding_preds)} 天 × {preds_arr.shape[1]} 股票")
+
+    avg_metrics, per_day = compute_per_date_metrics(preds_arr, targets_arr, top_k=3)
+    epoch_scores_file = os.path.join(final_dir, "epoch_scores.txt")
+    with open(epoch_scores_file, "w") as f:
+        f.write(
+            "epoch,weekly_score,sliding_score,weekly_pred_return_sum,weekly_max_return_sum,"
+            "weekly_random_return_sum,weekly_excess_return,weekly_hit_rate,weekly_proximity_score,"
+            "weekly_rank_ic,weekly_precision,weekly_recall,weekly_mrr,weekly_ndcg\n"
+        )
+        f.write(
+            f"1,{avg_metrics['final_score']:.6f},{avg_metrics['final_score']:.6f},"
+            f"{avg_metrics['pred_return_sum']:.6f},{avg_metrics['max_return_sum']:.6f},"
+            f"{avg_metrics['random_return_sum']:.6f},{avg_metrics['excess_return']:.6f},"
+            f"{avg_metrics['hit_rate']:.6f},{avg_metrics['proximity_score']:.6f},"
+            f"{avg_metrics['rank_ic']:.6f},{avg_metrics['precision']:.6f},"
+            f"{avg_metrics['recall']:.6f},{avg_metrics['mrr']:.6f},{avg_metrics['ndcg']:.6f}\n"
+        )
+    print(f"  epoch_scores saved ({len(per_day)} days averaged)")
+
     with open(os.path.join(final_dir, "config.json"), "w") as f:
         json.dump({
             "train_dates": [str(pool_dates[0].date()), str(pool_dates[-1].date())],

@@ -39,6 +39,7 @@ from train_ml import (
     train_lgb_ranker,
     train_cb_ranker,
     evaluate_ranker,
+    compute_per_date_metrics,
 )
 
 warnings.filterwarnings("ignore")
@@ -242,7 +243,6 @@ def run_grid_search(args, data):
 
     for idx, params in enumerate(all_params):
         if idx in completed:
-            print(f"  [{idx + 1}/{total}] 已存在，跳过")
             continue
 
         print(f"  [{idx + 1}/{total}] params={params}")
@@ -293,18 +293,10 @@ def run_bayesian_search(args, data):
         sampler=optuna.samplers.TPESampler(seed=args.seed),
     )
 
-    if completed:
-        print(f"  已存在 {len(completed)} 个完成实验")
-
     existing_trials = {t.number for t in study.trials} if args.resume else set()
 
     for trial_idx in range(args.n_trials):
-        if trial_idx in existing_trials:
-            print(f"  [Trial {trial_idx + 1}/{args.n_trials}] Optuna 已存在，跳过")
-            continue
-
-        if trial_idx in completed:
-            print(f"  [Trial {trial_idx + 1}/{args.n_trials}] 本地已存在，跳过")
+        if trial_idx in existing_trials or trial_idx in completed:
             continue
 
         def objective(trial):
@@ -393,6 +385,112 @@ def retrain_best(args, data, results):
     final_dir = os.path.join(args.output_dir, "final")
     os.makedirs(final_dir, exist_ok=True)
     joblib.dump(model, os.path.join(final_dir, "model.pkl"))
+
+    # Per-date predictions for sliding/weekly validation (like DL pipeline)
+    import xgboost as xgb
+    import lightgbm as lgb
+    feat_cols = [c for c in feature_columns if c in processed.columns]
+    sliding_preds, sliding_targets = [], []
+    for d in held_out_dates:
+        day_data = processed[processed["日期"] == d].sort_values("股票代码")
+        if day_data.empty:
+            continue
+        X = day_data[feat_cols].values.astype(np.float32)
+        X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+        if isinstance(model, xgb.Booster):
+            y_pred = model.predict(xgb.DMatrix(X))
+        elif isinstance(model, lgb.Booster):
+            y_pred = model.predict(X, predict_disable_shape_check=True)
+        else:
+            y_pred = model.predict(X)
+        sliding_preds.append(y_pred)
+        sliding_targets.append(day_data["label"].values.astype(np.float32))
+    # Compute per-date metrics (handles variable N per date)
+    keys = [
+        "final_score", "ndcg", "hit_rate", "mrr",
+        "pred_return_sum", "max_return_sum", "random_return_sum",
+        "excess_return", "proximity_score", "rank_ic",
+        "precision", "recall",
+    ]
+    per_day = {k: [] for k in keys}
+    from scipy.stats import spearmanr
+    for y_pred, y_true in zip(sliding_preds, sliding_targets):
+        N = len(y_true)
+        sorted_true = np.sort(y_true)[::-1]
+        true_top = sorted_true[:3]
+        pred_top_idx = np.argsort(-y_pred)[:3]
+        pred_top = y_true[pred_top_idx]
+        true_top_idx = np.argsort(-y_true)[:3]
+        pred_sum = pred_top.sum()
+        max_sum = true_top.sum()
+        rand_sum = 3 * y_true.mean()
+        per_day["pred_return_sum"].append(pred_sum)
+        per_day["max_return_sum"].append(max_sum)
+        per_day["random_return_sum"].append(rand_sum)
+        denom = max_sum - rand_sum
+        fs = (pred_sum - rand_sum) / denom if abs(denom) > 1e-6 else 0.0
+        per_day["final_score"].append(fs)
+        per_day["excess_return"].append(pred_sum - rand_sum)
+        hit = len(set(pred_top_idx) & set(true_top_idx)) / 3
+        per_day["hit_rate"].append(hit)
+        dcg = sum(y_true[idx] / np.log2(r + 2) for r, idx in enumerate(pred_top_idx))
+        idcg = sum(y_true[idx] / np.log2(r + 2) for r, idx in enumerate(true_top_idx))
+        ndcg_val = dcg / idcg if idcg > 0 else 0.0
+        per_day["ndcg"].append(ndcg_val)
+        mrr = 0.0
+        for rank, idx in enumerate(pred_top_idx, 1):
+            if y_true[idx] > 0:
+                mrr = 1.0 / rank
+                break
+        per_day["mrr"].append(mrr)
+        percentiles = []
+        for idx in pred_top_idx:
+            worse = (y_true <= y_true[idx]).sum() / N
+            percentiles.append(worse)
+        avg_pct = np.mean(percentiles)
+        rand_bench = 0.5
+        if avg_pct >= rand_bench:
+            norm = 0.5 + (avg_pct - rand_bench) / (1.0 - rand_bench) * 0.5
+        else:
+            norm = avg_pct / rand_bench * 0.5
+        per_day["proximity_score"].append(max(0.0, min(1.0, norm)))
+        ic, _ = spearmanr(y_pred, y_true)
+        per_day["rank_ic"].append(0.0 if np.isnan(ic) else ic)
+        pos_count = (pred_top > 0).sum()
+        total_pos = (y_true > 0).sum()
+        per_day["precision"].append(pos_count / 3)
+        per_day["recall"].append(pos_count / total_pos if total_pos > 0 else 0.0)
+    avg_metrics = {k: float(np.mean(v)) for k, v in per_day.items()}
+
+    # Save per-date predictions (zero-padded for uniform shape)
+    max_n = max(len(p) for p in sliding_preds)
+    preds_arr = np.zeros((len(sliding_preds), max_n), dtype=np.float32)
+    targets_arr = np.zeros((len(sliding_targets), max_n), dtype=np.float32)
+    for i, (p, t) in enumerate(zip(sliding_preds, sliding_targets)):
+        preds_arr[i, :len(p)] = p
+        targets_arr[i, :len(t)] = t
+    np.save(os.path.join(final_dir, "preds_sliding.npy"), preds_arr)
+    np.save(os.path.join(final_dir, "targets_sliding.npy"), targets_arr)
+    np.save(os.path.join(final_dir, "preds_weekly.npy"), preds_arr)
+    np.save(os.path.join(final_dir, "targets_weekly.npy"), targets_arr)
+    print(f"  预测文件: {len(sliding_preds)} 天 × {preds_arr.shape[1]} 股票 (zero-padded)")
+    epoch_scores_file = os.path.join(final_dir, "epoch_scores.txt")
+    with open(epoch_scores_file, "w") as f:
+        f.write(
+            "epoch,weekly_score,sliding_score,weekly_pred_return_sum,weekly_max_return_sum,"
+            "weekly_random_return_sum,weekly_excess_return,weekly_hit_rate,weekly_proximity_score,"
+            "weekly_rank_ic,weekly_precision,weekly_recall,weekly_mrr,weekly_ndcg\n"
+        )
+        f.write(
+            f"1,{avg_metrics['final_score']:.6f},{avg_metrics['final_score']:.6f},"
+            f"{avg_metrics['pred_return_sum']:.6f},{avg_metrics['max_return_sum']:.6f},"
+            f"{avg_metrics['random_return_sum']:.6f},{avg_metrics['excess_return']:.6f},"
+            f"{avg_metrics['hit_rate']:.6f},{avg_metrics['proximity_score']:.6f},"
+            f"{avg_metrics['rank_ic']:.6f},{avg_metrics['precision']:.6f},"
+            f"{avg_metrics['recall']:.6f},{avg_metrics['mrr']:.6f},{avg_metrics['ndcg']:.6f}\n"
+        )
+    print(f"  epoch_scores saved ({len(per_day)} days averaged)")
+
     with open(os.path.join(final_dir, "config.json"), "w") as f:
         json.dump({
             "train_dates": [str(d.date()) for d in [pool_dates[0], pool_dates[-1]]],
@@ -491,27 +589,32 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--objective", default="lambdarank",
                         choices=["lambdarank", "rank_xendcg"])
-    parser.add_argument("--add-cs-features", action="store_true")
+    parser.add_argument("--no-add-cs-features", action="store_false", dest="add_cs_features",
+                        help="关闭 cross-sectional 特征（默认开）")
+    parser.set_defaults(add_cs_features=True)
     parser.add_argument("--no-momentum", action="store_true")
-    parser.add_argument("--search-method", default="grid",
+    parser.add_argument("--search-method", default="bayesian",
                         choices=["grid", "bayesian"])
     parser.add_argument("--search-metric", default="final_score",
                         choices=["final_score", "ndcg", "hit_rate", "mrr"])
     parser.add_argument("--n-trials", type=int, default=80)
-    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--no-resume", action="store_false", dest="resume",
+                        help="不从已有 Optuna study 恢复（默认恢复）")
+    parser.set_defaults(resume=True)
     parser.add_argument("--retrain-only", action="store_true",
                         help="仅从已有搜索结果重训最佳参数，跳过搜索")
     args = parser.parse_args()
 
     model_types = [args.model_type] if args.model_type else SEARCH_MODEL_TYPES
+    user_output_dir = args.output_dir
     for mt in model_types:
         args.model_type = mt
-        output_dir = args.output_dir
-        if output_dir is None:
+        if user_output_dir is not None:
+            args.output_dir = user_output_dir
+        else:
             method_prefix = "grid" if args.search_method == "grid" else "bayes"
             date_tag = f"_{args.val_start}_{args.val_end}"
-            output_dir = f"./model/{method_prefix}_{mt}{date_tag}"
-        args.output_dir = output_dir
+            args.output_dir = f"./model/{method_prefix}_{mt}{date_tag}"
         print(f"\n{'=' * 60}")
         print(f"  搜索模型: {mt}  ({model_types.index(mt) + 1}/{len(model_types)})")
         print(f"{'=' * 60}")
