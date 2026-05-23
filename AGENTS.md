@@ -95,14 +95,38 @@ python code/src/daily_eval.py --from-predictions --no-update
 # Step 1: update data
 python code/src/daily_eval.py --update-only
 
-# Step 2: generate predictions + local backtest (6 sequences: 3 models + average + voting + juejin placeholder)
+# Step 2: generate predictions + local backtest
 python code/src/daily_eval.py --from-predictions --no-update
 
-# Step 3: run Juejin backtest (reads predictions.json, merges "juejin" sequence into state)
+# Step 3: run Juejin backtest
 python juejin/main.py
 
-# Step 4: generate report from juejin state (master: juejin → 掘金作主序列)
+# Step 4: generate report from juejin state
 python code/src/daily_eval.py --from-juejin
+```
+
+## config.yaml 配置
+
+单一配置源，支持 ML + DL 混合模型。详见根目录 `config.yaml`。
+
+关键字段：
+- `models`: 模型列表，每个支持 `type: dl|xgb|lightgbm|catboost`
+- `weight_strategy`: 加权策略（equal/softmax/rank_linear/risk_parity/score_risk）
+- `master`: 主序列（first/juejin/average/voting/模型key）
+
+## 模型选择 (reproduce_backtest.ipynb Cell 16)
+
+批量回测后，在 notebook 中执行模型选择：
+
+```
+对每个 (model_type, strategy) 组合:
+  1. 按 return 取 top 15% 为头部组
+  2. 头部组内按 score = return² / dd × (1 + avg_return/100) 排序
+  3. 取每组第1名作为该组合的最佳实验
+  4. 输出:
+     - 策略总评表（各策略在所有模型类别上的中位数得分）
+     - 模型类别 Top 3 推荐表
+     - 全推荐排名表（按 ranking 排序）
 ```
 
 ## Juejin Strategy
@@ -111,14 +135,7 @@ python code/src/daily_eval.py --from-juejin
 - Reads `output/predictions.json` (raw model scores)
 - Picks Top-K by score each rebalance day
 - Executes trades via Juejin API
-- Saves results as `"juejin"` sequence in `output/juejin_state.json` (独立文件)
-- Also saves `output/juejin_result.json` for reference
-
-### After Juejin backtest finishes
-```bash
-# Generate report with juejin as master sequence:
-python code/src/daily_eval.py --from-juejin
-```
+- Saves results as `"juejin"` sequence in `output/juejin_state.json`
 
 ### Sequence priority (report_key resolution)
 1. `model_selection.yaml` → `master: juejin` (explicit)
@@ -127,15 +144,21 @@ python code/src/daily_eval.py --from-juejin
 ## `run_backtest_sequence()` 内部
 遍历 6 个序列（3 单模型 + average + voting + juejin）→ 每序列 `BacktestEngine.run()` → 收集 `today_pnl`、`trades`、`pre_rebalance_positions` → 合并返回。
 
-## Critical: predictions.json must cover ALL trading days (not just rebalance days)
+## Critical: predictions.json must cover ALL trading days
 
-When `trade_mode="open"`, `BacktestEngine` calls `predictions_func(pred_date)` where `pred_date` = **previous trading day** (e.g., 2026-04-08 for 2026-04-09 rebalance). If `predictions.json` only has rebalance-day entries, the lookup returns `None` and the rebalance is skipped → 0 trades.
-
-`generate_predictions_only()` correctly iterates over all `seed_dates` (= all backtest dates + seed day before start). But if predictions.json was saved via `_save_predictions()` from the full pipeline (Mode 0), it only contains rebalance days because `predictions_history` is populated only when `predictions_func` is called (= rebalance days only).
+When `trade_mode="open"`, `BacktestEngine` calls `predictions_func(pred_date)` where `pred_date` = **previous trading day**. If `predictions.json` only has rebalance-day entries, the lookup returns `None` and the rebalance is skipped → 0 trades.
 
 **Always regenerate predictions.json via `--predictions-only` after any data or model change.**
 ```bash
 python code/src/daily_eval.py --predictions-only --no-update
+```
+
+## Optuna 搜索空间变更
+
+如果 `config.py` 中的搜索空间（`get_search_space()`）发生过变更，已存在的 Optuna study 会拒绝新 trial。
+使用 `--fresh` 重置：
+```bash
+python code/src/train_search_v2.py --model-type itransformer --fresh
 ```
 
 ## Test Commands
