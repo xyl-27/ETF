@@ -35,11 +35,11 @@ models:
   - dir: juejin/live/bayes_patchtst_74_3_2026-01-01_2026-03-31/exp_27
     file: best_model_ndcg.pth
     enabled: true
-  - dir: juejin/live/bayes_patchtst_74_3_2026-01-01_2026-03-31/exp_88
-    file: best_model_sliding.pth
+  - dir: model/bayes_tcn_74_3_2026-01-01_2026-03-31/exp_24
+    file: best_model.pth
     enabled: true
-  - dir: juejin/live/bayes_patchtst_74_3_2026-01-01_2026-03-31/exp_100
-    file: best_model_ndcg.pth
+  - dir: model/bayes_dlinear_74_3_2026-01-01_2026-03-31/exp_10
+    file: best_model_sliding.pth
     enabled: true
 
 # 融合序列

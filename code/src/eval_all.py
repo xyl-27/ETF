@@ -59,9 +59,23 @@ def discover_experiments():
                             "search_method": prefix,
                             "kind": "ml",
                         })
-    print(f"  Discovered {len(experiments)} experiments: "
-          f"{sum(1 for e in experiments if e['kind']=='dl')} DL, "
-          f"{sum(1 for e in experiments if e['kind']=='ml')} ML")
+                # Case 3: per-experiment CV results (train_ml_search.py search trials)
+                for exp_dir in sorted(glob.glob(os.path.join(search_dir, "exp_*"))):
+                    cfg_path = os.path.join(exp_dir, "config.json")
+                    if os.path.exists(cfg_path):
+                        with open(cfg_path) as f:
+                            cfg = json.load(f)
+                        if "cv_mean" in cfg and cfg.get("cv_mean", {}).get("final_score") is not None:
+                            experiments.append({
+                                "exp_dir": exp_dir,
+                                "model_type": mt,
+                                "search_method": prefix,
+                                "kind": "ml_cv",
+                            })
+    n_dl = sum(1 for e in experiments if e['kind'] == 'dl')
+    n_ml = sum(1 for e in experiments if e['kind'] == 'ml')
+    n_cv = sum(1 for e in experiments if e['kind'] == 'ml_cv')
+    print(f"  Discovered {len(experiments)} experiments: {n_dl} DL, {n_ml} ML, {n_cv} ML-CV")
     return experiments
 
 
@@ -214,6 +228,27 @@ def evaluate_ml(exp_dir, device="cpu"):
         return None
 
 
+def evaluate_ml_cv(exp_dir):
+    """Read CV scores from a train_ml_search.py experiment config."""
+    with open(os.path.join(exp_dir, "config.json")) as f:
+        cfg = json.load(f)
+    m = cfg["cv_mean"]
+    r = {
+        "weekly_score": m.get("final_score", 0.0),
+        "sliding_score": m.get("final_score", 0.0),
+        "weekly_ndcg": m.get("ndcg", 0.0),
+        "sliding_ndcg": m.get("ndcg", 0.0),
+        "weekly_hit_rate": m.get("hit_rate", 0.0),
+        "sliding_hit_rate": m.get("hit_rate", 0.0),
+        "weekly_mrr": m.get("mrr", 0.0),
+        "sliding_mrr": m.get("mrr", 0.0),
+        "num_weekly": None,
+        "num_sliding": None,
+    }
+    r.update(cfg.get("params", {}))
+    return r
+
+
 def evaluate_dl(exp_dir, device="cpu"):
     """Load a DL model and evaluate on weekly + sliding validation sets."""
     try:
@@ -259,7 +294,11 @@ def evaluate_dl(exp_dir, device="cpu"):
         if not os.path.exists(model_path):
             return None
         state_dict = torch.load(model_path, map_location=device_obj)
-        model.load_state_dict(state_dict)
+        try:
+            model.load_state_dict(state_dict)
+        except RuntimeError as e:
+            print(f"    跳过（权重不匹配: {str(e).split(chr(10))[0]}）")
+            return None
         model.to(device_obj)
         model.eval()
 
@@ -328,8 +367,6 @@ def evaluate_dl(exp_dir, device="cpu"):
         }
     except Exception as e:
         print(f"    DL eval error: {e}")
-        import traceback
-        traceback.print_exc()
         return None
 
 
@@ -341,37 +378,63 @@ def main():
 
     experiments = discover_experiments()
     results = []
+    skip_counts = {}
+    eval_counts = {}
+    fail_counts = {}
     for exp in experiments:
         exp_dir = exp["exp_dir"]
-        eval_path = os.path.join(exp_dir, "eval_results.json")
-        if os.path.exists(eval_path) and not args.force:
+        mt = exp["model_type"]
+        kind = exp["kind"]
+        eval_path = os.path.join(exp_dir, "eval_results.json") if kind != "ml_cv" else None
+
+        if eval_path and os.path.exists(eval_path) and not args.force:
             with open(eval_path) as f:
                 r = json.load(f)
-            r["model_type"] = exp["model_type"]
+            r["model_type"] = mt
             r["search_method"] = exp["search_method"]
-            r["kind"] = exp["kind"]
+            r["kind"] = kind
             r["exp_dir"] = exp_dir
             results.append(r)
-            print(f"  [skip] {exp['kind']}: {exp_dir}")
+            skip_counts[mt] = skip_counts.get(mt, 0) + 1
             continue
 
-        print(f"  [eval] {exp['kind']}: {exp_dir}...", end=" ", flush=True)
-        if exp["kind"] == "ml":
+        if kind == "ml_cv":
+            r = evaluate_ml_cv(exp_dir)
+            if r:
+                r["model_type"] = mt
+                r["search_method"] = exp["search_method"]
+                r["kind"] = kind
+                r["exp_dir"] = exp_dir
+                results.append(r)
+                eval_counts[mt] = eval_counts.get(mt, 0) + 1
+            continue
+
+        print(f"  [eval] {kind}: {exp_dir}...", end=" ", flush=True)
+        if kind == "ml":
             r = evaluate_ml(exp_dir, args.device)
         else:
             r = evaluate_dl(exp_dir, args.device)
 
         if r is None:
             print("FAILED")
+            fail_counts[mt] = fail_counts.get(mt, 0) + 1
             continue
-        r["model_type"] = exp["model_type"]
+        r["model_type"] = mt
         r["search_method"] = exp["search_method"]
-        r["kind"] = exp["kind"]
+        r["kind"] = kind
         r["exp_dir"] = exp_dir
         with open(eval_path, "w") as f:
             json.dump(r, f, indent=2, default=str)
         print(f"weekly={r['weekly_score']:.4f} sliding={r['sliding_score']:.4f}")
         results.append(r)
+        eval_counts[mt] = eval_counts.get(mt, 0) + 1
+
+    if skip_counts:
+        parts = [f"{k}={v}" for k, v in sorted(skip_counts.items())]
+        print(f"  [skip] {'  '.join(parts)}")
+    if fail_counts:
+        parts = [f"{k}={v}" for k, v in sorted(fail_counts.items())]
+        print(f"  [fail] {'  '.join(parts)}")
 
     # Summary
     if not results:
@@ -382,13 +445,18 @@ def main():
     print("Evaluation Summary")
     print("=" * 60)
     print(f"Total: {len(df)} experiments")
-    for kind in ["dl", "ml"]:
+    for kind in ["dl", "ml", "ml_cv"]:
         sub = df[df["kind"] == kind]
         if sub.empty:
             continue
-        print(f"\n{kind.upper()} ({len(sub)}):")
-        print(f"  weekly_score: mean={sub['weekly_score'].mean():.4f}  max={sub['weekly_score'].max():.4f}")
-        print(f"  sliding_score: mean={sub['sliding_score'].mean():.4f}  max={sub['sliding_score'].max():.4f}")
+        label = "ML-CV" if kind == "ml_cv" else kind.upper()
+        print(f"\n{label} ({len(sub)}):")
+        print(f"  score:    mean={sub['weekly_score'].mean():.4f}  max={sub['weekly_score'].max():.4f}")
+        print(f"  ndcg:     mean={sub['weekly_ndcg'].mean():.4f}  max={sub['weekly_ndcg'].max():.4f}")
+        print(f"  hit_rate: mean={sub['weekly_hit_rate'].mean():.4f}  max={sub['weekly_hit_rate'].max():.4f}")
+        print(f"  mrr:      mean={sub['weekly_mrr'].mean():.4f}  max={sub['weekly_mrr'].max():.4f}")
+        if kind != "ml_cv":
+            print(f"  sliding_score: mean={sub['sliding_score'].mean():.4f}  max={sub['sliding_score'].max():.4f}")
 
     # Save combined results
     out_path = os.path.join(BASE_DIR, "..", "output", "eval_all_results.json")

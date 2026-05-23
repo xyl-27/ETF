@@ -781,7 +781,8 @@ class ETFBacktester:
 
     @classmethod
     def load_data_once(
-        cls, data_path: str, scaler_path: str, feature_num: str, verbose: bool = False
+        cls, data_path: str, scaler_path: str, feature_num: str,
+        verbose: bool = False, store_unscaled: bool = False
     ):
         """
         预加载并缓存数据，供多次回测使用
@@ -791,8 +792,9 @@ class ETFBacktester:
             scaler_path: scaler文件路径
             feature_num: 特征编号
             verbose: 是否打印日志
+            store_unscaled: 是否同时存储未缩放的特征（ML模型需要）
         """
-        cache_key = f"{data_path}_{scaler_path}"
+        cache_key = f"{data_path}_{scaler_path}_{store_unscaled}"
 
         if cache_key in cls._cached_data:
             if verbose:
@@ -840,19 +842,28 @@ class ETFBacktester:
         processed = processed.dropna(subset=["instrument"]).copy()
         processed["instrument"] = processed["instrument"].astype(np.int64)
 
-        processed[features] = (
+        processed_cln = (
             processed[features].replace([np.inf, -np.inf], np.nan).fillna(0.0)
         )
-        processed[features] = scaler.transform(processed[features])
+
+        # 保存未缩放版本（ML模型需要，tree-based不需要归一化）
+        if store_unscaled:
+            processed_raw = processed.copy()
+            processed_raw[features] = processed_cln
+
+        processed[features] = scaler.transform(processed_cln)
 
         # 缓存
-        cls._cached_data[cache_key] = {
+        cached_entry = {
             "df": df,
             "processed": processed,  # 添加处理后的数据
             "scaler": scaler,
             "stock_ids": stock_ids,
             "stockid2idx": stockid2idx,
         }
+        if store_unscaled:
+            cached_entry["processed_raw"] = processed_raw
+        cls._cached_data[cache_key] = cached_entry
         cls._cached_features[cache_key] = {
             "features": features,
             "feature_engineer": feature_engineer,
@@ -894,6 +905,7 @@ class ETFBacktester:
         # 使用缓存数据
         instance.df = cached_data["df"]
         instance.processed = cached_data["processed"]  # 直接使用已处理的特征数据
+        instance.processed_raw = cached_data.get("processed_raw")  # 未缩放版本（ML用）
         instance.scaler = cached_data["scaler"]
         instance.stock_ids = cached_data["stock_ids"]
         instance.stockid2idx = cached_data["stockid2idx"]
@@ -907,40 +919,47 @@ class ETFBacktester:
         """加载模型和配置"""
         config_path = f"{self.model_dir}/config.json"
         model_path = f"{self.model_dir}/{self.model_file}"
-        scaler_path = f"{self.model_dir}/scaler.pkl"
 
         with open(config_path, "r") as f:
             self.config = json.load(f)
 
-        from config import get_model_config
+        self.is_ml_model = self.model_file.endswith(".pkl")
 
-        model_type = self.config.get("model_type", "transformer")
-        model_defaults = get_model_config(model_type)
-        model_defaults.update(self.config)
-        self.config = model_defaults
-
-        # 动态获取股票数量
-        if self.df is not None:
-            num_stocks = self.df["股票代码"].nunique()
+        if self.is_ml_model:
+            self.model = joblib.load(model_path)
+            self.num_stocks = len(self.stock_ids) if self.stock_ids else 0
+            self.seq_length = 1  # ML models: no sequence, date-level features
+            if self.verbose:
+                print(f"ML模型加载完成: {self.model_dir}/{self.model_file}")
         else:
-            num_stocks = len(self.stock_ids)
-        input_dim = len(self.features)
+            from config import get_model_config
 
-        from model import create_model
+            model_type = self.config.get("model_type", "transformer")
+            model_defaults = get_model_config(model_type)
+            model_defaults.update(self.config)
+            self.config = model_defaults
 
-        self.model = create_model(
-            self.config["model_type"], input_dim, self.config, num_stocks
-        )
-        self.model.load_state_dict(torch.load(model_path, map_location=self.device))
-        self.model = self.model.to(self.device)
-        self.model.eval()
+            if self.df is not None:
+                num_stocks = self.df["股票代码"].nunique()
+            else:
+                num_stocks = len(self.stock_ids)
+            input_dim = len(self.features)
 
-        self.num_stocks = num_stocks
-        self.seq_length = self.config["sequence_length"]
+            from model import create_model
 
-        if self.verbose:
-            print(f"模型加载完成: {self.model_dir}/{self.model_file}")
-            print(f"股票数量: {num_stocks}, 特征数量: {input_dim}")
+            self.model = create_model(
+                self.config["model_type"], input_dim, self.config, num_stocks
+            )
+            self.model.load_state_dict(torch.load(model_path, map_location=self.device))
+            self.model = self.model.to(self.device)
+            self.model.eval()
+
+            self.num_stocks = num_stocks
+            self.seq_length = self.config["sequence_length"]
+
+            if self.verbose:
+                print(f"模型加载完成: {self.model_dir}/{self.model_file}")
+                print(f"股票数量: {num_stocks}, 特征数量: {input_dim}")
 
     def _load_data(self):
         """加载数据 - 已弃用，使用缓存机制"""
@@ -952,7 +971,11 @@ class ETFBacktester:
             print(f"特征准备完成 (使用缓存): {self.processed.shape}")
 
     def _get_predictions(self, target_date) -> Optional[List[Dict]]:
-        """获取模型预测，使用 <= target_date 的数据"""
+        """获取模型预测"""
+        if self.is_ml_model:
+            return self._get_ml_predictions(target_date)
+
+        # --- DL model: sequence-based prediction ---
         all_dates_sorted = sorted(self.processed["日期"].unique())
         try:
             target_idx = all_dates_sorted.index(target_date)
@@ -994,6 +1017,52 @@ class ETFBacktester:
             )
 
         return predictions
+
+    def _get_ml_predictions(self, target_date) -> Optional[List[Dict]]:
+        """ML model prediction: cross-sectional features per date, no sequence."""
+        if self.processed_raw is None:
+            print(f"WARNING: ML model needs unscaled data. "
+                  f"Call load_data_once with store_unscaled=True")
+            return None
+        if not hasattr(self, "_ml_feat_names"):
+            self._compute_ml_features(self.processed_raw)
+
+        day_data = self.processed_raw[self.processed_raw["日期"] == target_date].sort_values("股票代码")
+        if day_data.empty:
+            return None
+
+        X = day_data[self._ml_feat_names].values.astype(np.float32)
+        X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+
+        import xgboost as xgb
+        import lightgbm as lgb
+
+        if isinstance(self.model, xgb.Booster):
+            y_pred = self.model.predict(xgb.DMatrix(X))
+        elif isinstance(self.model, lgb.Booster):
+            y_pred = self.model.predict(X, predict_disable_shape_check=True)
+        else:
+            y_pred = self.model.predict(X)
+
+        order = np.argsort(y_pred)[::-1]
+        valid_ids = day_data["股票代码"].values
+        predictions = []
+        for rank, i in enumerate(order):
+            predictions.append({
+                "rank": rank + 1,
+                "stock_id": valid_ids[i],
+                "score": float(y_pred[i]),
+            })
+        return predictions
+
+    def _compute_ml_features(self, df):
+        """Compute cross-sectional features for ML models (once)."""
+        from train_ml import ml_feature_engineering
+        raw_cols = {"股票代码", "日期", "label", "instrument"}
+        base = [c for c in self.features if c in df.columns and c not in raw_cols]
+        new_cols = ml_feature_engineering(df, base, momentum=True)
+        all_feats = base + new_cols
+        self._ml_feat_names = [c for c in all_feats if c not in raw_cols]
 
     def run(
         self,

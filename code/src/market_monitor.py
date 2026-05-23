@@ -383,9 +383,8 @@ def compute_model_vs_market(dates, values, hs_data):
         sub = df[df["regime"] == regime]
         if len(sub) < 3:
             continue
-        model_total = (sub["model_value"].iloc[-1] / sub["model_value"].iloc[0] - 1) * 100
-        hs_total = (1 + sub["hs300_return"] / 100).prod() - 1
-        hs_total = hs_total * 100
+        model_total = ((1 + sub["model_return"] / 100).prod() - 1) * 100
+        hs_total = ((1 + sub["hs300_return"] / 100).prod() - 1) * 100
         excess = model_total - hs_total
         beat_rate = (sub["model_return"] > sub["hs300_return"]).mean()
         model_win_rate = (sub["model_return"] > 0).mean()
