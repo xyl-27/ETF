@@ -65,3 +65,9 @@ juejin:
   weight_strategy: "equal"
   strategy_params:
     vol_window: 20
+
+# ---- 邮件通知 ----
+email:
+  to:
+    - "1280745039@qq.com"
+    # - "other@example.com"  # 添加更多收件人

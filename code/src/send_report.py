@@ -9,6 +9,7 @@ import re
 import sys
 import smtplib
 import json
+import yaml
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
@@ -30,7 +31,20 @@ SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
 SMTP_USER = os.environ.get("SMTP_USER")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")
 EMAIL_FROM = os.environ.get("EMAIL_FROM", SMTP_USER)
-EMAIL_TO = os.environ.get("EMAIL_TO", "1280745039@qq.com")
+# 从 config.yaml 加载收件人列表（支持批量）
+CONFIG_PATH = PROJECT_ROOT / "config.yaml"
+_email_config = []
+try:
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        _cfg = yaml.safe_load(f) or {}
+    _email_config = (_cfg.get("email") or {}).get("to") or []
+except Exception:
+    pass
+
+if _email_config:
+    EMAIL_TO = ",".join(_email_config)
+else:
+    EMAIL_TO = os.environ.get("EMAIL_TO", "1280745039@qq.com")
 
 
 TEMPLATE_PATH = PROJECT_ROOT / "code" / "src" / "report_template.html"

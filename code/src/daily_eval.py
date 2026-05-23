@@ -3184,6 +3184,45 @@ def run_from_juejin(verbose=True, start_date="2026-04-01", initial_capital=10000
         return None
 
 
+def sync_models_to_live():
+    """将 config.yaml 中的启用模型复制到 juejin/live/ 目录（供掘金使用）"""
+    import shutil
+    import yaml
+    from pathlib import Path
+
+    config_path = PROJECT_ROOT / "config.yaml"
+    with open(config_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+
+    models = cfg.get("models", [])
+    if not models:
+        return
+
+    live_root = PROJECT_ROOT / "juejin" / "live"
+    live_root.mkdir(parents=True, exist_ok=True)
+
+    for m in models:
+        if not m.get("enabled", True):
+            continue
+        model_rel = m["dir"]
+        model_file = m.get("file", "")
+
+        if model_rel.startswith("juejin"):
+            continue
+
+        src = PROJECT_ROOT / model_rel / model_file
+        if not src.exists():
+            print(f"[模型同步] 源文件不存在，跳过: {src}")
+            continue
+
+        parts = Path(model_rel).parts
+        dst_rel = Path(*parts[1:]) if len(parts) > 1 else Path(model_rel)
+        dst = live_root / dst_rel / model_file
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        print(f"[模型同步] -> {dst}")
+
+
 if __name__ == "__main__":
     import argparse
     import multiprocessing as mp
@@ -3300,6 +3339,7 @@ if __name__ == "__main__":
         print("\n数据更新完成。")
     elif mode == "from_juejin":
         run_from_juejin(verbose=args.debug, start_date=start_date, trade_mode=trade_mode)
+        sync_models_to_live()
     elif mode == "predictions_only":
         generate_predictions_only(
             config_name=config_name,
@@ -3321,6 +3361,7 @@ if __name__ == "__main__":
             config_name=config_name,
             trade_mode=trade_mode,
         )
+        sync_models_to_live()
     else:
         daily_eval(
             config_name=config_name,
@@ -3334,3 +3375,4 @@ if __name__ == "__main__":
             strategy_params=strategy_params,
             trade_mode=trade_mode,
         )
+        sync_models_to_live()
