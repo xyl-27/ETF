@@ -9,6 +9,7 @@ import json
 import re
 import io
 import base64
+import time
 import traceback
 import subprocess
 from datetime import datetime
@@ -1655,13 +1656,14 @@ def daily_eval(
     trade_mode: str = "open",
 ):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _t0 = time.time()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     try:
         if update_data:
             print(f"\n[1/4] 更新数据...", end=" ", flush=True)
             ok = update_etf_data(verbose=verbose)
-            print("✅" if ok else "❌")
+            print(f"{'✅' if ok else '❌'}  ({time.time()-_t0:.0f}s)")
 
         raw_df = load_etf_data(DATA_FILE, dtype={"股票代码": str})
         raw_df["股票代码"] = raw_df["股票代码"].astype(str).str.zfill(6)
@@ -1772,12 +1774,13 @@ def daily_eval(
                 )
             single_backtesters.append((m, bt))
 
-        print(f"[3/4] 运行回测...")
+        print(f"[3/4] 运行回测... ({time.time()-_t0:.0f}s)")
 
         sequences = {}
 
         for m, bt in single_backtesters:
             model_key = _make_model_key(m)
+            _t_model = time.time()
             if verbose:
                 print(f"  回测单模型: {model_key}...")
             pred_func = lambda date, _bt=bt: _bt._get_predictions(date)
@@ -1797,8 +1800,11 @@ def daily_eval(
                 trade_mode=trade_mode,
             )
             sequences[model_key] = result
+            if verbose:
+                print(f"    ✓ ({time.time()-_t_model:.0f}s)")
 
         if average_enabled and len(single_backtesters) >= 2:
+            _t_avg = time.time()
             if verbose:
                 print(f"  回测平均模型 ({len(single_backtesters)}个模型)...")
 
@@ -1832,8 +1838,11 @@ def daily_eval(
                 trade_mode=trade_mode,
             )
             sequences["average"] = result
+            if verbose:
+                print(f"    ✓ ({time.time()-_t_avg:.0f}s)")
 
         if voting_enabled and len(single_backtesters) >= 2:
+            _t_vote = time.time()
             if verbose:
                 print(f"  回测投票模型 ({len(single_backtesters)}个模型)...")
 
@@ -1852,25 +1861,16 @@ def daily_eval(
                 avg_score = {}
                 for preds in all_preds:
                     for i, p in enumerate(preds):
-                        if i >= top_k:
+                        if i >= top_k * 3:
                             break
                         sid = p["stock_id"]
                         freq[sid] = freq.get(sid, 0) + 1
                         avg_score[sid] = avg_score.get(sid, 0) + p["score"]
                 for sid in avg_score:
                     avg_score[sid] /= freq.get(sid, 1)
-                ranked = sorted(freq.items(), key=lambda x: (-x[1], -avg_score.get(x[0], 0)))
+                ranked = sorted(freq.items(), key=lambda x: (-x[1], -avg_score.get(x[0], 0)))[:top_k]
                 result = [{"rank": i+1, "stock_id": sid, "score": float(freq)} for i, (sid, freq) in enumerate(ranked)]
                 voting_pred_cache[date] = {"ranked": ranked, "top_k": top_k}
-                if len(result) < top_k * 2:
-                    first_picks = [p["stock_id"] for p in all_preds[0]]
-                    existing = {r["stock_id"] for r in result}
-                    for sid in first_picks:
-                        if sid not in existing:
-                            result.append({"rank": len(result)+1, "stock_id": sid, "score": 0.0})
-                            existing.add(sid)
-                        if len(result) >= top_k * 2:
-                            break
                 return result
 
             result = run_backtest_sequence(
@@ -1901,8 +1901,10 @@ def daily_eval(
                     t["score"] = float(stock_votes)
                     t["advantage"] = int(stock_votes - cutoff_votes)
             sequences["voting"] = result
+            if verbose:
+                print(f"    ✓ ({time.time()-_t_vote:.0f}s)")
 
-        print("✅")
+        print(f"  ✓ 回测完成 ({time.time()-_t0:.0f}s)")
 
         # 绘制收益曲线图
         plot_path = OUTPUT_DIR / "equity_curves.png"
@@ -2044,6 +2046,9 @@ def daily_eval(
             _prev_idx_full = _all_dates_full.index(_backtest_dates_full[0]) - 1
             if _prev_idx_full >= 0:
                 _seed_dates_full.add(_all_dates_full[_prev_idx_full])
+            _t_pred = time.time()
+            if verbose:
+                print(f"  [预测] 生成全部交易日预测信号...")
             _full_preds = {}
             for _m, _bt in single_backtesters:
                 _mk = _make_model_key(_m)
@@ -2088,24 +2093,15 @@ def daily_eval(
                         _avg_sc = {}
                         for _preds in _all_preds:
                             for _i, _p in enumerate(_preds):
-                                if _i >= top_k:
+                                if _i >= top_k * 3:
                                     break
                                 _sid = _p["stock_id"]
                                 _freq[_sid] = _freq.get(_sid, 0) + 1
                                 _avg_sc[_sid] = _avg_sc.get(_sid, 0) + _p["score"]
                         for _sid in _avg_sc:
                             _avg_sc[_sid] /= _freq.get(_sid, 1)
-                        _ranked = sorted(_freq.items(), key=lambda x: (-x[1], -_avg_sc.get(x[0], 0)))
+                        _ranked = sorted(_freq.items(), key=lambda x: (-x[1], -_avg_sc.get(x[0], 0)))[:top_k]
                         _result = [{"rank": i+1, "stock_id": sid, "score": float(freq)} for i, (sid, freq) in enumerate(_ranked)]
-                        if len(_result) < top_k * 2:
-                            _first_picks = [p["stock_id"] for p in _all_preds[0]]
-                            _existing = {r["stock_id"] for r in _result}
-                            for _sid in _first_picks:
-                                if _sid not in _existing:
-                                    _result.append({"rank": len(_result)+1, "stock_id": _sid, "score": 0.0})
-                                    _existing.add(_sid)
-                                if len(_result) >= top_k * 2:
-                                    break
                         _vote_p[_d_str] = _result
                 _full_preds["voting"] = _vote_p
             _full_preds["_meta"] = {
@@ -2115,7 +2111,7 @@ def daily_eval(
             with open(PREDICTIONS_PATH, "w", encoding="utf-8") as _f:
                 json.dump(_full_preds, _f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
             if verbose:
-                print(f"  [预测] 已保存 {PREDICTIONS_PATH} ({len(_backtest_dates_full)} 日)")
+                print(f"  [预测] 已保存 ({time.time()-_t_pred:.0f}s, {len(_backtest_dates_full)} 日)")
         except Exception as e:
             if verbose:
                 print(f"  [预测] 保存失败: {e}")
@@ -2355,9 +2351,9 @@ def daily_eval(
             if "holdings" not in sequences[email_key]:
                 sequences[email_key]["holdings"] = holdings
             send_report(model_key=email_key)
-            print("✅")
+            print(f"✅  ({time.time()-_t0:.0f}s)")
         except Exception as e:
-            print("❌")
+            print(f"❌  ({time.time()-_t0:.0f}s)")
             if verbose:
                 print(f"\n[邮件] 发送失败: {e}")
 
@@ -2420,7 +2416,7 @@ def daily_eval(
                     print(f"    {pos['stock_id']}: {pos['pnl']:+.2f} ({pos['pnl_pct']:+.2f}%)")
 
             print(f"\n{'='*60}")
-            print(f"[{timestamp}] 每日测评完成")
+            print(f"[{timestamp}] 每日测评完成 (总用时 {time.time()-_t0:.0f}s)")
             print(f"{'='*60}")
 
         return state
@@ -2629,24 +2625,15 @@ def generate_predictions_only(
                     avg_score = {}
                     for preds in all_preds:
                         for i, p in enumerate(preds):
-                            if i >= top_k:
+                            if i >= top_k * 3:
                                 break
                             sid = p["stock_id"]
                             freq[sid] = freq.get(sid, 0) + 1
                             avg_score[sid] = avg_score.get(sid, 0) + p["score"]
                     for sid in avg_score:
                         avg_score[sid] /= freq.get(sid, 1)
-                    ranked = sorted(freq.items(), key=lambda x: (-x[1], -avg_score.get(x[0], 0)))
+                    ranked = sorted(freq.items(), key=lambda x: (-x[1], -avg_score.get(x[0], 0)))[:top_k]
                     result = [{"rank": i+1, "stock_id": sid, "score": float(freq)} for i, (sid, freq) in enumerate(ranked)]
-                    if len(result) < top_k * 2:
-                        first_picks = [p["stock_id"] for p in all_preds[0]]
-                        existing = {r["stock_id"] for r in result}
-                        for sid in first_picks:
-                            if sid not in existing:
-                                result.append({"rank": len(result)+1, "stock_id": sid, "score": 0.0})
-                                existing.add(sid)
-                            if len(result) >= top_k * 2:
-                                break
                     vote_preds[d_str] = result
             all_predictions["voting"] = vote_preds
             if verbose:
