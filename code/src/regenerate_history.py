@@ -451,7 +451,7 @@ def simulate_state_at_date(seq, target_date, raw_df, initial_capital=100000):
     }
 
 
-def build_report(report_state, seq_key, all_sequences, raw_df):
+def build_report(report_state, seq_key, all_sequences, raw_df, top_k=3, position_pct=0.95, weight_strategy="equal", strategy_params=None):
     """Generate HTML for one historical date."""
     seq_data = all_sequences.get(seq_key, {})
     metrics = report_state["metrics"]
@@ -540,7 +540,7 @@ def build_report(report_state, seq_key, all_sequences, raw_df):
     if hs300:
         equity_data["沪深300"] = hs300
 
-    pred_signals_section = _build_pred_signals_table(seq_data, report_state["date"])
+    pred_signals_section = _build_pred_signals_table(seq_data, report_state["date"], weight_strategy=weight_strategy, strategy_params=strategy_params, top_k=top_k, position_pct=position_pct)
 
     # Compute today_pnl
     today_pnl_total = report_state["today_pnl"]["total_pnl"]
@@ -630,7 +630,19 @@ def main():
                 print("skip (no data)")
                 continue
 
-            html = build_report(report_state, report_key, sequences, raw_df)
+            # 从 config.yaml 加载加权参数
+            _cfg_path = PROJECT_ROOT / "config.yaml"
+            try:
+                import yaml
+                with open(_cfg_path, encoding="utf-8") as _f:
+                    _cfg = yaml.safe_load(_f) or {}
+            except Exception:
+                _cfg = {}
+            _ws = _cfg.get("email", {}).get("weight_strategy", "equal")
+            _sp = _cfg.get("strategy_params", {})
+            _tk = _cfg.get("top_k", 3)
+            _pp = _cfg.get("position_pct", 0.95)
+            html = build_report(report_state, report_key, sequences, raw_df, top_k=_tk, position_pct=_pp, weight_strategy=_ws, strategy_params=_sp)
             filepath.write_text(html, encoding="utf-8")
             print(f"saved to {filename}")
         except Exception as e:

@@ -601,10 +601,12 @@ class BacktestEngine:
                         self._write_log("预测失败，跳过调仓")
                     continue
 
+                _sp_snapshot = dict(self.strategy_params) if self.strategy_params else {}
                 self.predictions_history.append({
                     "date": current_date.strftime("%Y-%m-%d"),
                     "pred_date": pred_date.strftime("%Y-%m-%d"),
                     "predictions": predictions,
+                    "strategy_params": _sp_snapshot,
                 })
 
                 pred_scores = [p["score"] for p in predictions]

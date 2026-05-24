@@ -38,7 +38,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 os.chdir(PROJECT_ROOT)
 sys.path.insert(0, str(PROJECT_ROOT / "code" / "src"))
 
-from backtest import BacktestEngine, ETFBacktester
+from backtest import BacktestEngine, ETFBacktester, compute_volatility
 from ml_backtester import MLBacktester
 
 # GM Python 路径（用于数据下载，该 Python 装有 gm SDK）
@@ -1076,7 +1076,7 @@ def _health_color(score):
     return "red"
 
 
-def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_names, model_key="", rebalance_days=5, trade_mode="open"):
+def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_names, model_key="", rebalance_days=5, trade_mode="open", top_k=3, position_pct=0.95, weight_strategy="equal", strategy_params=None):
     """为序列的每一个调仓日保存历史报告HTML"""
     trades = seq.get("trades", [])
     equity_curve = seq.get("equity_curve", [])
@@ -1434,7 +1434,7 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
         # 预测信号（截至当前日期）
         hist_ph = [p for p in seq.get("predictions_history", []) if p.get("date", "") <= cur_date]
         hist_seq_data = {**seq, "predictions_history": hist_ph}
-        pred_signals_section = _build_pred_signals_table(hist_seq_data, cur_date)
+        pred_signals_section = _build_pred_signals_table(hist_seq_data, cur_date, weight_strategy=weight_strategy, strategy_params=strategy_params, top_k=top_k, position_pct=position_pct)
         holdings_at_date = {h["stock_id"] for h in holdings}
         market_monitor_section = build_market_monitor_section(raw_df, seq, cur_date, holdings_at_date, etf_names)
         try:
@@ -1599,13 +1599,27 @@ def _save_predictions(sequences, path=None):
     Keys are pred_date (the date for which features were computed),
     NOT the rebalance date. This ensures compatibility with
     _make_predictions_func_from_saved() used by --from-predictions mode.
+
+    Preserves _meta (backtest_dates calendar) from existing file so that
+    juejin/main.py can compute correct rebalance dates.
     """
     path = path or PREDICTIONS_PATH
+    # preserve _meta from existing file (full calendar for juejin)
+    meta = {}
+    if os.path.exists(str(path)):
+        try:
+            with open(str(path), "r") as f:
+                existing = json.load(f)
+            meta = existing.get("_meta", {})
+        except Exception:
+            pass
     preds = {}
     for key, seq in sequences.items():
         ph = seq.get("predictions_history", [])
         preds[key] = {entry.get("pred_date", entry["date"]): entry["predictions"] for entry in ph}
-    with open(path, "w", encoding="utf-8") as f:
+    if meta:
+        preds["_meta"] = meta
+    with open(str(path), "w", encoding="utf-8") as f:
         json.dump(preds, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
     return preds
 
@@ -1874,6 +1888,9 @@ def daily_eval(
                 slippage=config.get("slippage", 0.001),
                 trade_mode=trade_mode,
             )
+            voting_total_models = len(single_backtesters)
+            for ph in result.get("predictions_history", []):
+                ph["voting_total_models"] = voting_total_models
             for t in result.get("trades", []):
                 if t.get("action") == "买入" and t["date"] in voting_pred_cache:
                     cache = voting_pred_cache[t["date"]]
@@ -2016,9 +2033,89 @@ def daily_eval(
             "last_updated": timestamp,
         }
 
-        # 额外保存模型预测信号（供日报复用，无需重跑模型）
+        # 保存全部交易日预测信号（供日报复用，无需重跑模型）
         try:
-            _save_predictions(sequences)
+            # 生成全部日期的预测（不只是调仓日），覆盖 _save_predictions 仅存调仓日的问题
+            _all_dates_full = sorted(raw_df["日期"].unique())
+            _start_ts_full = pd.Timestamp(start_date)
+            _end_ts_full = pd.Timestamp(end_date)
+            _backtest_dates_full = [d for d in _all_dates_full if _start_ts_full <= d < _end_ts_full]
+            _seed_dates_full = set(_backtest_dates_full)
+            _prev_idx_full = _all_dates_full.index(_backtest_dates_full[0]) - 1
+            if _prev_idx_full >= 0:
+                _seed_dates_full.add(_all_dates_full[_prev_idx_full])
+            _full_preds = {}
+            for _m, _bt in single_backtesters:
+                _mk = _make_model_key(_m)
+                _pm = {}
+                for _d in sorted(_seed_dates_full):
+                    _p = _bt._get_predictions(_d)
+                    if _p:
+                        _pm[_d.strftime("%Y-%m-%d")] = _p
+                _full_preds[_mk] = _pm
+            if average_enabled and len(single_backtesters) >= 2:
+                _avg_p = {}
+                for _d in sorted(_seed_dates_full):
+                    _d_str = _d.strftime("%Y-%m-%d")
+                    _all_scores = []
+                    for _, _bt2 in single_backtesters:
+                        _p2 = _bt2._get_predictions(_d)
+                        if _p2 is None:
+                            _all_scores = None
+                            break
+                        _all_scores.append({_p["stock_id"]: _p["score"] for _p in _p2})
+                    if _all_scores:
+                        _avg_map = {}
+                        for _sid in _all_scores[0].keys():
+                            _scs = [_sd[_sid] for _sd in _all_scores]
+                            _avg_map[_sid] = float(np.mean(_scs))
+                        _sorted = sorted(_avg_map.items(), key=lambda x: x[1], reverse=True)
+                        _avg_p[_d_str] = [{"rank": i+1, "stock_id": sid, "score": sc} for i, (sid, sc) in enumerate(_sorted)]
+                _full_preds["average"] = _avg_p
+            if voting_enabled and len(single_backtesters) >= 2:
+                _vote_p = {}
+                for _d in sorted(_seed_dates_full):
+                    _d_str = _d.strftime("%Y-%m-%d")
+                    _all_preds = []
+                    for _, _bt2 in single_backtesters:
+                        _p2 = _bt2._get_predictions(_d)
+                        if _p2 is None:
+                            _all_preds = None
+                            break
+                        _all_preds.append(_p2)
+                    if _all_preds:
+                        _freq = {}
+                        _avg_sc = {}
+                        for _preds in _all_preds:
+                            for _i, _p in enumerate(_preds):
+                                if _i >= top_k:
+                                    break
+                                _sid = _p["stock_id"]
+                                _freq[_sid] = _freq.get(_sid, 0) + 1
+                                _avg_sc[_sid] = _avg_sc.get(_sid, 0) + _p["score"]
+                        for _sid in _avg_sc:
+                            _avg_sc[_sid] /= _freq.get(_sid, 1)
+                        _ranked = sorted(_freq.items(), key=lambda x: (-x[1], -_avg_sc.get(x[0], 0)))
+                        _result = [{"rank": i+1, "stock_id": sid, "score": float(freq)} for i, (sid, freq) in enumerate(_ranked)]
+                        if len(_result) < top_k * 2:
+                            _first_picks = [p["stock_id"] for p in _all_preds[0]]
+                            _existing = {r["stock_id"] for r in _result}
+                            for _sid in _first_picks:
+                                if _sid not in _existing:
+                                    _result.append({"rank": len(_result)+1, "stock_id": _sid, "score": 0.0})
+                                    _existing.add(_sid)
+                                if len(_result) >= top_k * 2:
+                                    break
+                        _vote_p[_d_str] = _result
+                _full_preds["voting"] = _vote_p
+            _full_preds["_meta"] = {
+                "start_date": start_date,
+                "backtest_dates": [d.strftime("%Y-%m-%d") for d in _backtest_dates_full],
+            }
+            with open(PREDICTIONS_PATH, "w", encoding="utf-8") as _f:
+                json.dump(_full_preds, _f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
+            if verbose:
+                print(f"  [预测] 已保存 {PREDICTIONS_PATH} ({len(_backtest_dates_full)} 日)")
         except Exception as e:
             if verbose:
                 print(f"  [预测] 保存失败: {e}")
@@ -2096,11 +2193,11 @@ def daily_eval(
             buy_price = 0
             buy_date = ""
             for t in report_data.get("trades", []):
-                if t["action"] == "买入" and t["stock"] == stock_id:
+                if t["action"] in ("买入", "卖出") and t["stock"] == stock_id and t["date"] > buy_date:
                     buy_price = t["price"]
                     buy_date = t["date"]
             if not buy_price:
-                buy_price = (pos.get("cost", 0) / pos.get("shares", 1)) if pos.get("shares", 0) > 0 else 0
+                buy_price = round(pos.get("cost", 0) / pos.get("shares", 1), 4) if pos.get("shares", 0) > 0 else 0
             holdings.append({
                 "stock_id": stock_id,
                 "name": etf_names.get(stock_id, ""),
@@ -2119,6 +2216,45 @@ def daily_eval(
         for t in all_today_trades:
             if "name" not in t:
                 t["name"] = etf_names.get(t["stock"], "")
+
+        # 注入最新预测到 predictions_history（日报预测信号表需要最新数据，不是调仓日数据）
+        try:
+            with open(PREDICTIONS_PATH, "r") as _f_inj:
+                _all_preds_inj = json.load(_f_inj)
+            _all_preds_inj.pop("_meta", None)
+            for _mk_inj, _pd_inj in _all_preds_inj.items():
+                _seq_inj = sequences.get(_mk_inj)
+                if not _seq_inj:
+                    continue
+                _ph_inj = _seq_inj.get("predictions_history", [])
+                _latest_d_inj = latest_date_str
+                _match_inj = _pd_inj.get(_latest_d_inj)
+                if not _match_inj:
+                    for _d_inj in reversed(sorted(_pd_inj.keys())):
+                        if _d_inj <= _latest_d_inj and _pd_inj[_d_inj]:
+                            _match_inj = _pd_inj[_d_inj]
+                            _latest_d_inj = _d_inj
+                            break
+                if _match_inj:
+                    _sp_snap_inj = dict(strategy_params) if strategy_params else {}
+                    _sp_snap_inj.pop("vol_dict", None)
+                    if weight_strategy in ("risk_parity", "score_risk"):
+                        _top_ids_inj = [p["stock_id"] for p in _match_inj[:top_k]]
+                        _vol_win_inj = _sp_snap_inj.get("vol_window", 20)
+                        _vd_inj = compute_volatility(raw_df, _top_ids_inj, _latest_d_inj, _vol_win_inj)
+                        if _vd_inj:
+                            _sp_snap_inj["vol_dict"] = _vd_inj
+                    _entry_inj = {
+                        "date": _latest_d_inj,
+                        "predictions": _match_inj[:10],
+                        "strategy_params": dict(_sp_snap_inj),
+                    }
+                    if not _ph_inj or _ph_inj[-1].get("date") != _latest_d_inj:
+                        _ph_inj.append(_entry_inj)
+                    else:
+                        _ph_inj[-1].update({k: v for k, v in _entry_inj.items() if k != "date"})
+        except Exception:
+            pass
 
         # 收集所有序列的信息
         sequences_summary = {}
@@ -2187,6 +2323,7 @@ def daily_eval(
             "strategy_params": strategy_params,
             "top_k": top_k,
             "position_pct": position_pct,
+            "voting_total_models": len(single_backtesters),
             "strategy_info": _format_strategy_info(
                 weight_strategy, strategy_params, top_k, position_pct,
                 config.get("commission", 0.0003), config.get("slippage", 0.001),
@@ -2229,7 +2366,7 @@ def daily_eval(
             if verbose:
                 print(f"\n[历史] 生成各调仓日报告...")
             _save_history_reports(
-                sequences[report_key], sequences, str(DATA_FILE), initial_capital, etf_names, model_key=report_key, rebalance_days=rebalance_days, trade_mode=trade_mode
+                sequences[report_key], sequences, str(DATA_FILE), initial_capital, etf_names, model_key=report_key, rebalance_days=rebalance_days, trade_mode=trade_mode, top_k=top_k, position_pct=position_pct, weight_strategy=weight_strategy, strategy_params=strategy_params
             )
         except Exception as e:
             print(f"\n[历史] 生成失败: {e}")
@@ -2632,6 +2769,49 @@ def run_from_predictions(
             print("错误: 回测未产生任何结果")
             return None
 
+        # 注入最新预测到 predictions_history（日报预测信号表需要最新数据，不是调仓日数据）
+        _latest_pred_date = latest_date.strftime("%Y-%m-%d")
+        for model_key, preds_dict in all_predictions.items():
+            seq = sequences.get(model_key)
+            if not seq:
+                continue
+            _found = _latest_pred_date if preds_dict.get(_latest_pred_date) else None
+            if not _found:
+                _all_dates = sorted(preds_dict.keys())
+                for d in reversed(_all_dates):
+                    if d <= _latest_pred_date:
+                        _found = d
+                        break
+            if _found:
+                latest_preds = preds_dict[_found]
+                ph = seq.get("predictions_history", [])
+                _sp_snapshot = dict(strategy_params) if strategy_params else {}
+                _sp_snapshot.pop("vol_dict", None)
+                if weight_strategy in ("risk_parity", "score_risk"):
+                    top_ids = [p["stock_id"] for p in latest_preds[:top_k]]
+                    _vol_window = _sp_snapshot.get("vol_window", 20)
+                    _vd = compute_volatility(raw_df, top_ids, _found, _vol_window)
+                    if _vd:
+                        _sp_snapshot["vol_dict"] = _vd
+                _entry = {
+                    "date": _found,
+                    "predictions": latest_preds[:10],
+                    "strategy_params": dict(_sp_snapshot),
+                }
+                if not ph or ph[-1]["date"] != _found:
+                    ph.append(_entry)
+                else:
+                    # 更新已有 entry 的 strategy_params（补 vol_dict）
+                    ph[-1].update({k: v for k, v in _entry.items() if k != "date"})
+
+        # 在从预测信号模式中计算投票总模型数
+        _voting_n = None
+        if "voting" in sequences:
+            _special = {"average", "voting", "juejin"}
+            _voting_n = len([k for k in all_predictions if k not in _special])
+            for ph in sequences["voting"].get("predictions_history", []):
+                ph["voting_total_models"] = _voting_n
+
         # 选取主序列（遵循 model_selection.yaml 的 master 设置）
         report_key = _resolve_report_key(sequences)
         if not report_key:
@@ -2783,6 +2963,7 @@ def run_from_predictions(
             "strategy_params": strategy_params,
             "top_k": top_k,
             "position_pct": position_pct,
+            "voting_total_models": _voting_n if "voting" in sequences else None,
             "strategy_info": _format_strategy_info(
                 weight_strategy, strategy_params, top_k, position_pct,
                 config.get("commission", 0.0003), config.get("slippage", 0.001),
@@ -2818,7 +2999,7 @@ def run_from_predictions(
 
         # 历史报告
         try:
-            _save_history_reports(sequences[report_key], sequences, str(DATA_FILE), initial_capital, etf_names, model_key=report_key, rebalance_days=rebalance_days, trade_mode=trade_mode)
+            _save_history_reports(sequences[report_key], sequences, str(DATA_FILE), initial_capital, etf_names, model_key=report_key, rebalance_days=rebalance_days, trade_mode=trade_mode, top_k=top_k, position_pct=position_pct, weight_strategy=weight_strategy, strategy_params=strategy_params)
         except Exception as e:
             print(f"\n[历史] 生成失败: {e}")
             traceback.print_exc()
@@ -2926,9 +3107,10 @@ def run_from_juejin(verbose=True, start_date="2026-04-01", initial_capital=10000
         # 构造当前持仓
         pnl_positions = {p["stock_id"]: p for p in report_data.get("today_pnl", {}).get("positions", [])}
         _buy_price_col = "开盘" if trade_mode == "open" else "收盘"
+        # 取最近一次调仓价（买入或卖出），无交易则用平均成本
         last_buy_info = {}
         for t in report_data.get("trades", []):
-            if t["action"] == "买入":
+            if t["action"] in ("买入", "卖出"):
                 stock = t["stock"]
                 if stock not in last_buy_info or t["date"] > last_buy_info[stock]["date"]:
                     buy_date = t["date"]
@@ -2943,6 +3125,12 @@ def run_from_juejin(verbose=True, start_date="2026-04-01", initial_capital=10000
                         if not bp_fq_s.empty:
                             bp_fq = float(bp_fq_s.values[0])
                     last_buy_info[stock] = {"date": buy_date, "price": bp_raw, "price_fq": bp_fq}
+        # 兜底：有持仓但从无交易（diff_shares==0 一直持有）→ 用平均成本
+        for stock_id, pos in display_positions.items():
+            if stock_id not in last_buy_info:
+                avg_cost = round(pos.get("cost", 0) / pos.get("shares", 1), 4) if pos.get("shares", 0) > 0 else 0
+                if avg_cost > 0:
+                    last_buy_info[stock_id] = {"date": latest_date_str, "price": avg_cost, "price_fq": avg_cost}
         holdings = []
         for stock_id, pos in display_positions.items():
             price = pnl_positions.get(stock_id, {}).get("today_close", 0)
@@ -2992,17 +3180,49 @@ def run_from_juejin(verbose=True, start_date="2026-04-01", initial_capital=10000
             model_stats = _compute_model_stats(seq.get("trades", []), seq_current_prices, report_date=latest_date_str)
             seq["model_stats"] = model_stats
             sequences_summary[key] = {
-                "metrics": seq.get("metrics", {}),
-                "cash": seq.get("cash", 0),
-                "positions_count": len(seq.get("positions", {})),
-                "trades_count": len(seq.get("trades", [])),
-                "trades": seq.get("trades", []),
+                "metrics": seq["metrics"],
+                "cash": seq["cash"],
+                "positions_count": len(seq["positions"]),
+                "trades_count": len(seq["trades"]),
+                "trades": seq["trades"],
                 "today_pnl": seq.get("today_pnl", {}),
                 "model_stats": model_stats,
                 "equity_curve": seq.get("equity_curve", []),
                 "skipped_trades": seq.get("skipped_trades", []),
                 "predictions_history": seq.get("predictions_history", []),
+                "voting_total_models": len(single_backtesters) if key == "voting" else None,
             }
+
+        # 注入最新预测到 predictions_history（掘金 state 可能没有最新日期的数据）
+        try:
+            with open(PREDICTIONS_PATH, "r") as _f_jj:
+                _all_preds_jj = json.load(_f_jj)
+            _all_preds_jj.pop("_meta", None)
+            for _sk_jj, _sd_jj in sequences_summary.items():
+                _ph_jj = _sd_jj.get("predictions_history", [])
+                if not _ph_jj:
+                    continue
+                # 从 predictions.json 中找有最新日期的模型
+                _latest_jj = latest_date_str
+                _match_preds_jj = None
+                for _mk_jj, _pd_jj in _all_preds_jj.items():
+                    _mp = _pd_jj.get(_latest_jj)
+                    if _mp:
+                        _match_preds_jj = _mp
+                        break
+                if not _match_preds_jj:
+                    for _mk_jj, _pd_jj in _all_preds_jj.items():
+                        for _d_jj in reversed(sorted(_pd_jj.keys())):
+                            if _d_jj <= _latest_jj and _pd_jj[_d_jj]:
+                                _match_preds_jj = _pd_jj[_d_jj]
+                                _latest_jj = _d_jj
+                                break
+                        if _match_preds_jj:
+                            break
+                if _match_preds_jj and (not _ph_jj or _ph_jj[-1].get("date") != _latest_jj):
+                    _ph_jj.append({"date": _latest_jj, "predictions": _match_preds_jj[:10]})
+        except Exception:
+            pass
 
         # HS300 基准曲线
         hs300_curve = []
@@ -3091,21 +3311,40 @@ def run_from_juejin(verbose=True, start_date="2026-04-01", initial_capital=10000
         # 补齐 next_rebalance_date（掘金序列可能没有）
         next_rebalance_date = report_data.get("metrics", {}).get("next_rebalance_date", "")
         if not next_rebalance_date:
+            all_dates = sorted(raw_df["日期"].unique())
             rb_dates = state.get("rebalance_dates", [])
             if rb_dates:
                 for d in rb_dates:
                     if d >= latest_date_str:
                         next_rebalance_date = d
                         break
+                if not next_rebalance_date:
+                    last_rb = rb_dates[-1]
+                    last_idx = next((i for i, d in enumerate(all_dates) if d >= pd.Timestamp(last_rb)), None)
+                    if last_idx is not None:
+                        next_idx = last_idx + rebalance_days
+                        if next_idx < len(all_dates):
+                            next_rebalance_date = all_dates[next_idx].strftime("%Y-%m-%d")
+                        else:
+                            # 数据不足，用 pandas_market_calendars 推算
+                            try:
+                                import pandas_market_calendars as mcal
+                                xshg = mcal.get_calendar("XSHG")
+                                look_end = pd.Timestamp(last_rb) + pd.Timedelta(days=rebalance_days * 7)
+                                cal_dates = xshg.valid_days(start_date=pd.Timestamp(last_rb), end_date=look_end, tz=None)
+                                rb_pos = cal_dates.get_loc(pd.Timestamp(last_rb).normalize())
+                                next_pos = rb_pos + rebalance_days
+                                if next_pos < len(cal_dates):
+                                    next_rebalance_date = cal_dates[next_pos].strftime("%Y-%m-%d")
+                            except Exception:
+                                pass
             if not next_rebalance_date:
-                all_dates = sorted(raw_df["日期"].unique())
                 start_idx = next((i for i, d in enumerate(all_dates) if d >= pd.Timestamp(start_date)), None)
                 today_idx = next((i for i, d in enumerate(all_dates) if d >= pd.Timestamp(latest_date_str)), None)
                 if start_idx is not None and today_idx is not None:
                     for offset in range(0, len(all_dates) - start_idx + rebalance_days, rebalance_days):
                         rb_idx = start_idx + offset
                         if rb_idx >= len(all_dates):
-                            date_diff = rb_idx - today_idx
                             from datetime import timedelta
                             next_rebalance_date = (all_dates[-1] + timedelta(days=1)).strftime("%Y-%m-%d")
                             break
@@ -3113,12 +3352,26 @@ def run_from_juejin(verbose=True, start_date="2026-04-01", initial_capital=10000
                             next_rebalance_date = all_dates[rb_idx].strftime("%Y-%m-%d")
                             break
 
+        # 补齐 vol_dict（掘金 predictions_history 可能没有 strategy_params.vol_dict）
+        _ws = cfg.get("weight_strategy", "equal")
+        _tk = cfg.get("top_k", 3)
+        _sp = dict(cfg.get("strategy_params", {}))
+        if _ws in ("risk_parity", "score_risk") and "vol_dict" not in _sp:
+            latest_ph_seq = None
+            for entry in reversed(rk_seq.get("predictions_history", [])):
+                if entry.get("predictions"):
+                    latest_ph_seq = entry
+                    break
+            if latest_ph_seq:
+                top_ids = [p["stock_id"] for p in latest_ph_seq["predictions"][:_tk]]
+                _vol_window = _sp.get("vol_window", 20)
+                vol_dict = compute_volatility(raw_df, top_ids, latest_date_str, _vol_window)
+                if vol_dict:
+                    _sp["vol_dict"] = vol_dict
+        _pp = cfg.get("position_pct", 0.95)
+
         # 构建 latest_report.json
         source = "掘金" if report_key == "juejin" else "本地回测"
-        _ws = cfg.get("weight_strategy", "equal")
-        _sp = cfg.get("strategy_params", {})
-        _tk = cfg.get("top_k", 3)
-        _pp = cfg.get("position_pct", 0.95)
         report = {
             "date": latest_date_str,
             "is_rebalance_day": is_rebalance_day,
@@ -3138,6 +3391,7 @@ def run_from_juejin(verbose=True, start_date="2026-04-01", initial_capital=10000
             "strategy_params": _sp,
             "top_k": _tk,
             "position_pct": _pp,
+            "rebalance_dates": state.get("rebalance_dates", []),
             "strategy_info": _format_strategy_info(
                 _ws, _sp, _tk, _pp,
                 cfg.get("commission", 0.0003), cfg.get("slippage", 0.001),

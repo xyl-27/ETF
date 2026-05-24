@@ -62,7 +62,7 @@ juejin:
   start_date: "2026-04-01"
   trade_mode: "open"
   position_pct: 0.95
-  weight_strategy: "equal"
+  weight_strategy: "risk_parity"
   strategy_params:
     vol_window: 20
 

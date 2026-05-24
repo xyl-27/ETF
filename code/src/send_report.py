@@ -392,10 +392,21 @@ def _compute_rank_maps(target_date):
         for i, code in enumerate(ranked.index):
             results.setdefault(code, {})["rank_1d"] = i + 1
             results[code]["ret_1d"] = round(float(ranked.iloc[i]), 2)
+    # 5日趋势: 归一化线性回归斜率 (%/day)
+    if len(pivot.columns) >= 5:
+        x = np.arange(5)
+        for code in pivot.index:
+            vals = pivot.loc[code].iloc[-5:].values
+            if np.any(np.isnan(vals)) or np.any(vals <= 0):
+                continue
+            mean_p = np.mean(vals)
+            slope = np.polyfit(x, vals, 1)[0]
+            trend = slope / mean_p * 100
+            results.setdefault(code, {})["trend_5d"] = round(float(trend), 2)
     return results
 
 
-def _build_pred_signals_table(seq_data, report_date, weight_strategy="equal", strategy_params=None, top_k=3, position_pct=0.95):
+def _build_pred_signals_table(seq_data, report_date, weight_strategy="equal", strategy_params=None, top_k=3, position_pct=0.95, model_name=""):
     """从 predictions_history 构建预测信号表（前10名），含权重策略仓位"""
     from backtest import compute_weights
 
@@ -420,7 +431,11 @@ def _build_pred_signals_table(seq_data, report_date, weight_strategy="equal", st
     score_std = max(np.std([p["score"] for p in preds]), 1e-12) if len(preds) > 1 else 1.0
 
     # 按权重策略计算每只股票的分配比例
-    w_dict = compute_weights(all_preds, top_k, weight_strategy, strategy_params)
+    # 优先用回测时保存的 strategy_params（含 vol_dict），否则用 config 参数
+    _sp = strategy_params or {}
+    _ph_sp = latest_ph.get("strategy_params") or {}
+    _merged_sp = {**_sp, **_ph_sp}
+    w_dict = compute_weights(all_preds, top_k, weight_strategy, _merged_sp)
 
     etf_names = _load_etf_names()
     rank_map = _compute_rank_maps(report_date)
@@ -449,7 +464,116 @@ def _build_pred_signals_table(seq_data, report_date, weight_strategy="equal", st
         w_clr = "#cc0000" if w > 0 else "#999"
         rows += f"""<tr><td style="text-align:right;font-weight:bold;">{rank}</td><td><a href="{_xueqiu_url(code)}" target="_blank" style="text-decoration:none;color:inherit;">{code}</a>{name_display}</td><td style="text-align:right;font-family:monospace;">{score_str}</td><td style="text-align:right;font-family:monospace;color:{adv_clr};font-weight:bold;">{adv_str}</td><td style="text-align:right;font-family:monospace;color:{w_clr};font-weight:bold;">{w_str}</td>{_rank_cell(code, 'rank_1d')}{_rank_cell(code, 'rank_5d')}</tr>"""
 
-    return f"""<h3>预测信号 (Top10, {ph_date})</h3><table><thead><tr><th style="text-align:right;">排名</th><th>代码</th><th style="text-align:right;">Score</th><th style="text-align:right;">优势</th><th style="text-align:right;font-size:11px;">仓位</th><th style="text-align:right;font-size:11px;">实时<br>排名</th><th style="text-align:right;font-size:11px;">近5日<br>排名</th></tr></thead><tbody>{rows}</tbody></table>"""
+    title = f"预测信号 (Top10, {ph_date})"
+    if model_name:
+        title = f"{title} — {model_name}"
+    return f"""<h3>{title}</h3><table><thead><tr><th style="text-align:right;">排名</th><th>代码</th><th style="text-align:right;">Score</th><th style="text-align:right;">优势</th><th style="text-align:right;font-size:11px;">仓位</th><th style="text-align:right;font-size:11px;">实时<br>排名</th><th style="text-align:right;font-size:11px;">近5日<br>排名</th></tr></thead><tbody>{rows}</tbody></table>"""
+
+
+def _build_pred_signals_merged(sequences, report_date, weight_strategy="equal", strategy_params=None, top_k=3, position_pct=0.95, model_order=None, voting_total_models=None):
+    """将多个模型的预测合成一张表，每行加「模型」列"""
+    from backtest import compute_weights
+    _all_rows = []
+    _display_names = {"average": "平均", "voting": "投票", "juejin": "掘金"}
+    etf_names = _load_etf_names()
+    rank_map = _compute_rank_maps(report_date)
+
+    # 模型排序: yaml 顺序 > average > voting > juejin
+    if model_order is None:
+        model_order = list(sequences.keys())
+    _model_rank = {k: i for i, k in enumerate(model_order)}
+
+    def _rc(code, key):
+        info = rank_map.get(code, {})
+        r = info.get(key)
+        if r is None:
+            return '<td style="text-align:right;color:#999;font-size:10px;">-</td>'
+        clr = "#cc0000" if r <= 25 else ("#f39c12" if r <= 50 else "#009900")
+        return f'<td style="text-align:right;color:{clr};font-weight:bold;font-size:10px;">{r}</td>'
+
+    def _tc(code):
+        info = rank_map.get(code, {})
+        v = info.get("trend_5d")
+        if v is None:
+            return '<td style="text-align:right;color:#999;font-size:10px;">-</td>'
+        clr = "#cc0000" if v >= 0 else "#009900"
+        return f'<td style="text-align:right;color:{clr};font-weight:bold;font-size:10px;">{v:+.2f}%</td>'
+
+    for sk, sd in sequences.items():
+        ph = sd.get("predictions_history", [])
+        if not ph:
+            continue
+        latest_ph = None
+        for entry in reversed(ph):
+            if entry.get("predictions"):
+                latest_ph = entry
+                break
+        if not latest_ph:
+            continue
+        all_preds = latest_ph["predictions"]
+        preds = all_preds[:10]
+        ph_date = latest_ph["date"]
+        cutoff_idx = min(3, len(preds) - 1) if preds else 0
+        cutoff_score = preds[cutoff_idx]["score"] if preds and cutoff_idx >= 0 else 0
+        score_std = max(np.std([p["score"] for p in preds]), 1e-12) if len(preds) > 1 else 1.0
+
+        _sp = strategy_params or {}
+        _ph_sp = latest_ph.get("strategy_params") or {}
+        _merged_sp = {**_sp, **_ph_sp}
+        w_dict = compute_weights(all_preds, top_k, weight_strategy, _merged_sp)
+
+        mn = _display_names.get(sk, sk.replace("search_", "").replace("_exp_", " "))
+
+        # 投票序列: score = 票数/总模型数, advantage = -
+        _is_voting = (sk == "voting")
+        if _is_voting:
+            _voting_total = voting_total_models or latest_ph.get("voting_total_models")
+            if not _voting_total:
+                _scores = [int(p["score"]) for p in all_preds]
+                _voting_total = max(set(_scores)) if _scores else None
+        else:
+            _voting_total = None
+
+        for p in preds:
+            rank = p["rank"]
+            code = p["stock_id"]
+            name = etf_names.get(code, "")
+            score = p["score"]
+            if _is_voting and _voting_total:
+                score_display = f"{int(score)}/{_voting_total}"
+                adv_display = "-"
+            else:
+                score_display = f"{score:.4f}"
+                adv_display = f"{(score - cutoff_score) / score_std:+.4f}"
+            w = w_dict.get(code, 0) * position_pct * 100
+            _all_rows.append({
+                "rank": rank, "model": mn, "model_key": sk, "code": code, "name": name,
+                "score_display": score_display, "adv_display": adv_display, "weight": w,
+                "_score": score,
+            })
+
+    if not _all_rows:
+        return ""
+
+    _all_rows.sort(key=lambda r: (r["rank"], _model_rank.get(r["model_key"], 999)))
+
+    rows_html = ""
+    _last_rank = None
+    for r in _all_rows:
+        if _last_rank is not None and r["rank"] != _last_rank:
+            rows_html += """<tr><td colspan="9" style="border-top:2px solid #ddd;padding:0;"></td></tr>"""
+        _last_rank = r["rank"]
+        adv_str = r["adv_display"]
+        if adv_str == "-":
+            adv_clr = "#999"
+        else:
+            adv_clr = "#cc0000" if float(adv_str) >= 0 else "#009900"
+        w_str = f"{r['weight']:.2f}%" if r['weight'] > 0 else "-"
+        w_clr = "#cc0000" if r['weight'] > 0 else "#999"
+        name_display = f" ({r['name']})" if r['name'] else ""
+        rows_html += f"""<tr><td style="text-align:right;font-weight:bold;">{r['rank']}</td><td style="color:#888;font-size:11px;">{r['model']}</td><td><a href="{_xueqiu_url(r['code'])}" target="_blank" style="text-decoration:none;color:inherit;">{r['code']}</a>{name_display}</td><td style="text-align:right;font-family:monospace;">{r['score_display']}</td><td style="text-align:right;font-family:monospace;color:{adv_clr};font-weight:bold;">{adv_str}</td><td style="text-align:right;font-family:monospace;color:{w_clr};font-weight:bold;">{w_str}</td>{_rc(r['code'], 'rank_1d')}{_rc(r['code'], 'rank_5d')}{_tc(r['code'])}</tr>"""
+
+    return f"""<h3>预测信号 (Top10, {ph_date})</h3><table><thead><tr><th style="text-align:right;">排名</th><th style="font-size:11px;">模型</th><th>代码</th><th style="text-align:right;">Score</th><th style="text-align:right;">优势</th><th style="text-align:right;font-size:11px;">仓位</th><th style="text-align:right;font-size:11px;">实时<br>排名</th><th style="text-align:right;font-size:11px;">近5日<br>排名</th><th style="text-align:right;font-size:11px;">涨跌趋势<br>(5日)</th></tr></thead><tbody>{rows_html}</tbody></table>"""
 
 
 def build_report_html(*, date, model_display, total_value, cash, holdings,
@@ -470,6 +594,14 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
         if r is None: return '<td style="text-align:right;color:#999;font-size:10px;">-</td>'
         clr = "#cc0000" if r <= 25 else ("#f39c12" if r <= 50 else "#009900")
         return f'<td style="text-align:right;color:{clr};font-weight:bold;font-size:10px;">{r}</td>'
+
+    def _tc(code):
+        info = _rank_map.get(code, {})
+        v = info.get("trend_5d")
+        if v is None:
+            return '<td style="text-align:right;color:#999;font-size:10px;">-</td>'
+        clr = "#cc0000" if v >= 0 else "#009900"
+        return f'<td style="text-align:right;color:{clr};font-weight:bold;font-size:10px;">{v:+.2f}%</td>'
     # 持仓表
     pnl_by_stock = {p["stock_id"]: p for p in (today_pnl_positions or [])}
     holdings_rows = ""
@@ -505,10 +637,10 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
         buy_date_str = buy_date[-5:] if len(buy_date) >= 5 else buy_date
         buy_factor = h.get("buy_factor", 1.0)
         buy_factor_str = f"{buy_factor:.4f}" if buy_factor else "-"
-        holdings_rows += f"""<tr><td><a href="{_xueqiu_url(code)}" target="_blank" style="text-decoration:none;color:inherit;">{code}</a></td><td>{name}</td>{_rc(code, 'rank_1d')}{_rc(code, 'rank_5d')}<td style="text-align:right;">{price_display_str}</td><td style="text-align:right;">{buy_price_display_str}</td><td style="text-align:right;font-family:monospace;font-size:11px;">{buy_factor_str}</td><td style="text-align:center;font-size:11px;color:#888;">{buy_date_str}</td><td style="text-align:right;color:{hl_color};">{hl_str}</td><td style="text-align:right;color:{ll_color};">{ll_str}</td><td style="text-align:right;">{shares:,}</td><td style="text-align:right;">{mkt_val:,.0f}</td><td style="text-align:right;font-weight:bold;">{weight:.2f}%</td><td style="text-align:right;color:{pnl_color};font-weight:bold;">{pnl_str}</td><td style="text-align:right;font-weight:bold;color:{rebal_color};">{rebal_str}</td></tr>"""
+        holdings_rows += f"""<tr><td><a href="{_xueqiu_url(code)}" target="_blank" style="text-decoration:none;color:inherit;">{code}</a></td><td>{name}</td>{_rc(code, 'rank_1d')}{_rc(code, 'rank_5d')}{_tc(code)}<td style="text-align:right;">{price_display_str}</td><td style="text-align:right;">{buy_price_display_str}</td><td style="text-align:right;font-family:monospace;font-size:11px;">{buy_factor_str}</td><td style="text-align:center;font-size:11px;color:#888;">{buy_date_str}</td><td style="text-align:right;color:{hl_color};">{hl_str}</td><td style="text-align:right;color:{ll_color};">{ll_str}</td><td style="text-align:right;">{shares:,}</td><td style="text-align:right;">{mkt_val:,.0f}</td><td style="text-align:right;font-weight:bold;">{weight:.2f}%</td><td style="text-align:right;color:{pnl_color};font-weight:bold;">{pnl_str}</td><td style="text-align:right;font-weight:bold;color:{rebal_color};">{rebal_str}</td></tr>"""
 
     cash_weight = (cash / total_value * 100) if total_value > 0 else 0
-    holdings_rows += f"""<tr style="color:#999;"><td>现金</td><td>未投资资金</td><td style="text-align:right;color:#999;font-size:10px;">-</td><td style="text-align:right;color:#999;font-size:10px;">-</td><td style="text-align:right;">-</td><td style="text-align:right;">-</td><td style="text-align:right;font-size:11px;">-</td><td style="text-align:center;font-size:11px;color:#999;">-</td><td style="text-align:right;">-</td><td style="text-align:right;">-</td><td style="text-align:right;">-</td><td style="text-align:right;">{cash:,.0f}</td><td style="text-align:right;">{cash_weight:.2f}%</td><td style="text-align:right;">-</td><td style="text-align:right;">-</td></tr>"""
+    holdings_rows += f"""<tr style="color:#999;"><td>现金</td><td>未投资资金</td><td style="text-align:right;color:#999;font-size:10px;">-</td><td style="text-align:right;color:#999;font-size:10px;">-</td><td style="text-align:right;color:#999;font-size:10px;">-</td><td style="text-align:right;">-</td><td style="text-align:right;">-</td><td style="text-align:right;font-size:11px;">-</td><td style="text-align:center;font-size:11px;color:#999;">-</td><td style="text-align:right;">-</td><td style="text-align:right;">-</td><td style="text-align:right;">-</td><td style="text-align:right;">{cash:,.0f}</td><td style="text-align:right;">{cash_weight:.2f}%</td><td style="text-align:right;">-</td><td style="text-align:right;">-</td></tr>"""
 
     pnl_total_color = "#cc0000" if today_pnl_total >= 0 else "#009900"
     total_rebal_pnl = sum(round(h["shares"] * (h["price"] - h.get("buy_price", 0)), 2) for h in holdings if h.get("price") and h.get("buy_price"))
@@ -516,51 +648,33 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
     total_rebal_pnl_pct = round(total_rebal_pnl / total_rebal_cost * 100, 2) if total_rebal_cost > 0 else 0
     rebal_total_color = "#cc0000" if total_rebal_pnl >= 0 else "#009900"
     total_shares = sum(h["shares"] for h in holdings)
-    holdings_rows += f"""<tr style="font-weight:bold;border-top:2px solid #333;"><td colspan="4" style="text-align:right;">合计</td><td colspan="6" style="text-align:right;">&nbsp;</td><td style="text-align:right;">{total_shares:,}</td><td style="text-align:right;">{total_value:,.0f}</td><td style="text-align:right;">{(total_value - cash) / total_value * 100:.2f}%</td><td style="text-align:right;color:{pnl_total_color};">{today_pnl_total:+.0f}</td><td style="text-align:right;color:{rebal_total_color};">{total_rebal_pnl:+.0f} ({total_rebal_pnl_pct:+.2f}%)</td></tr>"""
+    holdings_rows += f"""<tr style="font-weight:bold;border-top:2px solid #333;"><td colspan="5" style="text-align:right;">合计</td><td colspan="6" style="text-align:right;">&nbsp;</td><td style="text-align:right;">{total_shares:,}</td><td style="text-align:right;">{total_value:,.0f}</td><td style="text-align:right;">{(total_value - cash) / total_value * 100:.2f}%</td><td style="text-align:right;color:{pnl_total_color};">{today_pnl_total:+.0f}</td><td style="text-align:right;color:{rebal_total_color};">{total_rebal_pnl:+.0f} ({total_rebal_pnl_pct:+.2f}%)</td></tr>"""
 
     # 交易表
     trades_section = ""
     if trades_list and any(t["action"] in ("买入", "卖出", "跳过") for t in trades_list):
-        stock_model_count = {}
-        exp_models = set()
-        for t in trades_list:
-            s = t["stock"]
-            m = t.get('model_key', '')
-            if m and "exp_" in m:
-                exp_models.add(m)
-                if s not in stock_model_count:
-                    stock_model_count[s] = set()
-                stock_model_count[s].add(m)
-        stock_model_count = {s: len(ms) for s, ms in stock_model_count.items()}
-        total_exp_models = len(exp_models)
+        trade_etf_names = _load_etf_names()
+        holdings_map = {h["stock_id"]: h for h in (holdings or [])}
 
         trades_rows = ""
-        prev_model = None
         for t in trades_list:
-            cur_model = t.get('model_key', '')
-            if cur_model and cur_model != prev_model:
-                section_display = re.sub(r'_\w+_exp_', ' ', cur_model)
-                trades_rows += f"""<tr class="section"><td colspan="11">▸ {section_display}</td></tr>"""
-                prev_model = cur_model
             if t["action"] == "卖出":
                 action_color = "#009900"
             elif t["action"] == "买入":
                 action_color = "#cc0000"
             elif t["action"] == "跳过":
                 action_color = "#999"
-                row_style = ' style="background:#f5f5f5;color:#999;"'
             else:
                 action_color = "#666"
-                row_style = ""
             if t["action"] == "跳过":
                 reason = t.get("reason", "")
                 hl = t.get("high_limit", 0)
                 ll = t.get("low_limit", 0)
                 hl_str = f"{hl:.3f}" if hl else "-"
                 ll_str = f"{ll:.3f}" if ll else "-"
-                trades_rows += f"""<tr class="skipped"><td style="color:#888;">{cur_model}</td><td><span style="color:{action_color};font-weight:bold;">{t['action']}</span></td><td><a href="{_xueqiu_url(t['stock'])}" target="_blank" style="text-decoration:none;color:#aaa;">{t['stock']}</a></td><td class="skip-reason">{reason}</td><td style="text-align:right;">{hl_str}</td><td style="text-align:right;">{ll_str}</td><td style="text-align:right;">-</td><td style="text-align:right;">-</td><td style="text-align:right;color:#999;">-</td><td style="text-align:right;color:#999;">-</td><td style="text-align:right;color:#999;">-</td></tr>"""
+                trades_rows += f"""<tr class="skipped"><td><span style="color:{action_color};font-weight:bold;">{t['action']}</span></td><td><a href="{_xueqiu_url(t['stock'])}" target="_blank" style="text-decoration:none;color:#aaa;">{t['stock']}</a></td><td class="skip-reason">{reason}</td><td style="text-align:right;">{hl_str}</td><td style="text-align:right;">{ll_str}</td><td style="text-align:right;">-</td><td style="text-align:right;">-</td><td style="text-align:right;color:#999;">-</td><td style="text-align:right;color:#999;">-</td><td style="text-align:right;color:#999;">-</td><td style="text-align:right;color:#999;">-</td><td style="text-align:right;color:#999;">-</td></tr>"""
                 continue
-            name_display = t.get('name') or t['stock']
+            name_display = t.get('name') or trade_etf_names.get(t['stock'], t['stock'])
             hl = t.get("high_limit", 0)
             ll = t.get("low_limit", 0)
             hl_str = f"{hl:.3f}" if hl else "-"
@@ -568,9 +682,6 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
             price = t.get("price", 0)
             hl_color = "#cc0000" if price and hl and price >= hl else "#333"
             ll_color = "#009900" if price and ll and price <= ll else "#333"
-            cnt = stock_model_count.get(t["stock"], 0)
-            if cnt > 1 and total_exp_models:
-                name_display += f" ({cnt}/{total_exp_models})"
             shares_display = f"{t['shares']:,}" if t.get('shares') else "-"
             price_display = f"{t['price']:.3f}" if t.get('price') else "-"
             tc = t.get('trade_cost')
@@ -598,8 +709,16 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
             else:
                 reb_style = "color: #999;"
                 reb_display = "-"
-            trades_rows += f"""<tr><td style="color:#888;">{cur_model}</td><td><span style="color:{action_color};font-weight:bold;">{t['action']}</span></td><td><a href="{_xueqiu_url(t['stock'])}" target="_blank" style="text-decoration:none;color:inherit;">{t['stock']}</a></td><td>{name_display}</td><td style="text-align:right;color:{hl_color};">{hl_str}</td><td style="text-align:right;color:{ll_color};">{ll_str}</td><td style="text-align:right;">{shares_display}</td><td style="text-align:right;">{price_display}</td><td style="text-align:right;{tc_style}">{tc_display}</td><td style="text-align:right;{reb_style}">{reb_display}</td><td style="text-align:right;{adv_style}">{adv_display}</td></tr>"""
-        trades_section = f"""<h3>今日调仓</h3><table><thead><tr><th style="font-size:11px;">模型</th><th>操作</th><th>代码</th><th>名称</th><th style="text-align:right;">涨停价</th><th style="text-align:right;">跌停价</th><th style="text-align:right;">数量</th><th style="text-align:right;">价格</th><th style="text-align:right;">交易成本</th><th style="text-align:right;">盈亏</th><th style="text-align:right;">优势</th></tr></thead><tbody>{trades_rows}</tbody></table>"""
+            # 当前仓位（调仓后）
+            hp = holdings_map.get(t['stock'], {})
+            cur_shares = hp.get("shares", 0)
+            cur_price = hp.get("price", 0)
+            cur_mkt_val = cur_shares * cur_price
+            cur_weight = (cur_mkt_val / total_value * 100) if total_value > 0 and cur_mkt_val > 0 else 0
+            pos_display = f"{cur_mkt_val:,.0f}" if cur_mkt_val > 0 else "-"
+            weight_display = f"{cur_weight:.2f}%" if cur_weight > 0 else "-"
+            trades_rows += f"""<tr><td><span style="color:{action_color};font-weight:bold;">{t['action']}</span></td><td><a href="{_xueqiu_url(t['stock'])}" target="_blank" style="text-decoration:none;color:inherit;">{t['stock']}</a></td><td>{name_display}</td><td style="text-align:right;color:{hl_color};">{hl_str}</td><td style="text-align:right;color:{ll_color};">{ll_str}</td><td style="text-align:right;">{shares_display}</td><td style="text-align:right;">{price_display}</td><td style="text-align:right;{tc_style}">{tc_display}</td><td style="text-align:right;{reb_style}">{reb_display}</td><td style="text-align:right;{adv_style}">{adv_display}</td><td style="text-align:right;">{pos_display}</td><td style="text-align:right;">{weight_display}</td></tr>"""
+        trades_section = f"""<h3>本期交易记录</h3><table><thead><tr><th>操作</th><th>代码</th><th>名称</th><th style="text-align:right;">涨停价</th><th style="text-align:right;">跌停价</th><th style="text-align:right;">数量</th><th style="text-align:right;">价格</th><th style="text-align:right;">交易成本</th><th style="text-align:right;">盈亏</th><th style="text-align:right;">优势</th><th style="text-align:right;">市值</th><th style="text-align:right;">仓位</th></tr></thead><tbody>{trades_rows}</tbody></table>"""
 
     # 指标
     mdd_detail = metrics.get("max_drawdown_details", {})
@@ -796,7 +915,24 @@ def send_report(model_key=None, verbose=False):
     rebalance_win_rate = seq_data.get("model_stats", {}).get("total_win_rate_pct")
     source = report.get("source", "")
 
-    trades = report.get("all_today_trades", report.get("today_trades", []))
+    # 本期交易: 仅主序列，最近调仓日至今的所有买卖
+    period_start = date
+    rb_dates = report.get("rebalance_dates", [])
+    if rb_dates:
+        for d in reversed(rb_dates):
+            if d <= date:
+                period_start = d
+                break
+    if period_start == date:
+        for _entry in reversed(seq_data.get("predictions_history", [])):
+            _d = _entry.get("date", "")
+            if _d and _d <= date:
+                period_start = _d
+                break
+    trades = []
+    for _t in seq_data.get("trades", []):
+        if period_start <= _t["date"] <= date and _t["action"] in ("买入", "卖出"):
+            trades.append(_t)
 
     today_pnl_data = seq_data.get("today_pnl", {})
     today_pnl_total = today_pnl_data.get("total_pnl", 0)
@@ -831,13 +967,15 @@ def send_report(model_key=None, verbose=False):
 
     trade_mode = report.get("trade_mode", "open")
 
-    # 预测信号表（含权重仓位）
-    pred_signals_section = _build_pred_signals_table(
-        seq_data, date,
+    # 预测信号表（所有模型合成一张，加「模型」列）
+    pred_signals_section = _build_pred_signals_merged(
+        sequences, date,
         weight_strategy=report.get("weight_strategy", "equal"),
         strategy_params=report.get("strategy_params", {}),
         top_k=report.get("top_k", 3),
         position_pct=report.get("position_pct", 0.95),
+        model_order=list(sequences.keys()),
+        voting_total_models=report.get("voting_total_models"),
     )
 
     # 市场监控

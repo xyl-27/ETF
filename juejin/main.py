@@ -15,7 +15,7 @@ PREDICTIONS_PATH = r"C:\Users\xyl\Desktop\ETF\output\predictions.json"
 STATE_PATH = r"C:\Users\xyl\Desktop\ETF\output\backtest_state.json"
 JUEJIN_STATE_PATH = r"C:\Users\xyl\Desktop\ETF\output\juejin_state.json"
 RESULT_PATH = r"C:\Users\xyl\Desktop\ETF\output\juejin_result.json"
-YAML_PATH = r"C:\Users\xyl\Desktop\ETF\output\model_selection.yaml"
+YAML_PATH = r"C:\Users\xyl\Desktop\ETF\config.yaml"
 
 MODEL_KEY = None
 TOP_K = 3
@@ -26,7 +26,8 @@ POSITION_PCT = 0.95
 WEIGHT_STRATEGY = "equal"
 STRATEGY_PARAMS = {}
 CACHED_CSV = None
-DATA_CSV_PATH = os.path.join(os.path.dirname(os.path.dirname(YAML_PATH)), "etf_data", "etf_74.csv")
+ETF_ROOT = r"C:\Users\xyl\Desktop\ETF"
+DATA_CSV_PATH = os.path.join(ETF_ROOT, "etf_data", "etf_74.csv")
 
 
 def load_config_from_yaml():
@@ -221,6 +222,7 @@ def init(context):
     context.snapshot_positions = {}
     context.snapshot_cash = 0
     context.rebalance_snapshots = []  # 每次调仓的快照
+    context.daily_log = []  # 每日持仓+价格快照
 
     trade_time = '09:31:00' if TRADE_MODE == 'open' else '14:55:00'
     print(f"[策略] 交易模式: {'开盘交易' if TRADE_MODE == 'open' else '收盘交易'}, 执行时间: {trade_time}")
@@ -286,8 +288,9 @@ def algo(context):
     print(f"[调仓日] {now_str}")
     print(f"[账户] 调仓前: 总值={pre_total:.2f} 现金={pre_cash:.2f} 持仓={pre_pos_val:.2f}")
 
-    # Top-K 目标持仓
-    top_k_symbols = {to_gm_symbol(p["stock_id"]) for p in today_preds[:TOP_K]}
+    # Top-K 目标持仓（用有序列表保持平台/本地一致性）
+    top_k_list = [to_gm_symbol(p["stock_id"]) for p in today_preds[:TOP_K]]
+    top_k_symbols = set(top_k_list)
     top_k_stocks = {p["stock_id"] for p in today_preds[:TOP_K]}
     print(f"[策略] Top-{TOP_K}: {', '.join(top_k_stocks)}")
 
@@ -316,8 +319,8 @@ def algo(context):
 
     # 买入 Top-K（按加权策略分配仓位）
     import sys
-    sys.path.insert(0, r"C:\Users\xyl\Desktop\ETF")
-    from src.backtest import compute_weights, compute_volatility
+    sys.path.insert(0, os.path.join(ETF_ROOT, "code", "src"))
+    from backtest import compute_weights, compute_volatility
 
     _params = dict(STRATEGY_PARAMS)
     if WEIGHT_STRATEGY in ("risk_parity", "score_risk"):
@@ -331,9 +334,9 @@ def algo(context):
                 CACHED_CSV, top_ids, str(context.now.date()),
                 _params.get("vol_window", 20),
             )
-    _weights = compute_weights(today_preds, TOP_K, WEIGHT_STRATEGY, _params) if top_k_symbols else {}
-    if top_k_symbols:
-        for sym in top_k_symbols:
+    _weights = compute_weights(today_preds, TOP_K, WEIGHT_STRATEGY, _params) if top_k_list else {}
+    if top_k_list:
+        for sym in top_k_list:
             local = gm_to_local(sym)
             w = _weights.get(local, 0)
             percent = POSITION_PCT * w
@@ -362,6 +365,9 @@ def algo(context):
             "date": now_str,
             "top_k": list(top_k_stocks),
             "top_k_scores": [{"stock_id": p["stock_id"], "score": p["score"]} for p in today_preds[:TOP_K]],
+            "all_scores": [{"stock_id": p["stock_id"], "score": p["score"], "rank": p["rank"]} for p in today_preds[:20]],
+            "target_weights": {local: round(w, 4) for local, w in _weights.items()},
+            "target_percents": {local: round(POSITION_PCT * _weights.get(local, 0), 4) for local in top_k_stocks},
             "pre_total": round(pre_total, 2),
             "post_cash": round(post_cash, 2),
             "post_positions": post_positions,
@@ -380,6 +386,30 @@ def algo(context):
         context.snapshot_positions = pos_dict
         post_total = _get_account_value(account, "cash") + sum(_get_pos_market_value(p) for p in account.positions())
         print(f"[账户] 调仓后: 总值={post_total:.2f} 现金={_get_account_value(account, 'cash'):.2f}")
+    except Exception:
+        pass
+
+    # 每日持仓快照（含价格）
+    try:
+        account = context.account()
+        cash = _get_account_value(account, "cash")
+        pos_list = []
+        for pos in account.positions():
+            local = gm_to_local(pos["symbol"])
+            pos_list.append({
+                "stock": local,
+                "shares": pos["volume"],
+                "vwap": round(float(pos["vwap"]), 4),
+                "market_value": round(_get_pos_market_value(pos), 2),
+            })
+        total = cash + sum(p["market_value"] for p in pos_list)
+        context.daily_log.append({
+            "date": now_str,
+            "is_rebalance": now_str in context.rebalance_dates,
+            "cash": round(cash, 2),
+            "positions": pos_list,
+            "total_value": round(total, 2),
+        })
     except Exception:
         pass
 
@@ -663,10 +693,14 @@ def on_backtest_finished(context, indicator):
                     "slippage_ratio": 0.001,
                     "commission_ratio": 0.0003,
                     "backtest_end": context.end_date,
+                    "weight_strategy": WEIGHT_STRATEGY,
+                    "trade_mode": getattr(context, 'trade_mode', 'open'),
+                    "position_pct": POSITION_PCT,
                 },
                 "rebalance_dates": rebalance_dates_sorted,
                 "calendar_diff": {},
                 "rebalance_snapshots": getattr(context, "rebalance_snapshots", []),
+                "daily_log": getattr(context, "daily_log", []),
                 "trades": context.executed_trades,
                 "equity_curve": context.daily_equity,
                 "period_returns": period_returns,
@@ -681,7 +715,22 @@ def on_backtest_finished(context, indicator):
                     "win_ratio": round(indicator.get('win_ratio', 0), 4),
                     "calmar_ratio": round(indicator.get('calmar_ratio', 0), 4),
                 },
+                "gm_indicator_log": {},
             }
+            # 保存 indicator 所有字段（平台vs本地关键对比数据）
+            try:
+                gm_log = {}
+                for k in ind_keys:
+                    try:
+                        v = indicator[k]
+                        if hasattr(v, 'strftime'):
+                            v = str(v)
+                        gm_log[k] = v
+                    except Exception:
+                        pass
+                debug["gm_indicator_log"] = gm_log
+            except Exception:
+                pass
             with open(debug_path, "w", encoding="utf-8") as f:
                 json.dump(debug, f, ensure_ascii=False, indent=2, cls=_DatetimeEncoder)
             print(f"[结果] debug 详情已保存: {debug_path}")
@@ -711,7 +760,7 @@ if __name__ == '__main__':
     run(strategy_id='strategy_id',
         filename='main.py',
         mode=MODE_BACKTEST,
-        token='{{token}}',
+        token='1b511135ca6034bc04c9f2eeb66b3a70cb08b831',
         backtest_start_time=f'{START_DATE} 08:00:00',
         backtest_end_time=f'{end_date} 16:00:00',
         backtest_adjust=ADJUST_PREV,
