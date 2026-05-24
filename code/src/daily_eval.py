@@ -172,6 +172,77 @@ def load_etf_data(path=None, dtype=None):
 # 数据更新
 # ============================================================
 
+def _check_data_integrity(verbose: bool = True) -> bool:
+    """检查每只股票数据是否足够（>= seq_length 天），不足则触发全量下载。"""
+    data_file = PROJECT_ROOT / "etf_data" / "etf_74.csv"
+    if not data_file.exists():
+        return True  # 文件不存在，后续流程会处理
+
+    try:
+        df = pd.read_csv(data_file)
+        df["股票代码"] = df["股票代码"].astype(str).str.zfill(6)
+
+        # 从模型 config 读取 seq_length
+        cfg = load_full_config()
+        models = cfg.get("models", [])
+        if not models:
+            return True
+        first_exp = models[0]["dir"]
+        config_path = PROJECT_ROOT / first_exp / "config.json"
+        if not config_path.exists():
+            return True
+        with open(config_path) as f:
+            model_cfg = json.load(f)
+        seq_length = int(model_cfg.get("sequence_length", 60))
+
+        missing = []
+        for sid in sorted(df["股票代码"].unique()):
+            sub = df[df["股票代码"] == sid]
+            if len(sub) < seq_length:
+                missing.append((sid, len(sub), sub["日期"].min(), sub["日期"].max()))
+
+        if not missing:
+            return True
+
+        if verbose:
+            print(f"\n[数据完整性] 发现 {len(missing)} 只股票数据不足（需要 >= {seq_length} 天）:")
+            for sid, n, mn, mx in missing[:10]:
+                print(f"  {sid}: 仅 {n} 天 ({mn} ~ {mx})")
+            if len(missing) > 10:
+                print(f"  ... 共 {len(missing)} 只")
+
+        # 触发全量下载
+        script_path = str(PROJECT_ROOT / "juejin" / "download_etf_data.py")
+        gm_python = GM_PYTHON
+        if not os.path.exists(script_path) or not os.path.exists(gm_python):
+            print("[数据完整性] 无法执行全量下载（脚本或 GM Python 不可用）")
+            return False
+
+        print(f"[数据完整性] 触发全量下载...")
+        cmd = [gm_python, script_path, "--start-date", "2022-01-01"]
+        result = subprocess.run(cmd, cwd=str(PROJECT_ROOT), capture_output=True, timeout=600)
+        stdout = result.stdout.decode("utf-8", errors="replace")
+        stderr = result.stderr.decode("utf-8", errors="replace")
+        if verbose:
+            if stdout.strip():
+                print(stdout.strip())
+            if stderr.strip():
+                print(stderr.strip())
+
+        has_fail = "FAIL" in stdout or result.returncode != 0
+        if has_fail:
+            fail_lines = [l for l in stdout.split("\n") if "FAIL" in l]
+            print(f"[数据完整性] 全量下载完成，{len(fail_lines)} 只失败")
+            return False
+
+        print(f"[数据完整性] 全量下载成功")
+        return True
+    except Exception as e:
+        if verbose:
+            print(f"[数据完整性] 检查异常: {e}")
+        return False
+
+
 def update_etf_data(verbose: bool = True) -> bool:
     script_path = str(PROJECT_ROOT / "juejin" / "download_etf_data.py")
     if not os.path.exists(script_path):
@@ -413,7 +484,7 @@ def _compute_longterm_risk_metrics(daily_rets, cum, dates, dd_periods):
     # VaR / CVaR
     sorted_rets = np.sort(daily_rets_arr)
     def _var_cvar(percentile):
-        idx = max(1, int(n * (1 - percentile / 100)))
+        idx = max(1, int(np.ceil(n * (1 - percentile / 100))))
         var_val = float(sorted_rets[idx - 1])
         cvar_val = float(np.mean(sorted_rets[:idx])) if idx > 0 else var_val
         return var_val, cvar_val
@@ -1664,6 +1735,7 @@ def daily_eval(
             print(f"\n[1/4] 更新数据...", end=" ", flush=True)
             ok = update_etf_data(verbose=verbose)
             print(f"{'✅' if ok else '❌'}  ({time.time()-_t0:.0f}s)")
+            _check_data_integrity(verbose=verbose)
 
         raw_df = load_etf_data(DATA_FILE, dtype={"股票代码": str})
         raw_df["股票代码"] = raw_df["股票代码"].astype(str).str.zfill(6)
