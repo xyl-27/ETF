@@ -41,6 +41,12 @@ models:
   - dir: model/bayes_dlinear_74_3_2026-01-01_2026-03-31/exp_10
     file: best_model_sliding.pth
     enabled: true
+  - dir: model/bayes_dlinear_74_3_2026-01-01_2026-03-31/exp_3
+    file: best_model.pth
+    enabled: false
+  - dir: model/bayes_gru_74_3_2026-01-01_2026-03-31/exp_0
+    file: best_model.pth
+    enabled: true
 
 # 融合序列
 average: true                # 启用平均模型

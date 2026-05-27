@@ -43,7 +43,16 @@ from train import (
 
 
 def preprocess_and_save(config, search_dir):
-    """只执行一次特征工程，返回预处理后的数据"""
+    """只执行一次特征工程，返回预处理后的数据
+    
+    如果 search_dir 下已有 preprocessed_data.pkl + scaler.pkl，直接加载缓存。
+    """
+    preprocessed_path = os.path.join(search_dir, "preprocessed_data.pkl").replace("\\", "/")
+    scaler_path = os.path.join(search_dir, "scaler.pkl").replace("\\", "/")
+    if os.path.exists(preprocessed_path) and os.path.exists(scaler_path):
+        print(f"Loading cached preprocessed data from {preprocessed_path}...")
+        return joblib.load(preprocessed_path), joblib.load(scaler_path)
+
     # Set global config for train.py functions that use it
     for key in config:
         if key in train_config:

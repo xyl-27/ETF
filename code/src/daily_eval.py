@@ -1940,7 +1940,7 @@ def daily_eval(
                         avg_score[sid] = avg_score.get(sid, 0) + p["score"]
                 for sid in avg_score:
                     avg_score[sid] /= freq.get(sid, 1)
-                ranked = sorted(freq.items(), key=lambda x: (-x[1], -avg_score.get(x[0], 0)))[:top_k]
+                ranked = sorted(freq.items(), key=lambda x: (-x[1], -avg_score.get(x[0], 0)))[:max(top_k, 10)]
                 result = [{"rank": i+1, "stock_id": sid, "score": float(freq)} for i, (sid, freq) in enumerate(ranked)]
                 voting_pred_cache[date] = {"ranked": ranked, "top_k": top_k}
                 return result
@@ -2704,7 +2704,7 @@ def generate_predictions_only(
                             avg_score[sid] = avg_score.get(sid, 0) + p["score"]
                     for sid in avg_score:
                         avg_score[sid] /= freq.get(sid, 1)
-                    ranked = sorted(freq.items(), key=lambda x: (-x[1], -avg_score.get(x[0], 0)))[:top_k]
+                    ranked = sorted(freq.items(), key=lambda x: (-x[1], -avg_score.get(x[0], 0)))[:max(top_k, 10)]
                     result = [{"rank": i+1, "stock_id": sid, "score": float(freq)} for i, (sid, freq) in enumerate(ranked)]
                     vote_preds[d_str] = result
             all_predictions["voting"] = vote_preds

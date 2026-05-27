@@ -167,3 +167,25 @@ python -m py_compile code/src/daily_eval.py
 python -m py_compile code/src/send_report.py
 python -m py_compile juejin/main.py
 ```
+
+## Compare --live-only 参数详解
+
+```bash
+# 默认模式: 扫描 juejin/live 所有实验，测试全部 3 个 .pth 文件，使用 weight_strategy="equal"
+python code/src/model_manager.py compare --live-only
+
+# --use-config 模式: 仅测试 config.yaml 中启用的 (model_dir, model_file)，使用 config 的 weight_strategy
+python code/src/model_manager.py compare --live-only --use-config
+```
+
+参数:
+- `--use-config`: 从 config.yaml 读取模型列表和 `weight_strategy` + `strategy_params`；仅测试启用模型且仅测试配置指定的 `.pth` 文件
+- `--repro-val-start` (默认 `2025-01-01`)
+- `--repro-val-end` (默认 `2025-06-30`)
+
+### Return 对比根因
+
+`compare --live-only` 当前模型收益(~13%) vs 日报收益(~30%+)的差异根因:
+1. **硬编码 `weight_strategy="equal"`** (主因): `_backtest_one_model()` 中 hardcoded，而 config 使用 `risk_parity`。修复后 → ~22.5%。
+2. **全部 3 个 `.pth` 取平均**: 稀释了最优文件。`--use-config` 仅测配置指定的文件。
+3. **残余差距**: `feature_num`/scaler 等数据加载参数差异，及日报可能使用融合预测(average/voting/master first)。
