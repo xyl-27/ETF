@@ -473,11 +473,11 @@ def build_report(report_state, seq_key, all_sequences, raw_df, top_k=3, position
         if buy_date:
             bf_s = sub.loc[sub["日期"] == pd.Timestamp(buy_date), "复权因子"]
             buy_factor = float(bf_s.values[0]) if not bf_s.empty else 1.0
-        price_display_s = sub.loc[sub["日期"] == target_dt, "收盘_原始"]
+        price_display_s = sub.loc[sub["日期"] == target_dt, "收盘"]
         price_display = float(price_display_s.values[0]) if not price_display_s.empty else price
         buy_price_display = 0
         if buy_date:
-            bpd_s = sub.loc[sub["日期"] == pd.Timestamp(buy_date), "收盘_原始"]
+            bpd_s = sub.loc[sub["日期"] == pd.Timestamp(buy_date), "收盘"]
             buy_price_display = float(bpd_s.values[0]) if not bpd_s.empty else pinfo.get("buy_price", 0)
         holdings_list.append({
             "stock_id": sid,

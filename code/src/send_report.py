@@ -18,6 +18,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from llm_analyzer import build_llm_analysis_section
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 REPORT_PATH = PROJECT_ROOT / "output" / "latest_report.json"
@@ -576,6 +577,85 @@ def _build_pred_signals_merged(sequences, report_date, weight_strategy="equal", 
     return f"""<h3>预测信号 (Top10, {ph_date})</h3><table><thead><tr><th style="text-align:right;">排名</th><th style="font-size:11px;">模型</th><th>代码</th><th style="text-align:right;">Score</th><th style="text-align:right;">优势</th><th style="text-align:right;font-size:11px;">仓位</th><th style="text-align:right;font-size:11px;">实时<br>排名</th><th style="text-align:right;font-size:11px;">近5日<br>排名</th><th style="text-align:right;font-size:11px;">涨跌趋势<br>(5日)</th></tr></thead><tbody>{rows_html}</tbody></table>"""
 
 
+def _build_trade_history_table(seq_data):
+    trades = seq_data.get("trades", [])
+    predictions_history = seq_data.get("predictions_history", [])
+    equity_curve = seq_data.get("equity_curve", [])
+    if not trades:
+        return ""
+    trades_by_date = {}
+    for t in trades:
+        trades_by_date.setdefault(t["date"], []).append(t)
+    rb_dates = sorted(trades_by_date.keys())
+    if len(rb_dates) < 1:
+        return ""
+    ec_map = {e["date"]: e["total_value"] for e in equity_curve}
+    pred_map = {}
+    for p in predictions_history:
+        pd_ = {pp["stock_id"]: pp.get("score", 0) for pp in p.get("predictions", [])}
+        sorted_ = sorted(p.get("predictions", []), key=lambda x: x.get("score", 0), reverse=True)
+        rank_ = {}
+        for ri, pp in enumerate(sorted_):
+            rank_[pp["stock_id"]] = ri + 1
+        pred_map[p["date"]] = (pd_, rank_)
+    trade_etf_names = _load_etf_names()
+    rows = ""
+    prev_value = None
+    for rb_date in rb_dates:
+        day_trades = trades_by_date[rb_date]
+        buys = [t for t in day_trades if t["action"] == "买入"]
+        sells = [t for t in day_trades if t["action"] == "卖出"]
+        scores_map, rank_map = pred_map.get(rb_date, ({}, {}))
+        buy_cells = []
+        for t in buys:
+            code = t["stock"]
+            score = scores_map.get(code)
+            rank = rank_map.get(code)
+            name = trade_etf_names.get(code, "")
+            parts = [f'<a href="{_xueqiu_url(code)}" target="_blank" style="text-decoration:none;color:inherit;font-weight:bold;">{code}</a>']
+            if name:
+                parts.append(name)
+            score_str = f"S:{score:.2f}" if score is not None else ""
+            rank_str = f"#{rank}" if rank else ""
+            tag = f'<span style="font-size:10px;color:#888;">({score_str}{", " if score_str and rank_str else ""}{rank_str})</span>' if score_str or rank_str else ""
+            buy_cells.append(f'<div style="margin:1px 0;">{" ".join(parts)} {tag}</div>')
+        sell_cells = []
+        for t in sells:
+            code = t["stock"]
+            name = trade_etf_names.get(code, "")
+            parts = [f'<a href="{_xueqiu_url(code)}" target="_blank" style="text-decoration:none;color:#666;">{code}</a>']
+            if name:
+                parts.append(name)
+            sell_cells.append(f'<div style="margin:1px 0;color:#888;">{" ".join(parts)}</div>')
+        cur_value = ec_map.get(rb_date)
+        if cur_value is None:
+            for e in reversed(equity_curve):
+                if e["date"] <= rb_date:
+                    cur_value = e["total_value"]
+                    break
+        prv_val = prev_value or cur_value
+        if prev_value is not None and cur_value:
+            period_ret = (cur_value / prev_value - 1) * 100
+        else:
+            period_ret = None
+        cum_ret = (cur_value / ec_map.get(rb_dates[0], cur_value) - 1) * 100 if cur_value else 0
+        val_str = f"¥{cur_value:,.0f}" if cur_value else "-"
+        period_str = f"{period_ret:+.2f}%" if period_ret is not None else "-"
+        cum_str = f"{cum_ret:+.2f}%"
+        rows += f"""<tr>
+            <td style="font-weight:bold;white-space:nowrap;">{rb_date[-5:]}</td>
+            <td style="font-size:11px;">{"".join(buy_cells) if buy_cells else '<span style="color:#ccc;">-</span>'}</td>
+            <td style="font-size:11px;">{"".join(sell_cells) if sell_cells else '<span style="color:#ccc;">-</span>'}</td>
+            <td style="text-align:right;font-family:monospace;font-weight:bold;">{val_str}</td>
+            <td style="text-align:right;font-family:monospace;font-weight:bold;color:{"#cc0000" if period_ret is not None and period_ret >= 0 else "#009900"};">{period_str}</td>
+            <td style="text-align:right;font-family:monospace;font-weight:bold;color:{"#cc0000" if cum_ret >= 0 else "#009900"};">{cum_str}</td>
+        </tr>"""
+        prev_value = cur_value
+    return f"""<h3>交易记录 (完整调仓历史)</h3><table>
+        <thead><tr><th>调仓日</th><th>买入</th><th>卖出</th><th style="text-align:right;">总资产</th><th style="text-align:right;">区间收益</th><th style="text-align:right;">累计收益</th></tr></thead>
+        <tbody>{rows}</tbody></table>"""
+
+
 def build_report_html(*, date, model_display, total_value, cash, holdings,
                       trades_list, metrics, next_rebalance, is_rebalance,
                       today_pnl_total, today_pnl_positions=None,
@@ -584,7 +664,8 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
                        trade_mode="open", pred_signals_section="",
                        market_monitor_section="", pre_holdings=None,
                        rebalance_win_rate=None, source="", is_juejin=False,
-                       strategy_info=""):
+                       strategy_info="", trade_history_section="",
+                       llm_analysis_section=""):
     """构建报告HTML，各组件已预先准备好"""
     # 排行数据
     _rank_map = _compute_rank_maps(date) if 'date' in locals() or date else {}
@@ -864,19 +945,22 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
     html = html.replace("{{PRE_HOLDINGS_SECTION}}", pre_holdings_section)
 
     html = html.replace("{{TRADES_SECTION}}", trades_section)
+    html = html.replace("{{TRADE_HISTORY_SECTION}}", trade_history_section)
     html = html.replace("{{CHART_SRC}}", chart_data_url or "cid:chart_img")
     html = html.replace("{{SCATTER_SECTION}}", scatter_section)
     html = html.replace("{{MARKET_MONITOR_SECTION}}", market_monitor_section)
     html = html.replace("{{PRED_SIGNALS_SECTION}}", pred_signals_section)
+    html = html.replace("{{LLM_ANALYSIS_SECTION}}", llm_analysis_section)
     html = html.replace("{{EQUITY_DATA}}", json.dumps(equity_data) if equity_data else "{}")
     html = html.replace("{{GENERATED_TIME}}", datetime.now().strftime("%Y-%m-%d %H:%M"))
     return html
 
 
 def send_report(model_key=None, verbose=False):
+    html_body = None
+
     if not SMTP_USER or not SMTP_PASSWORD:
-        print("错误: 请设置 SMTP_USER 和 SMTP_PASSWORD 环境变量")
-        return False
+        print("警告: SMTP_USER/SMTP_PASSWORD 未设置，仅保存本地文件")
 
     if not REPORT_PATH.exists():
         print(f"错误: 未找到报告文件 {REPORT_PATH}")
@@ -955,6 +1039,27 @@ def send_report(model_key=None, verbose=False):
             health_scores[key] = _compute_health_score(seq)
     health_section = _build_health_table(health_scores)
 
+    # 提取预测信号（调仓日 vs 今日）
+    _ph = seq_data.get("predictions_history", [])
+    _pred_today = None
+    _pred_today_date = ""
+    _pred_rb = None
+    _pred_rb_date = ""
+    for _entry in reversed(_ph):
+        if _entry.get("predictions") and not _pred_today:
+            _pred_today = _entry["predictions"]
+            _pred_today_date = _entry.get("date", "")
+        if _entry.get("predictions") and not _pred_rb:
+            _pred_rb = _entry["predictions"]
+            _pred_rb_date = _entry.get("date", "")
+    # pred_today 是最新一条，pred_rb 是倒数第二条（如果不止一条）
+    if _pred_today and len(_ph) >= 2:
+        _pred_rb = _ph[-2].get("predictions", _pred_rb)
+        _pred_rb_date = _ph[-2].get("date", _pred_rb_date)
+    elif _pred_today:
+        _pred_rb = _pred_today
+        _pred_rb_date = _pred_today_date
+
     equity_data = {}
     for key, seq in sequences.items():
         ec = seq.get("equity_curve", [])
@@ -997,7 +1102,7 @@ def send_report(model_key=None, verbose=False):
         _ec = seq_data.get("equity_curve", [])
         _ec_dates = [e["date"] for e in _ec]
         _ec_vals = [e["total_value"] for e in _ec]
-        _, _, mm_html = run_market_monitor(
+        mm_stats, _, mm_html = run_market_monitor(
             verbose=verbose,
             current_holdings_set=cur_set, prev_holdings_set=prev_set,
             current_rebalance_date=cur_rb_date, prev_rebalance_date=prev_rb_date,
@@ -1005,6 +1110,7 @@ def send_report(model_key=None, verbose=False):
         )
         market_monitor_section = mm_html
     except Exception as e:
+        mm_stats = {}
         print(f"  [市场监控] 生成失败: {e}")
 
     # 补齐展示用 raw 价格 + 复权因子
@@ -1017,16 +1123,106 @@ def send_report(model_key=None, verbose=False):
                 code = h["stock_id"]
                 _sub = _raw_prices[_raw_prices["股票代码"] == code]
                 if "price_display" not in h:
-                    _tc = _sub.loc[_sub["日期"] == _target, "收盘_原始"]
+                    _tc = _sub.loc[_sub["日期"] == _target, "收盘"]
                     h["price_display"] = float(_tc.values[0]) if not _tc.empty else h.get("price", 0)
                 if "buy_factor" not in h and h.get("buy_date"):
                     _bf = _sub.loc[_sub["日期"] == pd.Timestamp(h["buy_date"]), "复权因子"]
                     h["buy_factor"] = float(_bf.values[0]) if not _bf.empty else 1.0
                 if "buy_price_display" not in h and h.get("buy_date"):
-                    _bp = _sub.loc[_sub["日期"] == pd.Timestamp(h["buy_date"]), "开盘_原始" if trade_mode == "open" else "收盘_原始"]
+                    _buy_col = "开盘" if trade_mode == "open" else "收盘"
+                    _bp = _sub.loc[_sub["日期"] == pd.Timestamp(h["buy_date"]), _buy_col]
                     h["buy_price_display"] = float(_bp.values[0]) if not _bp.empty else h.get("buy_price", 0)
         except Exception:
             pass
+
+    trade_history_section = _build_trade_history_table(seq_data)
+
+    # LLM 分析用数据：补全权重、日内盈亏、近期窗口
+    _pnl_positions = {p["stock_id"]: p for p in seq_data.get("today_pnl", {}).get("positions", [])}
+    _total_value = total_value or metrics.get("latest_value", 0) or 1
+    _llm_holdings = []
+    for h in holdings:
+        _w = round(h["shares"] * h["price"] / _total_value * 100, 1) if h.get("price") and h.get("shares") else 0
+        _p = _pnl_positions.get(h["stock_id"], {}).get("pnl", 0)
+        _llm_holdings.append({**h, "weight": _w, "pnl": _p})
+    _ec = seq_data.get("equity_curve", [])
+    _windows = {"3d": 0, "5d": 0, "1m": 0}
+    if len(_ec) >= 2:
+        _last_val = _ec[-1]["total_value"]
+        _last_dt = pd.Timestamp(_ec[-1]["date"])
+        for _wk, _wd in [("3d", 3), ("5d", 5), ("1m", 20)]:
+            _target_dt = _last_dt - pd.Timedelta(days=_wd * 2)
+            for _e in reversed(_ec):
+                if pd.Timestamp(_e["date"]) <= _target_dt:
+                    _ret = (_last_val / _e["total_value"] - 1) * 100
+                    _windows[_wk] = round(_ret, 2)
+                    break
+
+    # 加载 market_monitor.json 补全状态/排行
+    _mm_regime, _mm_breadth, _mm_rankings = {}, {}, {}
+    try:
+        _mm_path = PROJECT_ROOT / "output" / "market_monitor.json"
+        if _mm_path.exists():
+            with open(_mm_path) as _f:
+                _mm = json.load(_f)
+            _mm_regime = _mm.get("current_regime", {})
+            _mm_breadth = _mm.get("breadth", {})
+            _mm_rankings = _mm.get("etf_rankings", {})
+    except Exception:
+        pass
+
+    # 各序列模型数据汇总
+    _seqs = report.get("sequences", {})
+    _seq_summary = {}
+    for _sk, _sv in _seqs.items():
+        _sm = _sv.get("metrics", {})
+        _smst = _sv.get("model_stats", {})
+        _sr = _sm.get("strategy_return_pct")
+        _hs = health_scores.get(_sk, {})
+        if _sr is not None:
+            _seq_summary[_sk] = {
+                "strategy_return_pct": _sr,
+                "total_trades": _smst.get("total_trades", 0),
+                "win_rate": _smst.get("total_win_rate_pct", 0),
+                "avg_return": _smst.get("total_avg_return_pct", 0),
+                "last_3_avg": _smst.get("last_3_avg_return_pct", 0),
+                "last_3_win_rate": _smst.get("last_3_win_rate_pct", 0),
+                "rank_ic": _sm.get("rank_ic"),
+                "ndcg": _sm.get("ndcg"),
+                "mrr": _sm.get("mrr"),
+                "health_score": _hs.get("score", 0) if isinstance(_hs, dict) else 0,
+                "sharpe": _sm.get("sharpe_ratio", 0),
+                "excess_return": _sm.get("excess_return_pct", 0),
+            }
+
+    llm_analysis_section = build_llm_analysis_section(report_data={
+        "holdings": _llm_holdings,
+        "metrics": metrics,
+        "windows": _windows,
+        "market_stats": mm_stats,
+        "market_regime": _mm_regime,
+        "market_breadth": _mm_breadth,
+        "etf_rankings": _mm_rankings,
+        "total_value": total_value,
+        "cash": cash,
+        "is_rebalance_day": is_rebalance,
+        "next_rebalance_date": next_rebalance,
+        "trades_count": len(trades),
+        "strategy_info": report.get("strategy_info", ""),
+        "sequences_summary": _seq_summary,
+        "model_display": model_display,
+        "model_key": model_key,
+        "health_scores": health_scores,
+        "weight_strategy": report.get("weight_strategy", "equal"),
+        "top_k": report.get("top_k", 3),
+        "rebalance_days": report.get("rebalance_days", 5),
+        "trade_mode": report.get("trade_mode", "open"),
+        "position_pct": report.get("position_pct", 0.95),
+        "pred_signals_today": _pred_today,
+        "pred_signals_today_date": _pred_today_date,
+        "pred_signals_rb": _pred_rb,
+        "pred_signals_rb_date": _pred_rb_date,
+    })
 
     html_body = build_report_html(
         date=date,
@@ -1051,6 +1247,8 @@ def send_report(model_key=None, verbose=False):
         source=source,
         is_juejin=(model_key == "juejin"),
         strategy_info=report.get("strategy_info", ""),
+        trade_history_section=trade_history_section,
+        llm_analysis_section=llm_analysis_section,
     )
 
     msg = MIMEMultipart()

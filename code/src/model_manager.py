@@ -664,8 +664,9 @@ def cmd_compare_live(args):
                  f"diff={g['ret_diff'].mean():+.2f}%  n={len(g)}")
 
         # Save full results
-        out_path = PROJECT_ROOT / "output" / "live_model_comparison.json"
-        extra = {"weight_strategy_used": weight_strategy}
+        out_name = f"live_model_comparison_{repro_val_start}_{repro_val_end}.json"
+        out_path = PROJECT_ROOT / "output" / out_name
+        extra = {"weight_strategy_used": weight_strategy, "repro_label": f"{repro_val_start}~{repro_val_end}"}
         if use_config_filter:
             extra["model_filter"] = "config"
         with open(out_path, "w", encoding="utf-8") as f:
@@ -679,6 +680,8 @@ def cmd_compare_live(args):
                     "avg_hist_return": round(avg_hist, 2),
                     "avg_decay": round(avg_diff, 2),
                     "hist_win_rate": round(better_count / total * 100, 1),
+                    "repro_val_start": repro_val_start,
+                    "repro_val_end": repro_val_end,
                     **extra,
                 }
             }, f, indent=2, ensure_ascii=False)

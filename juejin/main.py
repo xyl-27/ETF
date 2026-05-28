@@ -48,7 +48,7 @@ def load_config_from_yaml():
         STRATEGY_PARAMS = dict(raw_params)
         if WEIGHT_STRATEGY == "softmax":
             STRATEGY_PARAMS.setdefault("temperature", float(jcfg.get("weight_temperature", 1.0)))
-        if WEIGHT_STRATEGY in ("risk_parity", "score_risk"):
+        if WEIGHT_STRATEGY in ("risk_parity", "score_risk", "score_risk_v1"):
             STRATEGY_PARAMS.setdefault("vol_window", int(raw_params.get("vol_window", 20)))
         if data.get("model_key"):
             MODEL_KEY = str(data["model_key"])
@@ -323,7 +323,7 @@ def algo(context):
     from backtest import compute_weights, compute_volatility
 
     _params = dict(STRATEGY_PARAMS)
-    if WEIGHT_STRATEGY in ("risk_parity", "score_risk"):
+    if WEIGHT_STRATEGY in ("risk_parity", "score_risk", "score_risk_v1"):
         import pandas as pd
         global CACHED_CSV
         if CACHED_CSV is None and os.path.exists(DATA_CSV_PATH):

@@ -243,7 +243,7 @@ def compute_weights(predictions, top_k, weight_strategy="equal", strategy_params
 
     strategy_params dict carries strategy-specific fields:
       - "temperature" (softmax)
-      - "vol_dict"    (risk_parity, score_risk)
+      - "vol_dict"    (risk_parity, score_risk, score_risk_v1)
 
     returns dict[stock_id, weight] summing to 1.
     """
@@ -295,6 +295,18 @@ def compute_weights(predictions, top_k, weight_strategy="equal", strategy_params
         scores = scores - scores.min() + 1e-8
         vols = np.array([vol.get(p["stock_id"], 1.0) for p in top_preds], dtype=np.float64)
         risk_adj = scores / (vols * vols)
+        total = risk_adj.sum()
+        if total <= 0:
+            w = 1.0 / n
+            return {p["stock_id"]: w for p in top_preds}
+        return {p["stock_id"]: float(risk_adj[i] / total) for i, p in enumerate(top_preds)}
+
+    if weight_strategy == "score_risk_v1":
+        vol = sp.get("vol_dict", {})
+        scores = np.array([p["score"] for p in top_preds], dtype=np.float64)
+        scores = scores - scores.min() + 1e-8
+        vols = np.array([vol.get(p["stock_id"], 1.0) for p in top_preds], dtype=np.float64)
+        risk_adj = scores / vols
         total = risk_adj.sum()
         if total <= 0:
             w = 1.0 / n
@@ -653,7 +665,7 @@ class BacktestEngine:
                             self._write_log(f"卖出: {stock}")
 
                 # 按加权策略分配权重
-                if self.weight_strategy in ("risk_parity", "score_risk", "kelly"):
+                if self.weight_strategy in ("risk_parity", "score_risk", "score_risk_v1", "kelly"):
                     top_ids = [p["stock_id"] for p in predictions[: self.top_k]]
                     vol_dict = compute_volatility(
                         price_data, top_ids, current_date,

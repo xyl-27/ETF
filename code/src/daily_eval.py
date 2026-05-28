@@ -343,10 +343,11 @@ def _format_strategy_info(weight_strategy, strategy_params, top_k, position_pct,
     extra = ""
     if weight_strategy == "softmax":
         extra = f" T={sp.get('temperature', 1.0)}"
-    elif weight_strategy in ("risk_parity", "score_risk"):
+    elif weight_strategy in ("risk_parity", "score_risk", "score_risk_v1"):
         extra = f" w={sp.get('vol_window', 20)}"
     sname = {"equal": "等权", "softmax": "Softmax", "rank_linear": "线性排名",
              "risk_parity": "风险平价", "score_risk": "评分风险",
+             "score_risk_v1": "评分风险V1",
              "kelly": "Kelly", "liquidity": "流动性优先"}.get(weight_strategy, weight_strategy)
     return (
         f"策略: {sname}{extra}"
@@ -2220,6 +2221,22 @@ def daily_eval(
                     else:
                         t["reb_pnl"] = None
 
+        # 本期调仓参考价：从最近一次调仓日收盘价计算所有持仓的调仓以来收益
+        rb_ref_date = prev_rb_date
+        if not rb_ref_date and trade_dates:
+            for d in reversed(trade_dates):
+                if d < latest_date_str:
+                    rb_ref_date = d
+                    break
+        rb_close_prices = {}
+        if rb_ref_date:
+            rb_ts = pd.Timestamp(rb_ref_date)
+            for stock_id in display_positions:
+                sub = raw_df[raw_df["股票代码"] == stock_id]
+                pc_s = sub.loc[sub["日期"] == rb_ts, "收盘"]
+                if not pc_s.empty:
+                    rb_close_prices[stock_id] = float(pc_s.values[0])
+
         # 加载ETF名称映射
         etf_names = {}
         etf_list_path = PROJECT_ROOT / "etf_data" / "etf_list_before_2022_74.csv"
@@ -2258,14 +2275,18 @@ def daily_eval(
             sub = raw_df[raw_df["股票代码"] == stock_id]
             hl_s = sub.loc[sub["日期"] == latest_date, "涨停价"]
             ll_s = sub.loc[sub["日期"] == latest_date, "跌停价"]
-            buy_price = 0
-            buy_date = ""
-            for t in report_data.get("trades", []):
-                if t["action"] in ("买入", "卖出") and t["stock"] == stock_id and t["date"] > buy_date:
-                    buy_price = t["price"]
-                    buy_date = t["date"]
-            if not buy_price:
-                buy_price = round(pos.get("cost", 0) / pos.get("shares", 1), 4) if pos.get("shares", 0) > 0 else 0
+            if stock_id in rb_close_prices:
+                buy_price = rb_close_prices[stock_id]
+                buy_date = rb_ref_date
+            else:
+                buy_price = 0
+                buy_date = ""
+                for t in report_data.get("trades", []):
+                    if t["action"] in ("买入", "卖出") and t["stock"] == stock_id and t["date"] > buy_date:
+                        buy_price = t["price"]
+                        buy_date = t["date"]
+                if not buy_price:
+                    buy_price = round(pos.get("cost", 0) / pos.get("shares", 1), 4) if pos.get("shares", 0) > 0 else 0
             holdings.append({
                 "stock_id": stock_id,
                 "name": etf_names.get(stock_id, ""),
@@ -2306,7 +2327,7 @@ def daily_eval(
                 if _match_inj:
                     _sp_snap_inj = dict(strategy_params) if strategy_params else {}
                     _sp_snap_inj.pop("vol_dict", None)
-                    if weight_strategy in ("risk_parity", "score_risk"):
+                    if weight_strategy in ("risk_parity", "score_risk", "score_risk_v1"):
                         _top_ids_inj = [p["stock_id"] for p in _match_inj[:top_k]]
                         _vol_win_inj = _sp_snap_inj.get("vol_window", 20)
                         _vd_inj = compute_volatility(raw_df, _top_ids_inj, _latest_d_inj, _vol_win_inj)
@@ -2846,7 +2867,7 @@ def run_from_predictions(
                 ph = seq.get("predictions_history", [])
                 _sp_snapshot = dict(strategy_params) if strategy_params else {}
                 _sp_snapshot.pop("vol_dict", None)
-                if weight_strategy in ("risk_parity", "score_risk"):
+                if weight_strategy in ("risk_parity", "score_risk", "score_risk_v1"):
                     top_ids = [p["stock_id"] for p in latest_preds[:top_k]]
                     _vol_window = _sp_snapshot.get("vol_window", 20)
                     _vd = compute_volatility(raw_df, top_ids, _found, _vol_window)
@@ -2922,27 +2943,49 @@ def run_from_predictions(
             display_positions = report_data["positions"]
 
         # 构造持仓
-        last_buy_prices = {}
-        for t in report_data.get("trades", []):
-            if t["action"] == "买入":
-                stock = t["stock"]
-                if stock not in last_buy_prices or t["date"] > last_buy_prices[stock]["date"]:
-                    last_buy_prices[stock] = {"date": t["date"], "price": t["price"]}
+        trade_dates = sorted(set(t["date"] for t in report_data.get("trades", [])))
+        rb_ref_date = None
+        if latest_date_str in trade_dates:
+            idx = trade_dates.index(latest_date_str)
+            if idx > 0:
+                rb_ref_date = trade_dates[idx - 1]
+        else:
+            for d in reversed(trade_dates):
+                if d < latest_date_str:
+                    rb_ref_date = d
+                    break
+        rb_close_prices = {}
+        if rb_ref_date:
+            rb_ts = pd.Timestamp(rb_ref_date)
+            for stock_id in display_positions:
+                sub = raw_df[raw_df["股票代码"] == stock_id]
+                pc_s = sub.loc[sub["日期"] == rb_ts, "收盘"]
+                if not pc_s.empty:
+                    rb_close_prices[stock_id] = float(pc_s.values[0])
         holdings = []
         for stock_id, pos in display_positions.items():
             price = pnl_positions.get(stock_id, {}).get("today_close", 0)
             sub = raw_df[raw_df["股票代码"] == stock_id]
             hl_s = sub.loc[sub["日期"] == latest_date, "涨停价"]
             ll_s = sub.loc[sub["日期"] == latest_date, "跌停价"]
-            buy_price = last_buy_prices.get(stock_id, {}).get("price", 0)
-            if not buy_price:
-                buy_price = (pos.get("cost", 0) / pos.get("shares", 1)) if pos.get("shares", 0) > 0 else 0
+            if stock_id in rb_close_prices:
+                buy_price = rb_close_prices[stock_id]
+                buy_date = rb_ref_date
+            else:
+                buy_price = 0
+                buy_date = ""
+                for t in report_data.get("trades", []):
+                    if t["action"] == "买入" and t["stock"] == stock_id and t["date"] > buy_date:
+                        buy_price = t["price"]
+                        buy_date = t["date"]
+                if not buy_price:
+                    buy_price = (pos.get("cost", 0) / pos.get("shares", 1)) if pos.get("shares", 0) > 0 else 0
             holdings.append({
                 "stock_id": stock_id,
                 "name": etf_names.get(stock_id, ""),
                 "price": price,
                 "buy_price": round(buy_price, 4),
-                "buy_date": last_buy_prices.get(stock_id, {}).get("date", ""),
+                "buy_date": buy_date,
                 "shares": pos["shares"],
                 "cost": pos["cost"],
                 "high_limit": round(float(hl_s.values[0]), 4) if not hl_s.empty else 0,
@@ -3165,31 +3208,32 @@ def run_from_juejin(verbose=True, start_date="2026-04-01", initial_capital=10000
 
         # 构造当前持仓
         pnl_positions = {p["stock_id"]: p for p in report_data.get("today_pnl", {}).get("positions", [])}
-        _buy_price_col = "开盘" if trade_mode == "open" else "收盘"
-        # 取最近一次调仓价（买入或卖出），无交易则用平均成本
-        last_buy_info = {}
-        for t in report_data.get("trades", []):
-            if t["action"] in ("买入", "卖出"):
-                stock = t["stock"]
-                if stock not in last_buy_info or t["date"] > last_buy_info[stock]["date"]:
-                    buy_date = t["date"]
-                    bp_raw = t["price"]
-                    bp_fq = t["price"]
-                    sub = raw_df[raw_df["股票代码"] == stock]
-                    if not sub.empty:
-                        bp_s = sub.loc[sub["日期"] == pd.Timestamp(buy_date), _buy_price_col]
-                        if not bp_s.empty:
-                            bp_raw = float(bp_s.values[0])
-                        bp_fq_s = sub.loc[sub["日期"] == pd.Timestamp(buy_date), "开盘" if trade_mode == "open" else "收盘"]
-                        if not bp_fq_s.empty:
-                            bp_fq = float(bp_fq_s.values[0])
-                    last_buy_info[stock] = {"date": buy_date, "price": bp_raw, "price_fq": bp_fq}
-        # 兜底：有持仓但从无交易（diff_shares==0 一直持有）→ 用平均成本
+        # 取最近一次调仓日收盘价作为本期调仓参考
+        trade_dates = sorted(set(t["date"] for t in report_data.get("trades", [])))
+        rb_ref_date = None
+        if latest_date_str in trade_dates:
+            idx = trade_dates.index(latest_date_str)
+            if idx > 0:
+                rb_ref_date = trade_dates[idx - 1]
+        else:
+            for d in reversed(trade_dates):
+                if d < latest_date_str:
+                    rb_ref_date = d
+                    break
+        rb_close_prices = {}
+        if rb_ref_date:
+            rb_ts = pd.Timestamp(rb_ref_date)
+            for stock_id in display_positions:
+                sub = raw_df[raw_df["股票代码"] == stock_id]
+                pc_s = sub.loc[sub["日期"] == rb_ts, "收盘"]
+                if not pc_s.empty:
+                    rb_close_prices[stock_id] = float(pc_s.values[0])
+        # 有持仓但不在rb_close_prices中→用平均成本
         for stock_id, pos in display_positions.items():
-            if stock_id not in last_buy_info:
+            if stock_id not in rb_close_prices:
                 avg_cost = round(pos.get("cost", 0) / pos.get("shares", 1), 4) if pos.get("shares", 0) > 0 else 0
                 if avg_cost > 0:
-                    last_buy_info[stock_id] = {"date": latest_date_str, "price": avg_cost, "price_fq": avg_cost}
+                    rb_close_prices[stock_id] = avg_cost
         holdings = []
         for stock_id, pos in display_positions.items():
             price = pnl_positions.get(stock_id, {}).get("today_close", 0)
@@ -3205,10 +3249,10 @@ def run_from_juejin(verbose=True, start_date="2026-04-01", initial_capital=10000
                 "stock_id": stock_id,
                 "name": etf_names.get(stock_id, ""),
                 "price": price,
-                "buy_price": round(last_buy_info.get(stock_id, {}).get("price_fq", 0), 4),
-                "buy_date": last_buy_info.get(stock_id, {}).get("date", ""),
+                "buy_price": round(rb_close_prices.get(stock_id, 0), 4),
+                "buy_date": rb_ref_date or "",
                 "price_display": price_display,
-                "buy_price_display": round(last_buy_info.get(stock_id, {}).get("price", 0), 4),
+                "buy_price_display": round(rb_close_prices.get(stock_id, 0), 4),
                 "shares": pos["shares"],
                 "cost": pos["cost"],
                 "high_limit": round(float(hl_s.values[0]), 4) if not hl_s.empty else 0,
@@ -3415,7 +3459,7 @@ def run_from_juejin(verbose=True, start_date="2026-04-01", initial_capital=10000
         _ws = cfg.get("weight_strategy", "equal")
         _tk = cfg.get("top_k", 3)
         _sp = dict(cfg.get("strategy_params", {}))
-        if _ws in ("risk_parity", "score_risk") and "vol_dict" not in _sp:
+        if _ws in ("risk_parity", "score_risk", "score_risk_v1") and "vol_dict" not in _sp:
             latest_ph_seq = None
             for entry in reversed(rk_seq.get("predictions_history", [])):
                 if entry.get("predictions"):
@@ -3555,7 +3599,7 @@ if __name__ == "__main__":
     parser.add_argument("--position-pct", type=float, default=None, help="仓位比例")
     parser.add_argument("--debug", action="store_true", help="打印详细调试日志")
     parser.add_argument("--trade-mode", type=str, default=None, choices=["open", "close"], help="交易模式: open（开盘交易，用前日收盘特征）或 close（收盘交易，用当日收盘特征）")
-    parser.add_argument("--weight-strategy", type=str, default=None, choices=["equal", "softmax", "rank_linear", "risk_parity", "score_risk", "kelly", "liquidity"], help="加权策略")
+    parser.add_argument("--weight-strategy", type=str, default=None, choices=["equal", "softmax", "rank_linear", "risk_parity", "score_risk", "score_risk_v1", "kelly", "liquidity"], help="加权策略")
     parser.add_argument("--weight-temperature", type=float, default=None, help="softmax 温度参数，存入 strategy_params['temperature']")
     parser.add_argument("--volatility-window", type=int, default=None, help="波动率计算回看天数，存入 strategy_params['vol_window']")
     parser.add_argument("--clear", action="store_true", help="先清除旧输出文件")

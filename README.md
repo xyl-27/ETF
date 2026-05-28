@@ -69,7 +69,10 @@ python code/src/train_search_v2.py --model-type itransformer --fresh
 | softmax | Softmax 概率权重 | temperature |
 | rank_linear | 线性排名权重 | — |
 | risk_parity | 风险平价（波动率倒数） | vol_window |
-| score_risk | 评分修正风险平价 | vol_window |
+| score_risk | 评分修正风险平价（score/vol²） | vol_window |
+| score_risk_v1 | 评分修正风险平价（score/vol） | vol_window |
+| kelly | Kelly 最优增长 | — |
+| liquidity | 流动性优先 | — |
 
 ### 3. 每日测评
 
@@ -111,7 +114,7 @@ average: true
 voting: true
 master: "first"
 
-weight_strategy: "risk_parity"   # equal | softmax | rank_linear | risk_parity | score_risk
+weight_strategy: "risk_parity"   # equal | softmax | rank_linear | risk_parity | score_risk | score_risk_v1 | kelly | liquidity
 top_k: 3
 trade_mode: "open"
 ```

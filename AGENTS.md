@@ -111,7 +111,7 @@ python code/src/daily_eval.py --from-juejin
 
 关键字段：
 - `models`: 模型列表，每个支持 `type: dl|xgb|lightgbm|catboost`
-- `weight_strategy`: 加权策略（equal/softmax/rank_linear/risk_parity/score_risk）
+- `weight_strategy`: 加权策略（equal/softmax/rank_linear/risk_parity/score_risk/score_risk_v1/kelly/liquidity）
 - `master`: 主序列（first/juejin/average/voting/模型key）
 
 ## 模型选择 (reproduce_backtest.ipynb Cell 16)
