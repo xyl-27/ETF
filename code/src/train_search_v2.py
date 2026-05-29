@@ -350,6 +350,8 @@ def run_experiment(
             "sliding_precision,sliding_recall,sliding_mrr,sliding_ndcg,sliding_std_pred_return,sliding_std_final_score\n"
         )
 
+    sharpe_ratio = None
+
     for epoch in range(exp_config["num_epochs"]):
         epoch_start_time = time.time()
 
@@ -448,10 +450,10 @@ def run_experiment(
                     epoch_preds_sliding,
                 )
 
-        current_metric = eval_sliding_metrics.get(search_metric, 0.0)
+        current_ndcg = eval_sliding_metrics.get("ndcg", 0.0)
 
-        if current_metric > best_metric_val:
-            best_metric_val = current_metric
+        if current_ndcg > best_metric_val:
+            best_metric_val = current_ndcg
             best_metric_epoch = epoch + 1
             torch.save(model.state_dict(), os.path.join(output_dir, "best_model.pth"))
 
@@ -485,14 +487,6 @@ def run_experiment(
         )
 
     scheduler.step()
-
-    with open(os.path.join(output_dir, "final_score.txt"), "w") as f:
-        f.write(
-            f"Best epoch: {best_epoch}\nBest weekly_final_score: {best_score:.6f}\n"
-            f"Best sliding_epoch: {best_sliding_epoch}\nBest sliding_final_score: {best_sliding_score_all:.6f}\n"
-            f"Best ndcg_epoch: {best_ndcg_epoch}\nBest sliding_ndcg: {best_ndcg:.6f}\n"
-            f"Best {search_metric}_epoch: {best_metric_epoch}\nBest {search_metric}: {best_metric_val:.6f}\n"
-        )
 
     # 保存验证集的 targets（只保存一次）
     def save_targets(dataloader, desc):
@@ -662,15 +656,26 @@ def run_experiment(
                 aligned["total_value"] = aligned[val_cols].mean(axis=1)
                 aligned = aligned.dropna(subset=["total_value"]).sort_values("date").reset_index(drop=True)
                 sm = _cwm(aligned, 100000)
+                sharpe_ratio = sm.get("sharpe_ratio", 0.0)
                 print(f"  5-sub backtest:")
                 print(f"    Sub returns: {[f'{r:.2f}%' for r in sub_rets]}")
                 print(f"    Avg return: {float(np.mean(sub_rets)):.2f}%  "
-                      f"sharpe={sm.get('sharpe_ratio', 0):.2f}  "
+                      f"sharpe={sharpe_ratio:.2f}  "
                       f"mdd={sm.get('max_drawdown_pct', 0):.2f}%")
 
     except Exception as e:
         print(f"  Warning: Backtest evaluation failed: {e}")
         traceback.print_exc()
+
+    trial_sharpe = sharpe_ratio if sharpe_ratio is not None else best_metric_val
+    with open(os.path.join(output_dir, "final_score.txt"), "w") as f:
+        f.write(
+            f"Best epoch: {best_epoch}\nBest weekly_final_score: {best_score:.6f}\n"
+            f"Best sliding_epoch: {best_sliding_epoch}\nBest sliding_final_score: {best_sliding_score_all:.6f}\n"
+            f"Best ndcg_epoch: {best_ndcg_epoch}\nBest sliding_ndcg: {best_ndcg:.6f}\n"
+            f"Best ndcg_epoch (best_model.pth): {best_metric_epoch}\nBest ndcg: {best_metric_val:.6f}\n"
+            f"Sharpe (trial objective): {trial_sharpe:.6f}\n"
+        )
 
     # Thorough cleanup
     del model
@@ -694,8 +699,8 @@ def run_experiment(
 
     return {
         "success": True,
-        "score": best_metric_val,
-        "metric": search_metric,
+        "score": trial_sharpe,
+        "metric": "sharpe",
         "model_type": exp_config.get("model_type", ""),
         "sliding_score": best_sliding_score,
         "best_epoch": best_epoch,
@@ -1007,7 +1012,7 @@ def main(args):
                 if os.path.exists(final_score_file):
                     with open(final_score_file) as f:
                         for line in f:
-                            target_key = f"Best {config.get('search_metric', 'ndcg')}:"
+                            target_key = "Sharpe (trial objective):"
                             if target_key in line:
                                 score = float(line.split(":")[-1].strip())
                                 return score
@@ -1120,7 +1125,8 @@ if __name__ == "__main__":
     parser.add_argument("--val-end-date", type=str, default=None, help="验证集结束日期，如 2025-12-31")
     parser.add_argument("--search-method", type=str, default="bayesian", choices=["grid", "bayesian"])
     parser.add_argument("--n-trials", type=int, default=80)
-    parser.add_argument("--search-metric", type=str, default="ndcg")
+    parser.add_argument("--search-metric", type=str, default="sharpe",
+                        help="优化目标 (sharpe=夏普比率, ndcg=NDCG@K)")
     parser.add_argument("--fresh", action="store_true", help="删除旧的 Optuna study，重新开始")
     parser.add_argument("--save-predictions", action="store_true", help="保存每 epoch 的预测结果 npy 文件（默认不保存）")
     args = parser.parse_args()
