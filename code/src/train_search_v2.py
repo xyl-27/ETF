@@ -526,7 +526,100 @@ def run_experiment(
     except Exception as e:
         print(f"  Warning: failed to plot epoch scores: {e}")
 
-    # === 验证集回测 (on best_model_sliding.pth) ===
+    # === 验证集回测 (on all checkpoints, pick best by Sharpe) ===
+    def _eval_checkpoint(ckpt_path, label=""):
+        """Load ckpt, run inference, backtest, return 5-sub Sharpe."""
+        if not os.path.exists(ckpt_path):
+            return None
+        model.load_state_dict(torch.load(ckpt_path, map_location=device))
+        model.eval()
+        idx2stockid = {v: k for k, v in preprocessed_data["stockid2idx"].items()}
+        val_sliding_dates = preprocessed_data.get("val_sliding_dates", [])
+
+        preds = {}
+        sample_idx = 0
+        with torch.no_grad():
+            for batch in val_sliding_loader:
+                sequences = batch["sequences"].to(device)
+                outputs = model(sequences)
+                masks = batch["masks"].cpu().numpy()
+                stock_indices = batch["stock_indices"].cpu().numpy()
+
+                for bi in range(outputs.size(0)):
+                    date_str = val_sliding_dates[sample_idx + bi]
+                    valid_mask = masks[bi] > 0
+                    valid_scores = outputs[bi].cpu().numpy()[valid_mask]
+                    valid_stocks = stock_indices[bi][valid_mask]
+
+                    if date_str not in preds:
+                        preds[date_str] = []
+                    for score, sidx in zip(valid_scores, valid_stocks):
+                        sid = int(sidx)
+                        if sid not in idx2stockid:
+                            continue
+                        preds[date_str].append({"stock_id": idx2stockid[sid], "score": float(score)})
+                sample_idx += outputs.size(0)
+
+        for date_str in preds:
+            preds[date_str].sort(key=lambda x: x["score"], reverse=True)
+            for rank, item in enumerate(preds[date_str]):
+                item["rank"] = rank + 1
+
+        from backtest import run_backtest_from_predictions
+        from metrics import compute_window_metrics as _cwm
+
+        val_start = preprocessed_data.get("val_start", config.get("val_start_date", "2025-01-01"))
+        val_end = config.get("val_end_date", "2025-12-31")
+        bt_top_k = exp_config.get("top_k", 3)
+
+        # Weekly
+        bt = run_backtest_from_predictions(
+            predictions_dict=preds, data_path=backtest_data_path,
+            start_date=val_start, end_date=val_end, top_k=bt_top_k,
+            rebalance_days=5, position_pct=0.95, initial_capital=100000,
+            weight_strategy="equal", trade_mode="open", log=False, verbose=False,
+        )
+        bm = _cwm(bt.equity_curve, 100000)
+        weekly_sharpe = bm.get("sharpe_ratio", 0.0)
+
+        # 5-sub
+        all_dates = sorted(preds.keys())
+        sub_rets, sub_curves = [], []
+        for offset in range(5):
+            if offset >= len(all_dates):
+                break
+            try:
+                sr = run_backtest_from_predictions(
+                    predictions_dict=preds, data_path=backtest_data_path,
+                    start_date=all_dates[offset], end_date=val_end, top_k=bt_top_k,
+                    rebalance_days=5, position_pct=0.95, initial_capital=100000 / 5,
+                    weight_strategy="equal", first_rebalance_date=all_dates[offset],
+                    trade_mode="open", log=False, verbose=False,
+                )
+                sub_rets.append(sr.strategy_return)
+                ec = sr.equity_curve[["date", "total_value"]].copy()
+                ec = ec.rename(columns={"total_value": "v"})
+                ec["v"] = ec["v"] * 5
+                sub_curves.append(ec)
+            except Exception:
+                pass
+
+        sub_sharpe = 0.0
+        if sub_curves:
+            all_dts = sorted(set().union(*[set(ec["date"]) for ec in sub_curves]))
+            aligned = pd.DataFrame({"date": all_dts})
+            for i, ec in enumerate(sub_curves):
+                ec = ec.rename(columns={"v": f"v_{i}"})
+                aligned = aligned.merge(ec[["date", f"v_{i}"]], on="date", how="left")
+            vcols = [c for c in aligned.columns if c.startswith("v_")]
+            aligned["total_value"] = aligned[vcols].mean(axis=1)
+            aligned = aligned.dropna(subset=["total_value"]).sort_values("date").reset_index(drop=True)
+            sub_sharpe = _cwm(aligned, 100000).get("sharpe_ratio", 0.0)
+
+        print(f"  {label}: weekly_sharpe={weekly_sharpe:.2f}  5sub_sharpe={sub_sharpe:.2f}"
+              f"  return={bt.strategy_return:.2f}%")
+        return sub_sharpe, preds
+
     try:
         project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
         backtest_data_path = os.path.join(project_root, "etf_data", "etf_74.csv")
@@ -534,134 +627,46 @@ def run_experiment(
         if not os.path.exists(backtest_data_path):
             print(f"  Warning: backtest data not found at {backtest_data_path}, skipping backtest")
         else:
-            idx2stockid = {v: k for k, v in preprocessed_data["stockid2idx"].items()}
-            val_sliding_dates = preprocessed_data.get("val_sliding_dates", [])
+            ckpt_dir = output_dir
+            ckpts = {
+                "best_model.pth": "ndcg(best_model)",
+                "best_model_sliding.pth": "sliding_score",
+                "best_model_ndcg.pth": "ndcg(best_ndcg)",
+            }
+            best_sharpe, best_preds, best_label = -1e9, None, ""
+            for ckpt_name, label in ckpts.items():
+                ckpt_path = os.path.join(ckpt_dir, ckpt_name)
+                result = _eval_checkpoint(ckpt_path, label)
+                if result is None:
+                    continue
+                sub_sharpe, preds = result
+                if sub_sharpe > best_sharpe:
+                    best_sharpe = sub_sharpe
+                    best_preds = preds
+                    best_label = label
 
-            best_ckpt = os.path.join(output_dir, "best_model_sliding.pth")
-            if os.path.exists(best_ckpt):
-                model.load_state_dict(torch.load(best_ckpt, map_location=device))
+            if best_preds is not None:
+                sharpe_ratio = best_sharpe
+                predictions_dict = best_preds
+                # Save val_predictions from best checkpoint
+                val_pred_path = os.path.join(output_dir, "val_predictions.json")
+                with open(val_pred_path, "w") as f:
+                    json.dump(predictions_dict, f, indent=2)
+                n_dates = len(predictions_dict)
+                n_stocks = sum(len(v) for v in predictions_dict.values()) // max(n_dates, 1)
+                print(f"  Saved val_predictions.json ({n_dates} dates, ~{n_stocks} stocks/date)")
+                print(f"  Best checkpoint by 5-sub Sharpe: {best_label} ({best_sharpe:.4f})")
 
-            model.eval()
-            predictions_dict = {}
-            sample_idx = 0
-
-            with torch.no_grad():
-                for batch in val_sliding_loader:
-                    sequences = batch["sequences"].to(device)
-                    outputs = model(sequences)
-                    masks = batch["masks"].cpu().numpy()
-                    stock_indices = batch["stock_indices"].cpu().numpy()
-
-                    for bi in range(outputs.size(0)):
-                        date_str = val_sliding_dates[sample_idx + bi]
-                        valid_mask = masks[bi] > 0
-                        valid_scores = outputs[bi].cpu().numpy()[valid_mask]
-                        valid_stocks = stock_indices[bi][valid_mask]
-
-                        if date_str not in predictions_dict:
-                            predictions_dict[date_str] = []
-
-                        for score, sidx in zip(valid_scores, valid_stocks):
-                            sid = int(sidx)
-                            if sid not in idx2stockid:
-                                continue
-                            predictions_dict[date_str].append({
-                                "stock_id": idx2stockid[sid],
-                                "score": float(score),
-                            })
-
-                    sample_idx += outputs.size(0)
-
-            for date_str in predictions_dict:
-                predictions_dict[date_str].sort(key=lambda x: x["score"], reverse=True)
-                for rank, item in enumerate(predictions_dict[date_str]):
-                    item["rank"] = rank + 1
-
-            val_pred_path = os.path.join(output_dir, "val_predictions.json")
-            with open(val_pred_path, "w") as f:
-                json.dump(predictions_dict, f, indent=2)
-            n_dates = len(predictions_dict)
-            n_stocks = sum(len(v) for v in predictions_dict.values()) // max(n_dates, 1)
-            print(f"  Saved val_predictions.json ({n_dates} dates, ~{n_stocks} stocks/date)")
-
-            # Weekly backtest (single pass)
-            from backtest import run_backtest_from_predictions
-            from metrics import compute_window_metrics as _cwm
-
-            val_start = preprocessed_data.get("val_start", config.get("val_start_date", "2025-01-01"))
-            val_end = config.get("val_end_date", "2025-12-31")
-            bt_top_k = exp_config.get("top_k", 3)
-
-            bt = run_backtest_from_predictions(
-                predictions_dict=predictions_dict,
-                data_path=backtest_data_path,
-                start_date=val_start,
-                end_date=val_end,
-                top_k=bt_top_k,
-                rebalance_days=5,
-                position_pct=0.95,
-                initial_capital=100000,
-                weight_strategy="equal",
-                trade_mode="open",
-                log=False, verbose=False,
-            )
-
-            bm = _cwm(bt.equity_curve, 100000)
-            print(f"  Weekly backtest ({val_start} ~ {val_end}):")
-            print(f"    return={bt.strategy_return:.2f}%  hs300={bt.hs300_return:.2f}%  "
-                  f"excess={bt.excess_return:.2f}%")
-            print(f"    sharpe={bm.get('sharpe_ratio', 0):.2f}  "
-                  f"mdd={bm.get('max_drawdown_pct', 0):.2f}%  "
-                  f"calmar={bm.get('calmar_ratio', 0):.2f}")
-
-            # 5-sub backtest
-            all_dates = sorted(predictions_dict.keys())
-            sub_rets = []
-            sub_curves = []
-
-            for offset in range(5):
-                if offset >= len(all_dates):
-                    break
-                sub_start = all_dates[offset]
-                try:
-                    sr = run_backtest_from_predictions(
-                        predictions_dict=predictions_dict,
-                        data_path=backtest_data_path,
-                        start_date=sub_start,
-                        end_date=val_end,
-                        top_k=bt_top_k,
-                        rebalance_days=5,
-                        position_pct=0.95,
-                        initial_capital=100000 / 5,
-                        weight_strategy="equal",
-                        first_rebalance_date=sub_start,
-                        trade_mode="open",
-                        log=False, verbose=False,
-                    )
-                    sub_rets.append(sr.strategy_return)
-                    ec = sr.equity_curve[["date", "total_value"]].copy()
-                    ec = ec.rename(columns={"total_value": "v"})
-                    ec["v"] = ec["v"] * 5
-                    sub_curves.append(ec)
-                except Exception as e:
-                    print(f"    Sub-account {offset+1} failed: {e}")
-
-            if sub_curves:
-                all_dates = sorted(set().union(*[set(ec["date"]) for ec in sub_curves]))
-                aligned = pd.DataFrame({"date": all_dates})
-                for i, ec in enumerate(sub_curves):
-                    ec = ec.rename(columns={"v": f"v_{i}"})
-                    aligned = aligned.merge(ec[["date", f"v_{i}"]], on="date", how="left")
-                val_cols = [c for c in aligned.columns if c.startswith("v_")]
-                aligned["total_value"] = aligned[val_cols].mean(axis=1)
-                aligned = aligned.dropna(subset=["total_value"]).sort_values("date").reset_index(drop=True)
-                sm = _cwm(aligned, 100000)
-                sharpe_ratio = sm.get("sharpe_ratio", 0.0)
-                print(f"  5-sub backtest:")
-                print(f"    Sub returns: {[f'{r:.2f}%' for r in sub_rets]}")
-                print(f"    Avg return: {float(np.mean(sub_rets)):.2f}%  "
-                      f"sharpe={sharpe_ratio:.2f}  "
-                      f"mdd={sm.get('max_drawdown_pct', 0):.2f}%")
+                # Overwrite best_model_sliding.pth with Sharpe-best checkpoint
+                best_ckpt_name = {"ndcg(best_model)": "best_model.pth",
+                                   "sliding_score": "best_model_sliding.pth",
+                                   "ndcg(best_ndcg)": "best_model_ndcg.pth"}.get(best_label, "")
+                if best_ckpt_name and best_ckpt_name != "best_model_sliding.pth":
+                    src = os.path.join(ckpt_dir, best_ckpt_name)
+                    dst = os.path.join(ckpt_dir, "best_model_sliding.pth")
+                    import shutil
+                    shutil.copy2(src, dst)
+                    print(f"  Updated best_model_sliding.pth ← {best_ckpt_name} (Sharpe={best_sharpe:.4f})")
 
     except Exception as e:
         print(f"  Warning: Backtest evaluation failed: {e}")
