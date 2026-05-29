@@ -21,19 +21,6 @@ import numpy as np
 import pandas as pd
 
 
-class NumpyEncoder(json.JSONEncoder):
-    """将 numpy 类型转为 JSON 可序列化的 Python 原生类型"""
-    def default(self, obj):
-        if isinstance(obj, (np.integer,)):
-            return int(obj)
-        if isinstance(obj, (np.floating,)):
-            return float(obj)
-        if isinstance(obj, (np.ndarray,)):
-            return obj.tolist()
-        if isinstance(obj, pd.Timestamp):
-            return str(obj)
-        return super().default(obj)
-
 # 项目根目录
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 os.chdir(PROJECT_ROOT)
@@ -41,6 +28,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "code" / "src"))
 
 from backtest import BacktestEngine, ETFBacktester, compute_volatility
 from ml_backtester import MLBacktester
+from metrics import NumpyEncoder, compute_window_metrics, extract_drawdowns, compute_longterm_risk_metrics
 
 # GM Python 路径（用于数据下载，该 Python 装有 gm SDK）
 # 可通过环境变量 GM_PYTHON 覆盖，默认 D:\opt\python3.12.4\python.exe
@@ -420,101 +408,6 @@ def find_best_model(output_dir: str) -> Optional[Tuple[str, str, float]]:
 # 回测执行
 # ============================================================
 
-def _extract_drawdowns(vals, dates, max_periods=5):
-    """提取前 N 大回撤区间 (开始→谷底→恢复, 深度, 持续时间)"""
-    running_max = -np.inf
-    peak_idx = 0
-    in_dd = False
-    dd_start = None
-    dd_start_idx = None
-    trough_date = None
-    trough_idx = None
-    trough_depth = 0
-    periods = []
-
-    for i, v in enumerate(vals):
-        if v > running_max:
-            running_max = v
-            if in_dd:
-                periods.append({
-                    "start": str(dd_start),
-                    "trough": str(trough_date),
-                    "recovery": str(dates[i]),
-                    "depth_pct": round(float(trough_depth), 2),
-                    "duration_days": int(i - dd_start_idx),
-                    "recovery_days": int(i - trough_idx),
-                })
-                in_dd = False
-            peak_idx = i
-        else:
-            dd_pct = (running_max - v) / running_max * 100
-            if not in_dd:
-                in_dd = True
-                dd_start = dates[peak_idx]
-                dd_start_idx = peak_idx
-                trough_date = dates[i]
-                trough_idx = i
-                trough_depth = dd_pct
-            else:
-                if dd_pct > trough_depth:
-                    trough_date = dates[i]
-                    trough_idx = i
-                    trough_depth = dd_pct
-
-    if in_dd:
-        periods.append({
-            "start": str(dd_start),
-            "trough": str(trough_date),
-            "recovery": None,
-            "depth_pct": round(float(trough_depth), 2),
-            "duration_days": int(len(vals) - dd_start_idx),
-            "recovery_days": None,
-        })
-
-    periods.sort(key=lambda x: x["depth_pct"], reverse=True)
-    return periods[:max_periods]
-
-
-def _compute_longterm_risk_metrics(daily_rets, cum, dates, dd_periods):
-    """计算长期风险指标：VaR, CVaR, Ulcer Index, Profit Factor, 最大恢复天数"""
-    if len(daily_rets) < 5:
-        return {}
-    daily_rets_arr = np.array(daily_rets)
-    n = len(daily_rets_arr)
-
-    # VaR / CVaR
-    sorted_rets = np.sort(daily_rets_arr)
-    def _var_cvar(percentile):
-        idx = max(1, int(np.ceil(n * (1 - percentile / 100))))
-        var_val = float(sorted_rets[idx - 1])
-        cvar_val = float(np.mean(sorted_rets[:idx])) if idx > 0 else var_val
-        return var_val, cvar_val
-    var_95, cvar_95 = _var_cvar(95)
-    var_99, cvar_99 = _var_cvar(99)
-
-    # Ulcer Index: sqrt(mean(drawdown^2)) for drawdown periods
-    running_max = np.maximum.accumulate(cum)
-    dd_series = (cum - running_max) / running_max * 100
-    ulcer = float(np.sqrt(np.mean(dd_series ** 2)))
-
-    # Profit Factor
-    gains = daily_rets_arr[daily_rets_arr > 0].sum()
-    losses = abs(daily_rets_arr[daily_rets_arr < 0].sum())
-    profit_factor = float(gains / losses) if losses > 0 else float("inf")
-
-    # 最大恢复天数
-    recovery_days = max((dp.get("recovery_days") or 0 for dp in dd_periods), default=0)
-
-    return {
-        "var_95": round(float(var_95) * 100, 4),
-        "cvar_95": round(float(cvar_95) * 100, 4),
-        "var_99": round(float(var_99) * 100, 4),
-        "cvar_99": round(float(cvar_99) * 100, 4),
-        "ulcer_index": round(ulcer, 4),
-        "profit_factor": round(profit_factor, 4) if profit_factor != float("inf") else None,
-        "max_recovery_days": recovery_days,
-    }
-
 
 def run_backtest_sequence(
     data_file: str,
@@ -593,76 +486,8 @@ def run_backtest_sequence(
             "cost": round(pos["cost"], 2),
         }
 
-    def _compute_window_metrics(ec_segment, init_cap):
-        """Helper: compute metrics for a segment of equity curve."""
-        if len(ec_segment) < 2:
-            return {}
-        vals = [e["total_value"] for e in ec_segment]
-        dates = [e["date"] for e in ec_segment]
-        total_ret = (vals[-1] / init_cap - 1) * 100
-        cum = np.array(vals) / init_cap
-        daily_rets = np.diff(vals) / np.array(vals[:-1])
-        n_days = len(daily_rets)
-        # 胜率
-        win_rate = float(np.mean(daily_rets > 0)) if n_days > 0 else 0.0
-        # 日均收益率
-        daily_avg = float(np.mean(daily_rets)) * 100
-        # 年化收益率
-        ann_ret = (1 + total_ret / 100) ** (252 / n_days) - 1 if n_days > 0 else 0.0
-        annualized_ret_pct = ann_ret * 100
-        # 波动率
-        daily_std = float(np.std(daily_rets)) if n_days > 0 else 0.0
-        annualized_vol = daily_std * np.sqrt(252) * 100
-        # 夏普
-        sharpe = float((np.mean(daily_rets) / daily_std) * np.sqrt(252)) if daily_std != 0 else 0.0
-        # 最大回撤
-        running_max = np.maximum.accumulate(cum)
-        dd = (cum - running_max) / running_max * 100
-        max_dd = float(abs(dd.min())) if len(dd) > 0 else 0.0
-        # 最大回撤区间
-        if max_dd > 0:
-            dd_end_idx = np.argmin(dd)
-            dd_series = dd[:dd_end_idx + 1]
-            dd_start_idx = np.argmax(running_max[:dd_end_idx + 1])
-            mdd_start = dates[int(dd_start_idx)]
-            mdd_end = dates[int(dd_end_idx)]
-            mdd_duration = int(dd_end_idx - dd_start_idx)
-        else:
-            mdd_start = mdd_end = ""
-            mdd_duration = 0
-        # 卡玛比率
-        calmar = ann_ret / (max_dd / 100) if max_dd > 0 else 0.0
-        # 索提诺比率
-        downside = daily_rets[daily_rets < 0]
-        downside_std = float(np.std(downside)) if len(downside) > 1 else daily_std
-        sortino = float((np.mean(daily_rets) / downside_std) * np.sqrt(252)) if downside_std != 0 else 0.0
-        # 计算多段回撤（前5大）
-        dd_periods = _extract_drawdowns(vals, dates)
-        # 长期风险指标
-        risk_metrics = _compute_longterm_risk_metrics(daily_rets, cum, dates, dd_periods)
-        return {
-            "strategy_return_pct": round(total_ret, 4),
-            "annualized_return_pct": round(annualized_ret_pct, 4),
-            "daily_avg_return_pct": round(daily_avg, 4),
-            "daily_win_rate": round(win_rate, 4),
-            "max_drawdown_pct": round(max_dd, 4),
-            "max_drawdown_details": {
-                "start_date": mdd_start,
-                "end_date": mdd_end,
-                "duration_days": mdd_duration,
-            },
-            "drawdown_periods": dd_periods,
-            "sharpe_ratio": round(sharpe, 4),
-            "calmar_ratio": round(calmar, 4),
-            "sortino_ratio": round(sortino, 4),
-            "annualized_volatility_pct": round(annualized_vol, 4),
-            "total_days": n_days,
-            "latest_value": round(vals[-1], 2),
-            **risk_metrics,
-        }
-
     # -- 整体指标 --
-    overall = _compute_window_metrics(equity_curve, initial_capital)
+    overall = compute_window_metrics(equity_curve, initial_capital)
     if not overall:
         return {
             "equity_curve": equity_curve,
@@ -695,7 +520,7 @@ def run_backtest_sequence(
         cutoff = (today - pd.Timedelta(days=delta)).strftime("%Y-%m-%d")
         seg = [ec_by_date[d] for d in sorted_dates if d >= cutoff]
         if seg:
-            win_metrics = _compute_window_metrics(seg, seg[0]["total_value"])
+            win_metrics = compute_window_metrics(seg, seg[0]["total_value"])
             if win_metrics:
                 windows[f"window_{label}"] = win_metrics
 
@@ -1328,8 +1153,8 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
             downside = daily_rets[daily_rets < 0]
             ds_std = float(np.std(downside)) if len(downside) > 1 else daily_std
             sortino = float((np.mean(daily_rets) / ds_std) * np.sqrt(252)) if ds_std != 0 else 0
-            dd_periods = _extract_drawdowns(vals, [e["date"] for e in ec_segment])
-            risk_metrics = _compute_longterm_risk_metrics(daily_rets, cum, [e["date"] for e in ec_segment], dd_periods)
+            dd_periods = extract_drawdowns(vals, [e["date"] for e in ec_segment])
+            risk_metrics = compute_longterm_risk_metrics(daily_rets, cum, [e["date"] for e in ec_segment], dd_periods)
             return {
                 "strategy_return_pct": round(total_ret, 4),
                 "annualized_return_pct": round(ann_ret * 100, 4),
@@ -3402,8 +3227,8 @@ def run_from_juejin(verbose=True, start_date="2026-04-01", initial_capital=10000
             _ec_dates = [e["date"] for e in _ec]
             _r_cum = np.array(_ec_vals) / _ec_vals[0]
             _r_rets = np.diff(_ec_vals) / np.array(_ec_vals[:-1])
-            _r_dd_periods = _extract_drawdowns(_ec_vals, _ec_dates)
-            _r_risk = _compute_longterm_risk_metrics(_r_rets, _r_cum, _ec_dates, _r_dd_periods)
+            _r_dd_periods = extract_drawdowns(_ec_vals, _ec_dates)
+            _r_risk = compute_longterm_risk_metrics(_r_rets, _r_cum, _ec_dates, _r_dd_periods)
             for _rk, _rv in _r_risk.items():
                 if _rk not in _rk_metrics:
                     _rk_metrics[_rk] = _rv

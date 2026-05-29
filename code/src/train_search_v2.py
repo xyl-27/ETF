@@ -88,8 +88,13 @@ def preprocess_and_save(config, search_dir):
     val_data[features] = val_data[features].replace([np.inf, -np.inf], np.nan)
     train_data = train_data.dropna(subset=features)
     val_data = val_data.dropna(subset=features)
+    # Preserve original instrument (int 0-73) before scaling — "instrument" is in features
+    train_instrument = train_data["instrument"].copy()
+    val_instrument = val_data["instrument"].copy()
     train_data[features] = scaler.fit_transform(train_data[features])
     val_data[features] = scaler.transform(val_data[features])
+    train_data["instrument"] = train_instrument
+    val_data["instrument"] = val_instrument
 
     # 4.3 滑动验证集: 使用验证期内数据
     print("\n[验证集-滑动]")
@@ -113,7 +118,9 @@ def preprocess_and_save(config, search_dir):
         [np.inf, -np.inf], np.nan
     )
     val_sliding_data = val_sliding_data.dropna(subset=features)
+    val_sliding_instrument = val_sliding_data["instrument"].copy()
     val_sliding_data[features] = scaler.transform(val_sliding_data[features])
+    val_sliding_data["instrument"] = val_sliding_instrument
 
     # 提取 HS300 收益率用于计算超额收益
     # 注意：ETF标签使用5日开盘收益率，HS300也要用相同的计算方式
@@ -126,7 +133,7 @@ def preprocess_and_save(config, search_dir):
     for _, row in hs300_data.dropna(subset=["label"]).iterrows():
         hs300_labels_map[str(row["日期"])[:10]] = row["label"]
 
-    train_sequences, train_targets, train_relevance, train_stock_indices, _, train_hs300_rets = (
+    train_sequences, train_targets, train_relevance, train_stock_indices, _, train_hs300_rets, _ = (
         create_ranking_dataset_vectorized(
             train_data, features, config["sequence_length"], ranking_data_path=None,
             hs300_labels_map=hs300_labels_map
@@ -139,6 +146,7 @@ def preprocess_and_save(config, search_dir):
         val_stock_indices,
         val_first_window_date,
         val_hs300_rets,
+        _,
     ) = create_ranking_dataset_vectorized(
         val_data,
         features,
@@ -174,6 +182,7 @@ def preprocess_and_save(config, search_dir):
         val_sliding_stock_indices,
         _,
         val_sliding_hs300_rets,
+        val_sliding_dates,
     ) = create_ranking_dataset_vectorized(
         val_sliding_data,
         features,
@@ -204,6 +213,7 @@ def preprocess_and_save(config, search_dir):
         "val_sliding_stock_indices": val_sliding_stock_indices,
         "val_hs300_rets": val_hs300_rets,
         "val_sliding_hs300_rets": val_sliding_hs300_rets,
+        "val_sliding_dates": val_sliding_dates,
     }
 
     preprocessed_path = os.path.join(search_dir, "preprocessed_data.pkl").replace("\\", "/")
@@ -521,6 +531,146 @@ def run_experiment(
         plot_epoch_scores(output_dir, search_metric)
     except Exception as e:
         print(f"  Warning: failed to plot epoch scores: {e}")
+
+    # === 验证集回测 (on best_model_sliding.pth) ===
+    try:
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        backtest_data_path = os.path.join(project_root, "etf_data", "etf_74.csv")
+
+        if not os.path.exists(backtest_data_path):
+            print(f"  Warning: backtest data not found at {backtest_data_path}, skipping backtest")
+        else:
+            idx2stockid = {v: k for k, v in preprocessed_data["stockid2idx"].items()}
+            val_sliding_dates = preprocessed_data.get("val_sliding_dates", [])
+
+            best_ckpt = os.path.join(output_dir, "best_model_sliding.pth")
+            if os.path.exists(best_ckpt):
+                model.load_state_dict(torch.load(best_ckpt, map_location=device))
+
+            model.eval()
+            predictions_dict = {}
+            sample_idx = 0
+
+            with torch.no_grad():
+                for batch in val_sliding_loader:
+                    sequences = batch["sequences"].to(device)
+                    outputs = model(sequences)
+                    masks = batch["masks"].cpu().numpy()
+                    stock_indices = batch["stock_indices"].cpu().numpy()
+
+                    for bi in range(outputs.size(0)):
+                        date_str = val_sliding_dates[sample_idx + bi]
+                        valid_mask = masks[bi] > 0
+                        valid_scores = outputs[bi].cpu().numpy()[valid_mask]
+                        valid_stocks = stock_indices[bi][valid_mask]
+
+                        if date_str not in predictions_dict:
+                            predictions_dict[date_str] = []
+
+                        for score, sidx in zip(valid_scores, valid_stocks):
+                            sid = int(sidx)
+                            if sid not in idx2stockid:
+                                continue
+                            predictions_dict[date_str].append({
+                                "stock_id": idx2stockid[sid],
+                                "score": float(score),
+                            })
+
+                    sample_idx += outputs.size(0)
+
+            for date_str in predictions_dict:
+                predictions_dict[date_str].sort(key=lambda x: x["score"], reverse=True)
+                for rank, item in enumerate(predictions_dict[date_str]):
+                    item["rank"] = rank + 1
+
+            val_pred_path = os.path.join(output_dir, "val_predictions.json")
+            with open(val_pred_path, "w") as f:
+                json.dump(predictions_dict, f, indent=2)
+            n_dates = len(predictions_dict)
+            n_stocks = sum(len(v) for v in predictions_dict.values()) // max(n_dates, 1)
+            print(f"  Saved val_predictions.json ({n_dates} dates, ~{n_stocks} stocks/date)")
+
+            # Weekly backtest (single pass)
+            from backtest import run_backtest_from_predictions
+            from metrics import compute_window_metrics as _cwm
+
+            val_start = preprocessed_data.get("val_start", config.get("val_start_date", "2025-01-01"))
+            val_end = config.get("val_end_date", "2025-12-31")
+            bt_top_k = exp_config.get("top_k", 3)
+
+            bt = run_backtest_from_predictions(
+                predictions_dict=predictions_dict,
+                data_path=backtest_data_path,
+                start_date=val_start,
+                end_date=val_end,
+                top_k=bt_top_k,
+                rebalance_days=5,
+                position_pct=0.95,
+                initial_capital=100000,
+                weight_strategy="equal",
+                trade_mode="open",
+                log=False, verbose=False,
+            )
+
+            bm = _cwm(bt.equity_curve, 100000)
+            print(f"  Weekly backtest ({val_start} ~ {val_end}):")
+            print(f"    return={bt.strategy_return:.2f}%  hs300={bt.hs300_return:.2f}%  "
+                  f"excess={bt.excess_return:.2f}%")
+            print(f"    sharpe={bm.get('sharpe_ratio', 0):.2f}  "
+                  f"mdd={bm.get('max_drawdown_pct', 0):.2f}%  "
+                  f"calmar={bm.get('calmar_ratio', 0):.2f}")
+
+            # 5-sub backtest
+            all_dates = sorted(predictions_dict.keys())
+            sub_rets = []
+            sub_curves = []
+
+            for offset in range(5):
+                if offset >= len(all_dates):
+                    break
+                sub_start = all_dates[offset]
+                try:
+                    sr = run_backtest_from_predictions(
+                        predictions_dict=predictions_dict,
+                        data_path=backtest_data_path,
+                        start_date=sub_start,
+                        end_date=val_end,
+                        top_k=bt_top_k,
+                        rebalance_days=5,
+                        position_pct=0.95,
+                        initial_capital=100000 / 5,
+                        weight_strategy="equal",
+                        first_rebalance_date=sub_start,
+                        trade_mode="open",
+                        log=False, verbose=False,
+                    )
+                    sub_rets.append(sr.strategy_return)
+                    ec = sr.equity_curve[["date", "total_value"]].copy()
+                    ec = ec.rename(columns={"total_value": "v"})
+                    ec["v"] = ec["v"] * 5
+                    sub_curves.append(ec)
+                except Exception as e:
+                    print(f"    Sub-account {offset+1} failed: {e}")
+
+            if sub_curves:
+                all_dates = sorted(set().union(*[set(ec["date"]) for ec in sub_curves]))
+                aligned = pd.DataFrame({"date": all_dates})
+                for i, ec in enumerate(sub_curves):
+                    ec = ec.rename(columns={"v": f"v_{i}"})
+                    aligned = aligned.merge(ec[["date", f"v_{i}"]], on="date", how="left")
+                val_cols = [c for c in aligned.columns if c.startswith("v_")]
+                aligned["total_value"] = aligned[val_cols].mean(axis=1)
+                aligned = aligned.dropna(subset=["total_value"]).sort_values("date").reset_index(drop=True)
+                sm = _cwm(aligned, 100000)
+                print(f"  5-sub backtest:")
+                print(f"    Sub returns: {[f'{r:.2f}%' for r in sub_rets]}")
+                print(f"    Avg return: {float(np.mean(sub_rets)):.2f}%  "
+                      f"sharpe={sm.get('sharpe_ratio', 0):.2f}  "
+                      f"mdd={sm.get('max_drawdown_pct', 0):.2f}%")
+
+    except Exception as e:
+        print(f"  Warning: Backtest evaluation failed: {e}")
+        traceback.print_exc()
 
     # Thorough cleanup
     del model

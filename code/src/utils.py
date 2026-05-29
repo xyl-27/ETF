@@ -996,6 +996,7 @@ def create_ranking_dataset_vectorized(
         stock_indices.append(day_stocks)
 
     first_window_end_date = sample_info[0][0] if len(sample_info) > 0 else None
+    sample_dates = [s[0] for s in sample_info]
 
     if verbose:
         print(f"样本跨度(窗口结束日 -> t+1~t+5):")
@@ -1011,4 +1012,4 @@ def create_ranking_dataset_vectorized(
     #     joblib.dump((sequences, targets, relevance_scores, stock_indices), ranking_data_path)
     #     print(f"数据集已保存到: {ranking_data_path}")
 
-    return sequences, targets, relevance_scores, stock_indices, first_window_end_date, hs300_rets
+    return sequences, targets, relevance_scores, stock_indices, first_window_end_date, hs300_rets, sample_dates

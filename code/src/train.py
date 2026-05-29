@@ -1165,9 +1165,14 @@ def main():
     # 丢弃nan数据
     train_data = train_data.dropna(subset=features)
     val_data = val_data.dropna(subset=features)
+    # 保留原始 instrument（int 0-73）再缩放 — "instrument" 在 features 中
+    train_instrument = train_data["instrument"].copy()
+    val_instrument = val_data["instrument"].copy()
     # 然后再缩放
     train_data[features] = scaler.fit_transform(train_data[features])
     val_data[features] = scaler.transform(val_data[features])
+    train_data["instrument"] = train_instrument
+    val_data["instrument"] = val_instrument
     joblib.dump(scaler, os.path.join(output_dir, "scaler.pkl"))
 
     # 4. 创建排序数据集 - train / val / val_sliding 统一构造
@@ -1193,6 +1198,8 @@ def main():
         val_relevance,
         val_stock_indices,
         val_first_window_date,
+        _,
+        _,
     ) = create_ranking_dataset_vectorized(
         val_data,
         features,
@@ -1235,7 +1242,9 @@ def main():
         [np.inf, -np.inf], np.nan
     )
     val_sliding_data = val_sliding_data.dropna(subset=features)
+    val_sliding_instrument = val_sliding_data["instrument"].copy()
     val_sliding_data[features] = scaler.transform(val_sliding_data[features])
+    val_sliding_data["instrument"] = val_sliding_instrument
 
     # 滑动验证使用val_first_sample_date作为min_window_end_date，与按周验证对齐
     min_date_for_sliding = val_first_sample_date.strftime("%Y-%m-%d")
@@ -1245,6 +1254,8 @@ def main():
         val_sliding_targets,
         val_sliding_relevance,
         val_sliding_stock_indices,
+        _,
+        _,
         _,
     ) = create_ranking_dataset_vectorized(
         val_sliding_data,
