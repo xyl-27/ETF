@@ -313,7 +313,7 @@ Loss = listwise_CE + pairwise_weight × pairwise_loss
 |------|----------|
 | `best_model.pth` | 验证集 `final_score` 最高 |
 | `best_model_sliding.pth` | 滑动验证集 `final_score` 最高 |
-| `best_model_ndcg.pth` | 滑动验证集 `ndcg` 最高 |
+| `best_model_optuna.pth` | Optuna 搜索目标最优 (Sharpe) |
 
 ---
 

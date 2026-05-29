@@ -579,7 +579,7 @@ def cmd_compare_live(args):
     )
 
     all_results = []
-    model_files = ("best_model.pth", "best_model_sliding.pth", "best_model_ndcg.pth")
+    model_files = ("best_model.pth", "best_model_sliding.pth", "best_model_optuna.pth")
 
     for mt, en, live_dir, repro_dir in live_pairs:
         _log(f"\n{'─'*60}")
@@ -725,7 +725,7 @@ def cmd_compare(args):
                 exp_dir = exp_root / exp
                 if not exp_dir.is_dir():
                     continue
-                for mf in ("best_model.pth", "best_model_sliding.pth", "best_model_ndcg.pth"):
+                for mf in ("best_model.pth", "best_model_sliding.pth", "best_model_optuna.pth"):
                     if (exp_dir / mf).exists():
                         results.append((str(exp_dir), mf))
         if include_reproduced:
@@ -739,7 +739,7 @@ def cmd_compare(args):
                     exp_dir = repro_root / d
                     if not exp_dir.is_dir():
                         continue
-                    for mf in ("best_model.pth", "best_model_sliding.pth", "best_model_ndcg.pth"):
+                    for mf in ("best_model.pth", "best_model_sliding.pth", "best_model_optuna.pth"):
                         if (exp_dir / mf).exists():
                             results.append((str(exp_dir), mf))
         return results

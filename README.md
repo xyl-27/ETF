@@ -102,7 +102,7 @@ python code/src/daily_eval.py --from-juejin
 ```yaml
 models:
   - dir: juejin/live/bayes_patchtst_74_3_2026-01-01_2026-03-31/exp_27
-    file: best_model_ndcg.pth
+    file: best_model_optuna.pth
     type: dl
     enabled: true
   - dir: model/bayes_lightgbm_74_3_2026-01-01_2026-03-31/exp_12

@@ -473,7 +473,7 @@ def run_experiment(
             best_ndcg = sliding_ndcg
             best_ndcg_epoch = epoch + 1
             torch.save(
-                model.state_dict(), os.path.join(output_dir, "best_model_ndcg.pth")
+                model.state_dict(), os.path.join(output_dir, "best_model_optuna.pth")
             )
 
     if not os.path.exists(os.path.join(output_dir, "best_model_sliding.pth")):
@@ -481,9 +481,9 @@ def run_experiment(
             model.state_dict(), os.path.join(output_dir, "best_model_sliding.pth")
         )
 
-    if not os.path.exists(os.path.join(output_dir, "best_model_ndcg.pth")):
+    if not os.path.exists(os.path.join(output_dir, "best_model_optuna.pth")):
         torch.save(
-            model.state_dict(), os.path.join(output_dir, "best_model_ndcg.pth")
+            model.state_dict(), os.path.join(output_dir, "best_model_optuna.pth")
         )
 
     scheduler.step()
@@ -631,7 +631,7 @@ def run_experiment(
             ckpts = {
                 "best_model.pth": "ndcg(best_model)",
                 "best_model_sliding.pth": "sliding_score",
-                "best_model_ndcg.pth": "ndcg(best_ndcg)",
+                "best_model_optuna.pth": "ndcg(best_ndcg)",
             }
             best_sharpe, best_preds, best_label = -1e9, None, ""
             for ckpt_name, label in ckpts.items():
@@ -657,16 +657,16 @@ def run_experiment(
                 print(f"  Saved val_predictions.json ({n_dates} dates, ~{n_stocks} stocks/date)")
                 print(f"  Best checkpoint by 5-sub Sharpe: {best_label} ({best_sharpe:.4f})")
 
-                # Overwrite best_model_sliding.pth with Sharpe-best checkpoint
+                # Save Sharpe-best checkpoint as best_model_sharpe.pth (preserves all 3 training ckpts)
                 best_ckpt_name = {"ndcg(best_model)": "best_model.pth",
                                    "sliding_score": "best_model_sliding.pth",
-                                   "ndcg(best_ndcg)": "best_model_ndcg.pth"}.get(best_label, "")
-                if best_ckpt_name and best_ckpt_name != "best_model_sliding.pth":
+                                   "ndcg(best_ndcg)": "best_model_optuna.pth"}.get(best_label, "")
+                if best_ckpt_name:
                     src = os.path.join(ckpt_dir, best_ckpt_name)
-                    dst = os.path.join(ckpt_dir, "best_model_sliding.pth")
+                    dst = os.path.join(ckpt_dir, "best_model_sharpe.pth")
                     import shutil
                     shutil.copy2(src, dst)
-                    print(f"  Updated best_model_sliding.pth ← {best_ckpt_name} (Sharpe={best_sharpe:.4f})")
+                    print(f"  Saved best_model_sharpe.pth ← {best_ckpt_name} (Sharpe={best_sharpe:.4f})")
 
     except Exception as e:
         print(f"  Warning: Backtest evaluation failed: {e}")
@@ -1114,7 +1114,7 @@ if __name__ == "__main__":
 
     # 默认搜索的模型类型（不传 --model-type 时全部搜索）
     # SEARCH_MODEL_TYPES = ["itransformer", "gru", "tcn", "dlinear", "lstm", "timesnet", "nlinear", "patchtst", "mamba"]
-    SEARCH_MODEL_TYPES = ["timesnet","dlinear","tcn","gru", "patchtst","itransformer"]
+    SEARCH_MODEL_TYPES = ["lstm"]
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="config")

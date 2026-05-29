@@ -1437,15 +1437,15 @@ def main():
                 best_ndcg = current_sliding_ndcg
                 best_ndcg_epoch = epoch + 1
                 torch.save(
-                    model.state_dict(), os.path.join(output_dir, "best_model_ndcg.pth")
+                    model.state_dict(), os.path.join(output_dir, "best_model_optuna.pth")
                 )
                 print(
                     f"保存最佳NDCG模型 - epoch: {best_ndcg_epoch}, ndcg: {best_ndcg:.4f}"
                 )
 
-        if not os.path.exists(os.path.join(output_dir, "best_model_ndcg.pth")):
+        if not os.path.exists(os.path.join(output_dir, "best_model_optuna.pth")):
             torch.save(
-                model.state_dict(), os.path.join(output_dir, "best_model_ndcg.pth")
+                model.state_dict(), os.path.join(output_dir, "best_model_optuna.pth")
             )
 
         print(
