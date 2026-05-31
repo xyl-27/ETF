@@ -63,7 +63,7 @@ def _get_exp_score(exp_dir: str, search_root: Path) -> float:
             exp_idx = int(exp_path.name.split("_")[-1])
             for r in results:
                 if r.get("exp_idx") == exp_idx and r.get("success"):
-                    return float(r["score"])
+                    return float(r.get("sharpe", r.get("score", 0)))
         except Exception:
             pass
     exp_idx = int(exp_path.name.split("_")[-1])
@@ -222,7 +222,7 @@ def _reproduce_one(
         "new_val_start": new_val_start, "new_val_end": new_val_end,
         "fixed_params": params,
         "reproduced_at": datetime.now().isoformat(),
-        "training_result": {k: result.get(k) for k in ("score", "metric", "sliding_score", "best_epoch", "success")},
+        "training_result": {k: result.get(k) for k in ("sharpe", "weekly_score", "sliding_score", "best_epoch", "success")},
     }
     with open(os.path.join(search_dir, "source.json"), "w") as f:
         json.dump(source_info, f, indent=2, ensure_ascii=False)
@@ -383,7 +383,7 @@ def cmd_batch_reproduce(args):
                     "new_val_start": val_start, "new_val_end": val_end,
                     "fixed_params": params,
                     "reproduced_at": datetime.now().isoformat(),
-                    "training_result": {k: result.get(k) for k in ("score", "metric", "sliding_score", "best_epoch", "success")},
+                    "training_result": {k: result.get(k) for k in ("sharpe", "weekly_score", "sliding_score", "best_epoch", "success")},
                 }
                 with open(os.path.join(target_dir, "source.json"), "w") as f:
                     json.dump(source_info, f, indent=2)

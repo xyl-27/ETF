@@ -704,9 +704,8 @@ def run_experiment(
 
     return {
         "success": True,
-        "score": trial_sharpe,
-        "metric": "sharpe",
-        "model_type": exp_config.get("model_type", ""),
+        "sharpe": trial_sharpe,
+        "weekly_score": best_score,
         "sliding_score": best_sliding_score,
         "best_epoch": best_epoch,
         "params": params,
@@ -944,7 +943,7 @@ def main(args):
             print(f"\n📊 Experiment {i + 1} result:")
             print(f"   Model: {result.get('model_type', '?')}")
             print(f"   Metric: {result.get('metric', config.get('search_metric', 'ndcg'))}")
-            print(f"   Score:  {result['score']:.6f}")
+            print(f"   Sharpe: {result['sharpe']:.6f}")
             print(f"   Sliding final_score: {result.get('sliding_score', 0):.6f}")
             print(f"   Best epoch: {result.get('best_epoch', '?')}")
             print(f"   ⏱️  Time: {elapsed:.1f}s")
@@ -1054,17 +1053,17 @@ def main(args):
                 json.dump(results, f, indent=2)
 
             current_completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
-            best_sofar = max(t.value for t in current_completed) if current_completed else result["score"]
+            best_sofar = max(t.value for t in current_completed) if current_completed else result["sharpe"]
             print(f"\n📊 Trial {trial.number + 1} result:")
             print(f"   Model: {result.get('model_type', '?')}")
             print(f"   Metric: {result.get('metric', search_metric)}")
-            print(f"   Score:  {result['score']:.6f}")
+            print(f"   Sharpe: {result['sharpe']:.6f}")
             print(f"   Sliding final_score: {result.get('sliding_score', 0):.6f}")
             print(f"   Best epoch: {result.get('best_epoch', '?')}")
             print(f"   ⏱️  Time: {elapsed:.1f}s")
             print(f"   ✅ Best score so far: {best_sofar:.6f}")
 
-            return result["score"]
+            return result["sharpe"]
 
         study.optimize(objective, n_trials=remaining_trials, show_progress_bar=True)
 
@@ -1075,7 +1074,7 @@ def main(args):
             if not any(r.get("exp_idx") == exp_idx for r in results):
                 entry = {
                     "success": True,
-                    "score": t.value,
+                    "sharpe": t.value,
                     "params": t.params,
                     "exp_idx": exp_idx,
                 }
@@ -1105,8 +1104,8 @@ def main(args):
 
     successful = [r for r in results if r["success"]]
     if successful:
-        best = max(successful, key=lambda x: x["score"])
-        print(f"\nBest: {best['params']}, score: {best['score']:.4f}")
+        best = max(successful, key=lambda x: x["sharpe"])
+        print(f"\nBest: {best['params']}, sharpe: {best['sharpe']:.4f}")
 
 
 if __name__ == "__main__":

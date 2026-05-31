@@ -45,7 +45,7 @@ def find_all_experiments(model_base_dir: str) -> list:
                         all_experiments.append({
                             "exp_dir": os.path.join(search_path, f"exp_{exp_idx}"),
                             "model_file": "best_model_sliding.pth",
-                            "score": r["score"],
+                            "score": r.get("sharpe", r.get("score", 0)),
                             "search_dir": search_path,
                             "params": r.get("params", {}),
                         })
@@ -146,7 +146,7 @@ def main(args):
                             all_experiments.append({
                                 "exp_dir": exp_dir,
                                 "model_file": model_file,
-                                "score": r["score"],
+                                "score": r.get("sharpe", r.get("score", 0)),
                                 "search_dir": search_path,
                                 "params": r.get("params", {}),
                             })
