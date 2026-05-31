@@ -269,15 +269,17 @@ def _health_color(score):
     return "red"
 
 
-BEST_CONFIG = [
-    ('avgret', 3, 0.514, 1),
-    ('dd', 5, 0.909, -1),
-    ('wr', 10, 1.175, 1),
-    ('vol', 3, 1.946, -1),
+HEALTH_CONFIG = [
+    ('avgret', 3, 1.5, (-3.0, 3.0)),
+    ('wr',    10, 1.5, (0.2, 0.8)),
+    ('dd',    5,  1.2, (-15.0, 0.0)),
+    ('vol',   3,  0.8, (5.0, 0.0)),
 ]
 
 
 def _compute_health_score(model_data):
+    """Compute universal health score (0-100) with details and correlation."""
+    from scipy.stats import pearsonr
     ec = model_data.get("equity_curve", [])
     if len(ec) < 2:
         return {"score": 50.0, "details": {}, "corr": None}
@@ -286,7 +288,7 @@ def _compute_health_score(model_data):
     df = pd.DataFrame({"ret": daily_rets})
     df["cummax"] = values[1:]
     raw = {}
-    for name, window, weight, direction in BEST_CONFIG:
+    for name, window, weight, (worst, best) in HEALTH_CONFIG:
         if name == "avgret":
             s = df["ret"].rolling(window).mean()
             raw[name] = s.fillna(0)
@@ -299,20 +301,15 @@ def _compute_health_score(model_data):
         elif name == "vol":
             raw[name] = df["ret"].rolling(window).std().fillna(0)
     latest = {k: float(v.iloc[-1]) for k, v in raw.items()}
-    all_hist = {k: v.values for k, v in raw.items()}
     scores = []
     details = {}
-    for name, window, weight, direction in BEST_CONFIG:
-        h = all_hist[name]
+    for name, window, weight, (worst, best) in HEALTH_CONFIG:
         v = latest[name]
-        lo, hi = float(np.min(h)), float(np.max(h))
-        if hi - lo < 1e-12:
+        v_clipped = np.clip(v, worst, best)
+        if best - worst < 1e-12:
             norm = 0.5
         else:
-            norm = (v - lo) / (hi - lo)
-            norm = max(0.0, min(1.0, norm))
-        if direction == -1:
-            norm = 1.0 - norm
+            norm = (v_clipped - worst) / (best - worst)
         scores.append(norm * weight)
         if name == "wr":
             details["wr"] = f"{v*100:.0f}%"
@@ -323,44 +320,36 @@ def _compute_health_score(model_data):
         elif name == "vol":
             details["vol"] = f"{v:.2f}%"
     raw_score = sum(scores)
-    total_weight = sum(w for _, _, w, _ in BEST_CONFIG)
+    total_weight = sum(w for _, _, w, _ in HEALTH_CONFIG)
     score_01 = raw_score / total_weight if total_weight > 0 else 0.5
-    
-    # Compute health score time series for forward-return validation
+
     all_scores = []
     for i in range(len(daily_rets)):
         s = []
-        for name, window, weight, direction in BEST_CONFIG:
-            h = all_hist[name]
+        for name, window, weight, (worst, best) in HEALTH_CONFIG:
             v_i = float(raw[name].iloc[i])
-            lo_i, hi_i = float(np.min(h[:i+1])), float(np.max(h[:i+1]))
-            if hi_i - lo_i < 1e-12:
+            v_clipped = np.clip(v_i, worst, best)
+            if best - worst < 1e-12:
                 n = 0.5
             else:
-                n = (v_i - lo_i) / (hi_i - lo_i)
-                n = max(0.0, min(1.0, n))
-            if direction == -1:
-                n = 1.0 - n
+                n = (v_clipped - worst) / (best - worst)
             s.append(n * weight)
         rs = sum(s) / total_weight if total_weight > 0 else 0.5
         all_scores.append(rs)
     all_scores = np.array(all_scores)
-    
-    # Forward returns (next 5 days)
     fwd_ret = []
     for i in range(len(daily_rets)):
         end = min(i + 5, len(daily_rets))
         fwd_ret.append(sum(daily_rets[i:end]))
     fwd_ret = np.array(fwd_ret)
-    
-    # Rolling correlation (last 14 days)
     corr_val = None
     window_corr = 14
     if len(all_scores) >= window_corr and np.std(all_scores[-window_corr:]) > 0 and np.std(fwd_ret[-window_corr:]) > 0:
-        from scipy.stats import pearsonr
         r, p = pearsonr(all_scores[-window_corr:], fwd_ret[-window_corr:])
         corr_val = {"r": round(r, 3), "p": round(p, 4), "n": window_corr}
-    
+        multiplier = 1.0 + 0.15 * r
+        multiplier = max(0.85, min(1.15, multiplier))
+        score_01 = max(0.0, min(1.0, score_01 * multiplier))
     return {
         "score": round(max(0.0, min(100.0, score_01 * 100)), 1),
         "details": details,
