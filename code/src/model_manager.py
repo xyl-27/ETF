@@ -222,7 +222,7 @@ def _reproduce_one(
         "new_val_start": new_val_start, "new_val_end": new_val_end,
         "fixed_params": params,
         "reproduced_at": datetime.now().isoformat(),
-        "training_result": {k: result.get(k) for k in ("sharpe", "weekly_score", "sliding_score", "best_epoch", "success")},
+        "training_result": {k: result.get(k) for k in ("sharpe", "calmar_ratio", "weekly_score", "sliding_score", "best_epoch", "success")},
     }
     with open(os.path.join(search_dir, "source.json"), "w") as f:
         json.dump(source_info, f, indent=2, ensure_ascii=False)
@@ -383,7 +383,7 @@ def cmd_batch_reproduce(args):
                     "new_val_start": val_start, "new_val_end": val_end,
                     "fixed_params": params,
                     "reproduced_at": datetime.now().isoformat(),
-                    "training_result": {k: result.get(k) for k in ("sharpe", "weekly_score", "sliding_score", "best_epoch", "success")},
+                    "training_result": {k: result.get(k) for k in ("sharpe", "calmar_ratio", "weekly_score", "sliding_score", "best_epoch", "success")},
                 }
                 with open(os.path.join(target_dir, "source.json"), "w") as f:
                     json.dump(source_info, f, indent=2)

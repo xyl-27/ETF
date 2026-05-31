@@ -351,6 +351,7 @@ def run_experiment(
         )
 
     sharpe_ratio = None
+    calmar_ratio = None
 
     for epoch in range(exp_config["num_epochs"]):
         epoch_start_time = time.time()
@@ -605,6 +606,7 @@ def run_experiment(
                 pass
 
         sub_sharpe = 0.0
+        sub_calmar = 0.0
         if sub_curves:
             all_dts = sorted(set().union(*[set(ec["date"]) for ec in sub_curves]))
             aligned = pd.DataFrame({"date": all_dts})
@@ -614,11 +616,13 @@ def run_experiment(
             vcols = [c for c in aligned.columns if c.startswith("v_")]
             aligned["total_value"] = aligned[vcols].mean(axis=1)
             aligned = aligned.dropna(subset=["total_value"]).sort_values("date").reset_index(drop=True)
-            sub_sharpe = _cwm(aligned, 100000).get("sharpe_ratio", 0.0)
+            cwm = _cwm(aligned, 100000)
+            sub_sharpe = cwm.get("sharpe_ratio", 0.0)
+            sub_calmar = cwm.get("calmar_ratio", 0.0)
 
-        print(f"  {label}: weekly_sharpe={weekly_sharpe:.2f}  5sub_sharpe={sub_sharpe:.2f}"
+        print(f"  {label}: weekly_sharpe={weekly_sharpe:.2f}  5sub_sharpe={sub_sharpe:.2f}  5sub_calmar={sub_calmar:.2f}"
               f"  return={bt.strategy_return:.2f}%")
-        return sub_sharpe, preds
+        return sub_sharpe, sub_calmar, preds
 
     try:
         project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -633,20 +637,22 @@ def run_experiment(
                 "best_model_sliding.pth": "sliding_score",
                 "best_model_optuna.pth": "ndcg(best_ndcg)",
             }
-            best_sharpe, best_preds, best_label = -1e9, None, ""
+            best_sharpe, best_calmar, best_preds, best_label = -1e9, -1e9, None, ""
             for ckpt_name, label in ckpts.items():
                 ckpt_path = os.path.join(ckpt_dir, ckpt_name)
                 result = _eval_checkpoint(ckpt_path, label)
                 if result is None:
                     continue
-                sub_sharpe, preds = result
+                sub_sharpe, sub_calmar, preds = result
                 if sub_sharpe > best_sharpe:
                     best_sharpe = sub_sharpe
+                    best_calmar = sub_calmar
                     best_preds = preds
                     best_label = label
 
             if best_preds is not None:
                 sharpe_ratio = best_sharpe
+                calmar_ratio = best_calmar
                 predictions_dict = best_preds
                 # Save val_predictions from best checkpoint
                 val_pred_path = os.path.join(output_dir, "val_predictions.json")
@@ -680,6 +686,7 @@ def run_experiment(
             f"Best ndcg_epoch: {best_ndcg_epoch}\nBest sliding_ndcg: {best_ndcg:.6f}\n"
             f"Best ndcg_epoch (best_model.pth): {best_metric_epoch}\nBest ndcg: {best_metric_val:.6f}\n"
             f"Sharpe (trial objective): {trial_sharpe:.6f}\n"
+            f"Calmar (trial): {calmar_ratio:.6f}\n"
         )
 
     # Thorough cleanup
@@ -705,6 +712,7 @@ def run_experiment(
     return {
         "success": True,
         "sharpe": trial_sharpe,
+        "calmar_ratio": calmar_ratio if calmar_ratio is not None else 0.0,
         "weekly_score": best_score,
         "sliding_score": best_sliding_score,
         "best_epoch": best_epoch,
@@ -943,7 +951,7 @@ def main(args):
             print(f"\n📊 Experiment {i + 1} result:")
             print(f"   Model: {result.get('model_type', '?')}")
             print(f"   Metric: {result.get('metric', config.get('search_metric', 'ndcg'))}")
-            print(f"   Sharpe: {result['sharpe']:.6f}")
+            print(f"   Sharpe: {result['sharpe']:.4f}  Calmar: {result.get('calmar_ratio', 0):.4f}")
             print(f"   Sliding final_score: {result.get('sliding_score', 0):.6f}")
             print(f"   Best epoch: {result.get('best_epoch', '?')}")
             print(f"   ⏱️  Time: {elapsed:.1f}s")
@@ -1057,7 +1065,7 @@ def main(args):
             print(f"\n📊 Trial {trial.number + 1} result:")
             print(f"   Model: {result.get('model_type', '?')}")
             print(f"   Metric: {result.get('metric', search_metric)}")
-            print(f"   Sharpe: {result['sharpe']:.6f}")
+            print(f"   Sharpe: {result['sharpe']:.4f}  Calmar: {result.get('calmar_ratio', 0):.4f}")
             print(f"   Sliding final_score: {result.get('sliding_score', 0):.6f}")
             print(f"   Best epoch: {result.get('best_epoch', '?')}")
             print(f"   ⏱️  Time: {elapsed:.1f}s")
@@ -1105,7 +1113,7 @@ def main(args):
     successful = [r for r in results if r["success"]]
     if successful:
         best = max(successful, key=lambda x: x["sharpe"])
-        print(f"\nBest: {best['params']}, sharpe: {best['sharpe']:.4f}")
+        print(f"\nBest: {best['params']}, sharpe: {best['sharpe']:.4f}, calmar: {best.get('calmar_ratio', 0):.4f}")
 
 
 if __name__ == "__main__":
