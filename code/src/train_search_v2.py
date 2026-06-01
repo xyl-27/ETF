@@ -787,6 +787,404 @@ def plot_epoch_scores(output_dir, search_metric="ndcg"):
     print(f"  Saved epoch_scores.png ({os.path.getsize(out_path)/1024:.0f}KB)")
 
 
+def _eval_ckpt_on_backtest(ckpt_path, model, device, val_sliding_loader,
+                            stockid2idx, val_sliding_dates, val_start, val_end,
+                            exp_config, backtest_data_path, label=""):
+    if not os.path.exists(ckpt_path):
+        return None
+    model.load_state_dict(torch.load(ckpt_path, map_location=device))
+    model.eval()
+    idx2stockid = {v: k for k, v in stockid2idx.items()}
+
+    preds = {}
+    sample_idx = 0
+    with torch.no_grad():
+        for batch in val_sliding_loader:
+            sequences = batch["sequences"].to(device)
+            outputs = model(sequences)
+            masks = batch["masks"].cpu().numpy()
+            stock_indices = batch["stock_indices"].cpu().numpy()
+
+            for bi in range(outputs.size(0)):
+                date_str = val_sliding_dates[sample_idx + bi]
+                valid_mask = masks[bi] > 0
+                valid_scores = outputs[bi].cpu().numpy()[valid_mask]
+                valid_stocks = stock_indices[bi][valid_mask]
+
+                if date_str not in preds:
+                    preds[date_str] = []
+                for score, sidx in zip(valid_scores, valid_stocks):
+                    sid = int(sidx)
+                    if sid not in idx2stockid:
+                        continue
+                    preds[date_str].append({"stock_id": idx2stockid[sid], "score": float(score)})
+            sample_idx += outputs.size(0)
+
+    for date_str in preds:
+        preds[date_str].sort(key=lambda x: x["score"], reverse=True)
+        for rank, item in enumerate(preds[date_str]):
+            item["rank"] = rank + 1
+
+    from backtest import run_backtest_from_predictions
+    from metrics import compute_window_metrics as _cwm
+
+    bt_top_k = exp_config.get("top_k", 3)
+
+    all_dates = sorted(preds.keys())
+    sub_curves = []
+    for offset in range(5):
+        if offset >= len(all_dates):
+            break
+        try:
+            sr = run_backtest_from_predictions(
+                predictions_dict=preds, data_path=backtest_data_path,
+                start_date=all_dates[offset], end_date=str(val_end)[:10],
+                top_k=bt_top_k, rebalance_days=5, position_pct=0.95,
+                initial_capital=100000 / 5, weight_strategy="equal",
+                first_rebalance_date=all_dates[offset], trade_mode="open",
+                log=False, verbose=False,
+            )
+            ec = sr.equity_curve[["date", "total_value"]].copy()
+            ec = ec.rename(columns={"total_value": "v"})
+            ec["v"] = ec["v"] * 5
+            sub_curves.append(ec)
+        except Exception:
+            pass
+
+    sub_sharpe = 0.0
+    sub_calmar = 0.0
+    if sub_curves:
+        all_dts = sorted(set().union(*[set(ec["date"]) for ec in sub_curves]))
+        aligned = pd.DataFrame({"date": all_dts})
+        for i, ec in enumerate(sub_curves):
+            ec = ec.rename(columns={"v": f"v_{i}"})
+            aligned = aligned.merge(ec[["date", f"v_{i}"]], on="date", how="left")
+        vcols = [c for c in aligned.columns if c.startswith("v_")]
+        aligned["total_value"] = aligned[vcols].mean(axis=1)
+        aligned = aligned.dropna(subset=["total_value"]).sort_values("date").reset_index(drop=True)
+        cwm = _cwm(aligned, 100000)
+        sub_sharpe = cwm.get("sharpe_ratio", 0.0)
+        sub_calmar = cwm.get("calmar_ratio", 0.0)
+
+    print(f"  {label}: 5sub_sharpe={sub_sharpe:.2f}  5sub_calmar={sub_calmar:.2f}")
+    return sub_sharpe, sub_calmar, preds
+
+
+def run_experiment_cv(params, config, folds, tscv_eval_dir, exp_idx, config_module):
+    """在多个时间序列折上独立训练和评估，返回聚合指标。"""
+    set_seed(42)
+
+    exp_name = f"exp_{exp_idx}"
+    exp_out_dir = os.path.join(tscv_eval_dir, exp_name)
+    os.makedirs(exp_out_dir, exist_ok=True)
+
+    exp_config = config.copy()
+    model_type = params.get("model_type", exp_config.get("model_type", "transformer"))
+    model_defaults = config_module.get_model_config(model_type)
+    exp_config.update(model_defaults)
+    exp_config.update(params)
+    exp_config["num_epochs"] = exp_config.get("num_epochs", config.get("num_epochs", 15))
+
+    # Save params
+    with open(os.path.join(exp_out_dir, "config.json"), "w") as f:
+        json.dump(exp_config, f, indent=2)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Load full data once
+    data_path = config["data_path"]
+    data_file = config.get("data_file", "etf_74_train.csv")
+    data_file_path = os.path.join(data_path, data_file)
+    if not os.path.exists(data_file_path):
+        raise FileNotFoundError(f"Data file not found: {data_file_path}")
+    print(f"Loading data from {data_file_path}...")
+    full_df = pd.read_csv(data_file_path)
+
+    all_stock_ids = full_df["股票代码"].unique()
+    stockid2idx = {sid: idx for idx, sid in enumerate(sorted(all_stock_ids))}
+
+    # Build HS300 labels map (once, full-dataset)
+    hs300_code = "510300.XSHG"
+    hs300_data = full_df[full_df["股票代码"] == hs300_code].sort_values("日期").copy()
+    hs300_data["open_t1"] = hs300_data["开盘"].shift(-1)
+    hs300_data["open_t5"] = hs300_data["开盘"].shift(-5)
+    hs300_data["label"] = (hs300_data["open_t5"] - hs300_data["open_t1"]) / (hs300_data["open_t1"] + 1e-12)
+    hs300_labels_map = {}
+    for _, row in hs300_data.dropna(subset=["label"]).iterrows():
+        hs300_labels_map[str(row["日期"])[:10]] = row["label"]
+
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    backtest_data_path = os.path.join(project_root, "etf_data", "etf_74.csv")
+
+    fold_results = []
+
+    for fold_i, fold in enumerate(folds):
+        print(f"\n{'=' * 60}")
+        print(f"Fold {fold_i + 1}/{len(folds)}: val {fold['val_start']} ~ {fold['val_end']}")
+        print(f"{'=' * 60}")
+
+        fold_out_dir = os.path.join(exp_out_dir, f"fold_{fold_i}")
+        os.makedirs(fold_out_dir, exist_ok=True)
+
+        # 1. Split
+        train_df, val_df, val_start, val_end = split_train_val_by_last_month(
+            full_df, config["sequence_length"], config.get("val_months", 3),
+            val_start_date=fold["val_start"], val_end_date=fold["val_end"],
+        )
+
+        # 2. Preprocess
+        train_data, features = preprocess_data(train_df, is_train=True, stockid2idx=stockid2idx)
+        val_data, _ = preprocess_val_data(val_df, stockid2idx=stockid2idx)
+
+        # 3. Scale
+        scaler = StandardScaler()
+        train_data[features] = train_data[features].replace([np.inf, -np.inf], np.nan)
+        val_data[features] = val_data[features].replace([np.inf, -np.inf], np.nan)
+        train_data = train_data.dropna(subset=features)
+        val_data = val_data.dropna(subset=features)
+        train_instrument = train_data["instrument"].copy()
+        val_instrument = val_data["instrument"].copy()
+        train_data[features] = scaler.fit_transform(train_data[features])
+        val_data[features] = scaler.transform(val_data[features])
+        train_data["instrument"] = train_instrument
+        val_data["instrument"] = val_instrument
+        joblib.dump(scaler, os.path.join(fold_out_dir, "scaler.pkl"))
+
+        # 4. Create datasets
+        # 4.1 Train
+        (train_sequences, train_targets, train_relevance, train_stock_indices,
+         _, train_hs300_rets, _) = create_ranking_dataset_vectorized(
+            train_data, features, config["sequence_length"], ranking_data_path=None,
+            hs300_labels_map=hs300_labels_map,
+        )
+        # 4.2 Val (weekly)
+        (val_sequences, val_targets, val_relevance, val_stock_indices,
+         val_first_window_date, val_hs300_rets, _) = create_ranking_dataset_vectorized(
+            val_data, features, config["sequence_length"], ranking_data_path=None,
+            min_window_end_date=val_start.strftime("%Y-%m-%d"),
+            hs300_labels_map=hs300_labels_map,
+        )
+        # 4.3 Val (sliding)
+        val_first_sample_date = (
+            pd.to_datetime(val_first_window_date) if val_first_window_date else val_start
+        )
+        val_context_start = val_start - pd.tseries.offsets.BDay(config["sequence_length"] - 1)
+        full_df_dates = pd.to_datetime(full_df["日期"])
+        full_df["日期"] = full_df_dates
+        val_sliding_df = full_df[
+            (full_df["日期"] >= val_context_start) & (full_df["日期"] <= val_end)
+        ]
+        val_sliding_data, _ = preprocess_val_data(val_sliding_df, stockid2idx=stockid2idx)
+        val_sliding_data[features] = val_sliding_data[features].replace([np.inf, -np.inf], np.nan)
+        val_sliding_data = val_sliding_data.dropna(subset=features)
+        val_sliding_instrument = val_sliding_data["instrument"].copy()
+        val_sliding_data[features] = scaler.transform(val_sliding_data[features])
+        val_sliding_data["instrument"] = val_sliding_instrument
+
+        min_date_for_sliding = val_first_sample_date.strftime("%Y-%m-%d")
+        (val_sliding_sequences, val_sliding_targets, val_sliding_relevance,
+         val_sliding_stock_indices, _, val_sliding_hs300_rets,
+         val_sliding_dates) = create_ranking_dataset_vectorized(
+            val_sliding_data, features, config["sequence_length"],
+            ranking_data_path=None, min_window_end_date=min_date_for_sliding,
+            require_natural_day_consecutive=False,
+            hs300_labels_map=hs300_labels_map,
+        )
+
+        # Restore full_df dates (may have been mutated above)
+        full_df["日期"] = full_df_dates
+
+        # 5. Dataloaders
+        train_dataset = RankingDataset(
+            train_sequences, train_targets, train_relevance,
+            train_stock_indices, train_hs300_rets,
+        )
+        val_dataset = RankingDataset(
+            val_sequences, val_targets, val_relevance,
+            val_stock_indices, val_hs300_rets,
+        )
+        val_sliding_dataset = RankingDataset(
+            val_sliding_sequences, val_sliding_targets, val_sliding_relevance,
+            val_sliding_stock_indices, val_sliding_hs300_rets,
+        )
+
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset, batch_size=exp_config["batch_size"],
+            shuffle=True, collate_fn=collate_fn, num_workers=0,
+        )
+        val_loader = torch.utils.data.DataLoader(
+            val_dataset, batch_size=exp_config["batch_size"],
+            shuffle=False, collate_fn=collate_fn, num_workers=0,
+        )
+        val_sliding_loader = torch.utils.data.DataLoader(
+            val_sliding_dataset, batch_size=exp_config["batch_size"],
+            shuffle=False, collate_fn=collate_fn, num_workers=0,
+        )
+
+        # 6. Model
+        model_config = config_module.get_model_config(model_type)
+        model_config.update(exp_config)
+        model = create_model(model_type, len(features), model_config, len(stockid2idx)).to(device)
+
+        # 7. Loss / optimizer / scheduler
+        criterion = WeightedRankingLoss(
+            temperature=1.0, k=exp_config.get("top_k", 5),
+            weight_factor=exp_config.get("top5_weight", 2.0),
+            pairwise_weight=exp_config.get("pairwise_weight", 1),
+            base_weight=exp_config.get("base_weight", 1.0),
+        )
+        optimizer = torch.optim.AdamW(model.parameters(), lr=exp_config["learning_rate"])
+        scheduler = torch.optim.lr_scheduler.LinearLR(
+            optimizer, start_factor=1.0, end_factor=0.2,
+            total_iters=exp_config["num_epochs"],
+        )
+
+        # 8. Train
+        best_ndcg = -float("inf")
+        best_ndcg_epoch = -1
+        best_sliding_score_all = -float("inf")
+        best_sliding_epoch = -1
+        best_score_weekly = -float("inf")
+        best_epoch = -1
+
+        epoch_scores_file = os.path.join(fold_out_dir, "epoch_scores.txt")
+        with open(epoch_scores_file, "w") as f:
+            f.write("epoch,weekly_score,sliding_score,train_loss,eval_loss,eval_sliding_loss\n")
+
+        for epoch in range(exp_config["num_epochs"]):
+            train_loss, _ = train_ranking_model(
+                model, train_loader, criterion, optimizer, device, epoch, None,
+            )
+            eval_loss, eval_metrics = evaluate_ranking_model(
+                model, val_loader, criterion, device, None, epoch,
+            )
+            eval_sliding_loss, eval_sliding_metrics = evaluate_ranking_model(
+                model, val_sliding_loader, criterion, device, None, epoch,
+            )
+
+            current_score = eval_metrics.get("final_score", 0.0)
+            current_sliding_score = eval_sliding_metrics.get("final_score", 0.0)
+            current_ndcg = eval_sliding_metrics.get("ndcg", 0.0)
+
+            with open(epoch_scores_file, "a") as f:
+                f.write(f"{epoch+1},{current_score:.6f},{current_sliding_score:.6f},"
+                        f"{train_loss:.6f},{eval_loss:.6f},{eval_sliding_loss:.6f}\n")
+
+            if current_score > best_score_weekly:
+                best_score_weekly = current_score
+                best_epoch = epoch + 1
+                torch.save(model.state_dict(), os.path.join(fold_out_dir, "best_model.pth"))
+
+            if current_sliding_score > best_sliding_score_all:
+                best_sliding_score_all = current_sliding_score
+                best_sliding_epoch = epoch + 1
+                torch.save(model.state_dict(), os.path.join(fold_out_dir, "best_model_sliding.pth"))
+
+            if current_ndcg > best_ndcg:
+                best_ndcg = current_ndcg
+                best_ndcg_epoch = epoch + 1
+                torch.save(model.state_dict(), os.path.join(fold_out_dir, "best_model_optuna.pth"))
+
+            scheduler.step()
+
+        # Ensure at least one checkpoint was saved
+        for ckpt_name in ["best_model.pth", "best_model_sliding.pth", "best_model_optuna.pth"]:
+            if not os.path.exists(os.path.join(fold_out_dir, ckpt_name)):
+                torch.save(model.state_dict(), os.path.join(fold_out_dir, ckpt_name))
+
+        # 9. Backtest evaluation (all 3 checkpoints, pick best by Sharpe)
+        ckpts = {
+            "best_model.pth": "best_model",
+            "best_model_sliding.pth": "sliding_score",
+            "best_model_optuna.pth": "best_optuna",
+        }
+        best_sharpe, best_calmar, best_preds, best_label = -1e9, -1e9, None, ""
+        for ckpt_name, label in ckpts.items():
+            ckpt_path = os.path.join(fold_out_dir, ckpt_name)
+            if not os.path.exists(ckpt_path):
+                continue
+            result = _eval_ckpt_on_backtest(
+                ckpt_path, model, device, val_sliding_loader,
+                stockid2idx, val_sliding_dates, val_start, val_end,
+                exp_config, backtest_data_path, label=f"fold{fold_i}/{label}",
+            )
+            if result is None:
+                continue
+            sub_sharpe, sub_calmar, preds = result
+            if sub_sharpe > best_sharpe:
+                best_sharpe = sub_sharpe
+                best_calmar = sub_calmar
+                best_preds = preds
+                best_label = label
+
+        # Save Sharpe-best checkpoint for this fold
+        ckpt_map = {"best_model": "best_model.pth",
+                     "sliding_score": "best_model_sliding.pth",
+                     "best_optuna": "best_model_optuna.pth"}
+        best_ckpt_name = ckpt_map.get(best_label, "")
+        if best_ckpt_name:
+            src = os.path.join(fold_out_dir, best_ckpt_name)
+            dst = os.path.join(fold_out_dir, "best_model_sharpe.pth")
+            import shutil
+            shutil.copy2(src, dst)
+            print(f"  Fold {fold_i} best: {best_label} (Sharpe={best_sharpe:.4f})")
+
+        if best_preds is not None:
+            val_pred_path = os.path.join(fold_out_dir, "val_predictions.json")
+            with open(val_pred_path, "w") as f:
+                json.dump(best_preds, f, indent=2)
+
+        fold_results.append({
+            "fold": fold_i,
+            "sharpe": best_sharpe,
+            "calmar": best_calmar,
+            "val_start": str(val_start)[:10],
+            "val_end": str(val_end)[:10],
+        })
+
+        # Plot
+        try:
+            plot_epoch_scores(fold_out_dir)
+        except Exception as e:
+            print(f"  Warning: failed to plot: {e}")
+
+        # Cleanup
+        del model, optimizer, criterion, scheduler, train_loader, val_loader, val_sliding_loader
+        del train_dataset, val_dataset, val_sliding_dataset
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+        gc.collect()
+
+    # 10. Aggregate
+    sharpe_list = [r["sharpe"] for r in fold_results]
+    calmar_list = [r["calmar"] for r in fold_results]
+    mean_sharpe = float(np.mean(sharpe_list)) if sharpe_list else 0.0
+    std_sharpe = float(np.std(sharpe_list)) if sharpe_list else 0.0
+    cv_score = mean_sharpe - std_sharpe
+
+    result = {
+        "success": True,
+        "sharpe": cv_score,  # 兼容现有 summary/printing 代码
+        "fold_sharpe": sharpe_list,
+        "fold_calmar": calmar_list,
+        "mean_sharpe": mean_sharpe,
+        "std_sharpe": std_sharpe,
+        "cv_score": cv_score,
+        "params": params,
+    }
+    with open(os.path.join(exp_out_dir, "tscv_results.json"), "w") as f:
+        json.dump(result, f, indent=2)
+
+    print(f"\n{'=' * 60}")
+    print(f"TSCV 完成: {exp_name}")
+    print(f"  Fold Sharpe: {[f'{s:.4f}' for s in sharpe_list]}")
+    print(f"  Mean Sharpe: {mean_sharpe:.4f}  Std: {std_sharpe:.4f}  CV Score: {cv_score:.4f}")
+    print(f"{'=' * 60}")
+
+    return result
+
+
 def main(args):
     total_start_time = time.time()
 
@@ -830,11 +1228,24 @@ def main(args):
         torch.cuda.set_per_process_memory_fraction(0.8)
     gc.collect()
 
+    # TSCV config (独立路径，不受单折搜索影响)
+    use_tscv = getattr(config_module, "use_tscv", False)
+    tscv_eval_dir = getattr(config_module, "tscv_eval_dir", "model/TSCV")
+    tscv_folds = getattr(config_module, "tscv_folds", [])
+    if use_tscv and not tscv_folds:
+        print("Warning: use_tscv=True but no tscv_folds, falling back to single-fold")
+        use_tscv = False
+
     data_file = config.get("data_file", "data.csv")
     file_prefix = data_file.split("_")[1].split(".")[0]
     search_method = args.search_method or config.get("search_method", "bayesian")
     method_prefix = "grid" if search_method == "grid" else "bayes"
-    search_dir = config["output_dir"].replace("search_", f"{method_prefix}_")
+    if use_tscv:
+        date_tag = ""  # TSCV 路径不附带日期标签（folds 已定义）
+        config["output_dir"] = f"./model/search_{mt}_{n}_{tk}"
+        search_dir = os.path.join(tscv_eval_dir, f"{method_prefix}_{mt}_{n}_{tk}")
+    else:
+        search_dir = config["output_dir"].replace("search_", f"{method_prefix}_")
     os.makedirs(search_dir, exist_ok=True)
 
     preprocessed_path = os.path.join(search_dir, "preprocessed_data.pkl")
@@ -926,7 +1337,10 @@ def main(args):
                 print(f"GPU before: alloc={torch.cuda.memory_allocated()/1e9:.2f}GB  reserved={torch.cuda.memory_reserved()/1e9:.2f}GB")
 
             start_time = time.time()
-            result = run_experiment(params, config, preprocessed_data, scaler, search_dir, i, config_module)
+            if use_tscv:
+                result = run_experiment_cv(params, config, tscv_folds, search_dir, i, config_module)
+            else:
+                result = run_experiment(params, config, preprocessed_data, scaler, search_dir, i, config_module)
             result["exp_idx"] = i
             elapsed = time.time() - start_time
 
@@ -951,11 +1365,15 @@ def main(args):
             print(f"\n📊 Experiment {i + 1} result:")
             print(f"   Model: {result.get('model_type', '?')}")
             print(f"   Metric: {result.get('metric', config.get('search_metric', 'ndcg'))}")
-            print(f"   Sharpe: {result['sharpe']:.4f}  Calmar: {result.get('calmar_ratio', 0):.4f}")
-            print(f"   Sliding final_score: {result.get('sliding_score', 0):.6f}")
-            print(f"   Best epoch: {result.get('best_epoch', '?')}")
+            if use_tscv:
+                print(f"   CV Score: {result['sharpe']:.4f}  Mean Sharpe: {result.get('mean_sharpe', 0):.4f}  Std: {result.get('std_sharpe', 0):.4f}")
+                print(f"   Fold Sharpe: {[f'{s:.3f}' for s in result.get('fold_sharpe', [])]}")
+            else:
+                print(f"   Sharpe: {result['sharpe']:.4f}  Calmar: {result.get('calmar_ratio', 0):.4f}")
+                print(f"   Sliding final_score: {result.get('sliding_score', 0):.6f}")
+                print(f"   Best epoch: {result.get('best_epoch', '?')}")
             print(f"   ⏱️  Time: {elapsed:.1f}s")
-            best_sofar = max(r['score'] for r in results if r['success'])
+            best_sofar = max(r.get('sharpe', r.get('score', 0)) for r in results if r['success'])
             print(f"   ✅ Best score so far: {best_sofar:.6f}")
             print(f"\n📊 Progress: {completed}/{len(PARAM_GRID)} ({completed / len(PARAM_GRID) * 100:.1f}%)")
             if remaining > 0:
@@ -1005,6 +1423,8 @@ def main(args):
         if len(study.trials) > 0:
             print(f"Optuna study loaded with {len(study.trials)} existing trials.")
             print(f"  Completed: {n_completed}, remaining: {remaining_trials}")
+            if use_tscv:
+                print(f"  (已有 {n_completed} 个 TSCV trial，--fresh 可重置)")
         else:
             print(f"Starting new Optuna study ({n_trials} trials).")
         print(f"Optimization metric: {search_metric}")
@@ -1020,14 +1440,21 @@ def main(args):
 
             output_dir = os.path.join(search_dir, f"exp_{exp_idx}")
             if args.resume and os.path.exists(output_dir):
-                final_score_file = os.path.join(output_dir, "final_score.txt")
-                if os.path.exists(final_score_file):
-                    with open(final_score_file) as f:
-                        for line in f:
-                            target_key = "Sharpe (trial objective):"
-                            if target_key in line:
-                                score = float(line.split(":")[-1].strip())
-                                return score
+                if use_tscv:
+                    tscv_result_file = os.path.join(search_dir, f"exp_{exp_idx}", "tscv_results.json")
+                    if os.path.exists(tscv_result_file):
+                        with open(tscv_result_file) as f:
+                            tscv_data = json.load(f)
+                            return tscv_data.get("cv_score", tscv_data.get("sharpe", 0))
+                else:
+                    final_score_file = os.path.join(output_dir, "final_score.txt")
+                    if os.path.exists(final_score_file):
+                        with open(final_score_file) as f:
+                            for line in f:
+                                target_key = "Sharpe (trial objective):"
+                                if target_key in line:
+                                    score = float(line.split(":")[-1].strip())
+                                    return score
 
             print(f"\n{'=' * 50}")
             print(f"Trial {trial.number + 1}/{min(n_trials, remaining_trials + n_completed)} (Bayesian)")
@@ -1041,7 +1468,10 @@ def main(args):
 
             start_time = time.time()
             try:
-                result = run_experiment(params, config, preprocessed_data, scaler, search_dir, exp_idx, config_module)
+                if use_tscv:
+                    result = run_experiment_cv(params, config, tscv_folds, search_dir, exp_idx, config_module)
+                else:
+                    result = run_experiment(params, config, preprocessed_data, scaler, search_dir, exp_idx, config_module)
             except Exception as e:
                 print(f"  Trial {trial.number} failed during training: {e}")
                 traceback.print_exc()
@@ -1061,17 +1491,22 @@ def main(args):
                 json.dump(results, f, indent=2)
 
             current_completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
-            best_sofar = max(t.value for t in current_completed) if current_completed else result["sharpe"]
+            objective_value = result.get("sharpe", result.get("score", 0))
+            best_sofar = max(t.value for t in current_completed) if current_completed else objective_value
             print(f"\n📊 Trial {trial.number + 1} result:")
             print(f"   Model: {result.get('model_type', '?')}")
-            print(f"   Metric: {result.get('metric', search_metric)}")
-            print(f"   Sharpe: {result['sharpe']:.4f}  Calmar: {result.get('calmar_ratio', 0):.4f}")
-            print(f"   Sliding final_score: {result.get('sliding_score', 0):.6f}")
-            print(f"   Best epoch: {result.get('best_epoch', '?')}")
+            if use_tscv:
+                print(f"   CV Score: {objective_value:.4f}  Mean Sharpe: {result.get('mean_sharpe', 0):.4f}  Std: {result.get('std_sharpe', 0):.4f}")
+                print(f"   Fold Sharpe: {[f'{s:.3f}' for s in result.get('fold_sharpe', [])]}")
+            else:
+                print(f"   Metric: {result.get('metric', search_metric)}")
+                print(f"   Sharpe: {objective_value:.4f}  Calmar: {result.get('calmar_ratio', 0):.4f}")
+                print(f"   Sliding final_score: {result.get('sliding_score', 0):.6f}")
+                print(f"   Best epoch: {result.get('best_epoch', '?')}")
             print(f"   ⏱️  Time: {elapsed:.1f}s")
             print(f"   ✅ Best score so far: {best_sofar:.6f}")
 
-            return result["sharpe"]
+            return objective_value
 
         study.optimize(objective, n_trials=remaining_trials, show_progress_bar=True)
 
@@ -1112,8 +1547,9 @@ def main(args):
 
     successful = [r for r in results if r["success"]]
     if successful:
-        best = max(successful, key=lambda x: x["sharpe"])
-        print(f"\nBest: {best['params']}, sharpe: {best['sharpe']:.4f}, calmar: {best.get('calmar_ratio', 0):.4f}")
+        best = max(successful, key=lambda x: float(x.get("sharpe", x.get("score", 0))))
+        best_sharpe = float(best.get("sharpe", best.get("score", 0)))
+        print(f"\nBest: {best['params']}, sharpe: {best_sharpe:.4f}, calmar: {best.get('calmar_ratio', 0):.4f}")
 
 
 if __name__ == "__main__":

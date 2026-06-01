@@ -1,3 +1,6 @@
+import os
+
+
 # ETF 配置参数
 sequence_length = 60
 feature_num = "39"
@@ -33,6 +36,16 @@ config = {
     "commission": 0.0003,   # 手续费率 (万分之三)
     "slippage": 0.001,      # 滑点 (千分之一)
 }
+
+# TSCV 交叉验证配置
+use_tscv = True                     # 是否启用 TSCV 多折评估
+tscv_eval_dir = "model/TSCV"        # TSCV 评估输出路径
+tscv_folds = [
+    {"val_start": "2024-07-01", "val_end": "2024-12-31"},
+    {"val_start": "2025-01-01", "val_end": "2025-06-30"},
+    {"val_start": "2025-07-01", "val_end": "2025-12-31"},
+    {"val_start": "2026-01-01", "val_end": "2026-05-29"},
+]
 
 MODEL_CONFIGS = {
     "transformer": {
@@ -241,6 +254,15 @@ def get_param_grid(model_type):
     if model_type not in PARAM_GRID:
         raise ValueError(f"Unknown model type: {model_type}")
     return PARAM_GRID[model_type]
+
+
+def load_tscv_config():
+    """从 config.py 模块读取 TSCV 配置。
+
+    Returns:
+        (tscv_eval_dir, folds_list, enabled)
+    """
+    return tscv_eval_dir, tscv_folds, use_tscv
 
 
 def get_search_space(model_type):
