@@ -1039,7 +1039,27 @@ def run_experiment_cv(params, config, folds, tscv_eval_dir, exp_idx, config_modu
             total_iters=exp_config["num_epochs"],
         )
 
-        # 8. Train
+        # 8. Train (with resume support)
+        epoch_scores_file = os.path.join(fold_out_dir, "epoch_scores.txt")
+        start_epoch = 0
+        if os.path.exists(epoch_scores_file):
+            try:
+                import pandas as _pd
+                df_old = _pd.read_csv(epoch_scores_file)
+                start_epoch = len(df_old)
+            except Exception:
+                start_epoch = 0
+            if start_epoch >= exp_config["num_epochs"]:
+                print(f"  Fold {fold_i}: fully trained ({start_epoch} epochs), skip re-training")
+            elif start_epoch > 0:
+                has_ckpt = any(os.path.exists(os.path.join(fold_out_dir, ckpt))
+                               for ckpt in ["best_model.pth", "best_model_sliding.pth", "best_model_optuna.pth"])
+                if not has_ckpt:
+                    print(f"  Fold {fold_i}: epoch_scores.txt found but no checkpoints, start fresh")
+                    start_epoch = 0
+                else:
+                    print(f"  Fold {fold_i}: resume epoch {start_epoch}/{exp_config['num_epochs']}")
+
         best_ndcg = -float("inf")
         best_ndcg_epoch = -1
         best_sliding_score_all = -float("inf")
@@ -1047,50 +1067,56 @@ def run_experiment_cv(params, config, folds, tscv_eval_dir, exp_idx, config_modu
         best_score_weekly = -float("inf")
         best_epoch = -1
 
-        epoch_scores_file = os.path.join(fold_out_dir, "epoch_scores.txt")
-        with open(epoch_scores_file, "w") as f:
-            f.write("epoch,weekly_score,sliding_score,train_loss,eval_loss,eval_sliding_loss\n")
+        if start_epoch == 0:
+            with open(epoch_scores_file, "w") as f:
+                f.write("epoch,weekly_score,sliding_score,train_loss,eval_loss,eval_sliding_loss\n")
 
-        for epoch in range(exp_config["num_epochs"]):
-            train_loss, _ = train_ranking_model(
-                model, train_loader, criterion, optimizer, device, epoch, None,
-            )
-            eval_loss, eval_metrics = evaluate_ranking_model(
-                model, val_loader, criterion, device, None, epoch,
-            )
-            eval_sliding_loss, eval_sliding_metrics = evaluate_ranking_model(
-                model, val_sliding_loader, criterion, device, None, epoch,
-            )
+        if start_epoch < exp_config["num_epochs"]:
+            for _ in range(start_epoch):
+                scheduler.step()
 
-            current_score = eval_metrics.get("final_score", 0.0)
-            current_sliding_score = eval_sliding_metrics.get("final_score", 0.0)
-            current_ndcg = eval_sliding_metrics.get("ndcg", 0.0)
+            for epoch in range(start_epoch, exp_config["num_epochs"]):
+                train_loss, _ = train_ranking_model(
+                    model, train_loader, criterion, optimizer, device, epoch, None,
+                )
+                eval_loss, eval_metrics = evaluate_ranking_model(
+                    model, val_loader, criterion, device, None, epoch,
+                )
+                eval_sliding_loss, eval_sliding_metrics = evaluate_ranking_model(
+                    model, val_sliding_loader, criterion, device, None, epoch,
+                )
 
-            with open(epoch_scores_file, "a") as f:
-                f.write(f"{epoch+1},{current_score:.6f},{current_sliding_score:.6f},"
-                        f"{train_loss:.6f},{eval_loss:.6f},{eval_sliding_loss:.6f}\n")
+                current_score = eval_metrics.get("final_score", 0.0)
+                current_sliding_score = eval_sliding_metrics.get("final_score", 0.0)
+                current_ndcg = eval_sliding_metrics.get("ndcg", 0.0)
 
-            if current_score > best_score_weekly:
-                best_score_weekly = current_score
-                best_epoch = epoch + 1
-                torch.save(model.state_dict(), os.path.join(fold_out_dir, "best_model.pth"))
+                with open(epoch_scores_file, "a") as f:
+                    f.write(f"{epoch+1},{current_score:.6f},{current_sliding_score:.6f},"
+                            f"{train_loss:.6f},{eval_loss:.6f},{eval_sliding_loss:.6f}\n")
 
-            if current_sliding_score > best_sliding_score_all:
-                best_sliding_score_all = current_sliding_score
-                best_sliding_epoch = epoch + 1
-                torch.save(model.state_dict(), os.path.join(fold_out_dir, "best_model_sliding.pth"))
+                if current_score > best_score_weekly:
+                    best_score_weekly = current_score
+                    best_epoch = epoch + 1
+                    torch.save(model.state_dict(), os.path.join(fold_out_dir, "best_model.pth"))
 
-            if current_ndcg > best_ndcg:
-                best_ndcg = current_ndcg
-                best_ndcg_epoch = epoch + 1
-                torch.save(model.state_dict(), os.path.join(fold_out_dir, "best_model_optuna.pth"))
+                if current_sliding_score > best_sliding_score_all:
+                    best_sliding_score_all = current_sliding_score
+                    best_sliding_epoch = epoch + 1
+                    torch.save(model.state_dict(), os.path.join(fold_out_dir, "best_model_sliding.pth"))
 
-            scheduler.step()
+                if current_ndcg > best_ndcg:
+                    best_ndcg = current_ndcg
+                    best_ndcg_epoch = epoch + 1
+                    torch.save(model.state_dict(), os.path.join(fold_out_dir, "best_model_optuna.pth"))
 
-        # Ensure at least one checkpoint was saved
-        for ckpt_name in ["best_model.pth", "best_model_sliding.pth", "best_model_optuna.pth"]:
-            if not os.path.exists(os.path.join(fold_out_dir, ckpt_name)):
-                torch.save(model.state_dict(), os.path.join(fold_out_dir, ckpt_name))
+                scheduler.step()
+
+            # Ensure at least one checkpoint was saved
+            for ckpt_name in ["best_model.pth", "best_model_sliding.pth", "best_model_optuna.pth"]:
+                if not os.path.exists(os.path.join(fold_out_dir, ckpt_name)):
+                    torch.save(model.state_dict(), os.path.join(fold_out_dir, ckpt_name))
+        else:
+            print(f"  Fold {fold_i}: re-using existing checkpoints")
 
         # 9. Backtest evaluation (all 3 checkpoints, pick best by Sharpe)
         ckpts = {
@@ -1445,7 +1471,11 @@ def main(args):
                     if os.path.exists(tscv_result_file):
                         with open(tscv_result_file) as f:
                             tscv_data = json.load(f)
+                        if len(tscv_data.get("fold_sharpe", [])) == len(tscv_folds):
                             return tscv_data.get("cv_score", tscv_data.get("sharpe", 0))
+                    print(f"  Trial {trial.number}: exp_{exp_idx} 未完成, 清空重训")
+                    import shutil
+                    shutil.rmtree(output_dir)
                 else:
                     final_score_file = os.path.join(output_dir, "final_score.txt")
                     if os.path.exists(final_score_file):
@@ -1557,7 +1587,7 @@ if __name__ == "__main__":
 
     # 默认搜索的模型类型（不传 --model-type 时全部搜索）
     # SEARCH_MODEL_TYPES = ["itransformer", "gru", "tcn", "dlinear", "lstm", "timesnet", "nlinear", "patchtst", "mamba"]
-    SEARCH_MODEL_TYPES = ["transformer"]
+    SEARCH_MODEL_TYPES = ["dlinear", "itransformer", "timesnet", "tcn", "patchtst", "gru"]
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="config")
