@@ -16,7 +16,8 @@ from send_report import (
     _compute_health_score, _build_health_table, _add_window, _compute_max_drawdown,
     _load_etf_names, _xueqiu_url, PROJECT_ROOT,
 )
-from daily_eval import _compute_model_stats, _resolve_report_key, _extract_drawdowns, _compute_longterm_risk_metrics
+from daily_eval import _compute_model_stats, _resolve_report_key
+from metrics import extract_drawdowns, compute_longterm_risk_metrics
 
 STATE_PATH = PROJECT_ROOT / "output" / "backtest_state.json"
 HISTORY_DIR = PROJECT_ROOT / "output" / "history_report"
@@ -375,13 +376,13 @@ def simulate_state_at_date(seq, target_date, raw_df, initial_capital=100000):
         "total_days": n_days,
     }
 
-    dd_periods = _extract_drawdowns(ec_values, ec_dates)
+    dd_periods = extract_drawdowns(ec_values, ec_dates)
     if dd_periods:
         metrics["drawdown_periods"] = dd_periods
 
     # 长期风险指标
     cum_arr = np.array(ec_values) / initial_capital
-    risk_metrics = _compute_longterm_risk_metrics(np.array(daily_rets), cum_arr, ec_dates, dd_periods)
+    risk_metrics = compute_longterm_risk_metrics(np.array(daily_rets), cum_arr, ec_dates, dd_periods)
     metrics.update(risk_metrics)
 
     # Add window metrics

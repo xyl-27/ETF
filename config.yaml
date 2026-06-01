@@ -23,7 +23,7 @@ slippage: 0.001              # 滑点
 
 # Top-K 与加权策略
 top_k: 3
-weight_strategy: "risk_parity"     # equal | softmax | rank_linear | risk_parity | score_risk | score_risk_v1
+weight_strategy: "kelly"           # equal | softmax | rank_linear | risk_parity | score_risk | score_risk_v1 | kelly
 strategy_params:
   temperature: 1.0           # softmax 温度
   vol_window: 20             # 波动率回看天数
@@ -32,20 +32,14 @@ strategy_params:
 
 # 模型列表
 models:
-  - dir: juejin/live/bayes_patchtst_74_3_2026-01-01_2026-03-31/exp_27
-    file: best_model_ndcg.pth
-    enabled: true
-  - dir: model/bayes_tcn_74_3_2026-01-01_2026-03-31/exp_24
+  - dir: model/bayes_dlinear_74_3_2026-01-01_2026-03-31/exp_57
     file: best_model.pth
     enabled: true
-  - dir: model/bayes_dlinear_74_3_2026-01-01_2026-03-31/exp_10
+  - dir: model/bayes_gru_74_3_2026-01-01_2026-03-31/exp_47
+    file: best_model.pth
+    enabled: true
+  - dir: model/bayes_tcn_74_3_2026-01-01_2026-03-31/exp_63
     file: best_model_sliding.pth
-    enabled: true
-  - dir: model/bayes_dlinear_74_3_2026-01-01_2026-03-31/exp_3
-    file: best_model.pth
-    enabled: false
-  - dir: model/bayes_gru_74_3_2026-01-01_2026-03-31/exp_0
-    file: best_model.pth
     enabled: true
 
 # 融合序列
@@ -65,10 +59,10 @@ master: "first"
 juejin:
   top_k: 3
   rebalance_days: 5
-  start_date: "2026-04-01"
+  start_date: "2026-01-01"
   trade_mode: "open"
   position_pct: 0.95
-  weight_strategy: "risk_parity"
+  weight_strategy: "kelly"
   strategy_params:
     vol_window: 20
 
