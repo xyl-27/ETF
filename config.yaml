@@ -32,11 +32,11 @@ strategy_params:
 
 # 模型列表
 models:
-  - dir: model/bayes_dlinear_74_3_2026-01-01_2026-03-31/exp_57
-    file: best_model.pth
+  - dir: model/TSCV/bayes_dlinear_74_3/exp_11/full
+    file: best_model_sharpe.pth
     enabled: true
-  - dir: model/bayes_gru_74_3_2026-01-01_2026-03-31/exp_47
-    file: best_model.pth
+  - dir: model/TSCV/bayes_timesnet_74_3/exp_20/full
+    file: best_model_sharpe.pth
     enabled: true
   - dir: model/bayes_tcn_74_3_2026-01-01_2026-03-31/exp_63
     file: best_model_sliding.pth

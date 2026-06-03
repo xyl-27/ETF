@@ -853,10 +853,6 @@ def _eval_ckpt_on_backtest(ckpt_path, model, device, val_sliding_loader,
 
     sub_sharpe = 0.0
     sub_calmar = 0.0
-    sub_dd = 0.0
-    sub_sortino = 0.0
-    sub_win_rate = 0.0
-    sub_recovery_days = 0
     if sub_curves:
         all_dts = sorted(set().union(*[set(ec["date"]) for ec in sub_curves]))
         aligned = pd.DataFrame({"date": all_dts})
@@ -869,13 +865,9 @@ def _eval_ckpt_on_backtest(ckpt_path, model, device, val_sliding_loader,
         cwm = _cwm(aligned, 100000)
         sub_sharpe = cwm.get("sharpe_ratio", 0.0)
         sub_calmar = cwm.get("calmar_ratio", 0.0)
-        sub_dd = cwm.get("max_drawdown_pct", 0.0)
-        sub_sortino = cwm.get("sortino_ratio", 0.0)
-        sub_win_rate = cwm.get("daily_win_rate", 0.0)
-        sub_recovery_days = cwm.get("max_recovery_days", 0)
 
-    print(f"  {label}: 5sub_sharpe={sub_sharpe:.2f}  dd={sub_dd:.2f}  sortino={sub_sortino:.2f}  wr={sub_win_rate:.2%}")
-    return sub_sharpe, sub_calmar, sub_dd, sub_sortino, sub_win_rate, sub_recovery_days, preds
+    print(f"  {label}: 5sub_sharpe={sub_sharpe:.2f}  5sub_calmar={sub_calmar:.2f}")
+    return sub_sharpe, sub_calmar, preds
 
 
 def run_experiment_cv(params, config, folds, tscv_eval_dir, exp_idx, config_module):
@@ -1132,7 +1124,7 @@ def run_experiment_cv(params, config, folds, tscv_eval_dir, exp_idx, config_modu
             "best_model_sliding.pth": "sliding_score",
             "best_model_optuna.pth": "best_optuna",
         }
-        best_sharpe, best_calmar, best_dd, best_sortino, best_win_rate, best_recovery_days, best_preds, best_label = -1e9, -1e9, 1e9, -1e9, 0, 0, None, ""
+        best_sharpe, best_calmar, best_preds, best_label = -1e9, -1e9, None, ""
         for ckpt_name, label in ckpts.items():
             ckpt_path = os.path.join(fold_out_dir, ckpt_name)
             if not os.path.exists(ckpt_path):
@@ -1144,14 +1136,10 @@ def run_experiment_cv(params, config, folds, tscv_eval_dir, exp_idx, config_modu
             )
             if result is None:
                 continue
-            sub_sharpe, sub_calmar, sub_dd, sub_sortino, sub_win_rate, sub_recovery_days, preds = result
+            sub_sharpe, sub_calmar, preds = result
             if sub_sharpe > best_sharpe:
                 best_sharpe = sub_sharpe
                 best_calmar = sub_calmar
-                best_dd = sub_dd
-                best_sortino = sub_sortino
-                best_win_rate = sub_win_rate
-                best_recovery_days = sub_recovery_days
                 best_preds = preds
                 best_label = label
 
@@ -1176,10 +1164,6 @@ def run_experiment_cv(params, config, folds, tscv_eval_dir, exp_idx, config_modu
             "fold": fold_i,
             "sharpe": best_sharpe,
             "calmar": best_calmar,
-            "max_dd": best_dd,
-            "sortino": best_sortino,
-            "win_rate": best_win_rate,
-            "recovery_days": best_recovery_days,
             "val_start": str(val_start)[:10],
             "val_end": str(val_end)[:10],
         })
@@ -1201,32 +1185,18 @@ def run_experiment_cv(params, config, folds, tscv_eval_dir, exp_idx, config_modu
     # 10. Aggregate
     sharpe_list = [r["sharpe"] for r in fold_results]
     calmar_list = [r["calmar"] for r in fold_results]
-    dd_list = [r["max_dd"] for r in fold_results]
-    sortino_list = [r["sortino"] for r in fold_results]
-    win_rate_list = [r["win_rate"] for r in fold_results]
-    recovery_days_list = [r["recovery_days"] for r in fold_results]
     mean_sharpe = float(np.mean(sharpe_list)) if sharpe_list else 0.0
     std_sharpe = float(np.std(sharpe_list)) if sharpe_list else 0.0
     cv_score = mean_sharpe - std_sharpe
-    mean_dd = float(np.mean(dd_list)) if dd_list else 0.0
-    mean_sortino = float(np.mean(sortino_list)) if sortino_list else 0.0
-    mean_win_rate = float(np.mean(win_rate_list)) if win_rate_list else 0.0
 
     result = {
         "success": True,
         "sharpe": cv_score,  # 兼容现有 summary/printing 代码
         "fold_sharpe": sharpe_list,
         "fold_calmar": calmar_list,
-        "fold_max_dd": dd_list,
-        "fold_sortino": sortino_list,
-        "fold_win_rate": win_rate_list,
-        "fold_recovery_days": recovery_days_list,
         "mean_sharpe": mean_sharpe,
         "std_sharpe": std_sharpe,
         "cv_score": cv_score,
-        "mean_max_dd": mean_dd,
-        "mean_sortino": mean_sortino,
-        "mean_win_rate": mean_win_rate,
         "params": params,
     }
     with open(os.path.join(exp_out_dir, "tscv_results.json"), "w") as f:
@@ -1236,10 +1206,106 @@ def run_experiment_cv(params, config, folds, tscv_eval_dir, exp_idx, config_modu
     print(f"TSCV 完成: {exp_name}")
     print(f"  Fold Sharpe: {[f'{s:.4f}' for s in sharpe_list]}")
     print(f"  Mean Sharpe: {mean_sharpe:.4f}  Std: {std_sharpe:.4f}  CV Score: {cv_score:.4f}")
-    print(f"  Mean DD: {mean_dd:.2f}%  Sortino: {mean_sortino:.2f}  Win Rate: {mean_win_rate:.2%}")
     print(f"{'=' * 60}")
 
     return result
+
+
+def train_full(exp_config, scaler, full_out, config_module, num_epochs=15):
+    """在全量数据上训练部署模型（无验证集切分）。"""
+    set_seed(42)
+    full_out = str(full_out)
+    os.makedirs(full_out, exist_ok=True)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    data_path = exp_config["data_path"]
+    data_file = exp_config.get("data_file", "etf_74_train.csv")
+    data_file_path = os.path.join(data_path, data_file)
+    full_df = pd.read_csv(data_file_path)
+
+    all_stock_ids = full_df["股票代码"].unique()
+    stockid2idx = {sid: idx for idx, sid in enumerate(sorted(all_stock_ids))}
+    num_stocks = len(stockid2idx)
+
+    hs300_code = "510300.XSHG"
+    hs300_data = full_df[full_df["股票代码"] == hs300_code].sort_values("日期").copy()
+    hs300_data["open_t1"] = hs300_data["开盘"].shift(-1)
+    hs300_data["open_t5"] = hs300_data["开盘"].shift(-5)
+    hs300_data["label"] = (hs300_data["open_t5"] - hs300_data["open_t1"]) / (hs300_data["open_t1"] + 1e-12)
+    hs300_labels_map = {}
+    for _, row in hs300_data.dropna(subset=["label"]).iterrows():
+        hs300_labels_map[str(row["日期"])[:10]] = row["label"]
+
+    model_type = exp_config.get("model_type", "dlinear")
+    model_defaults = config_module.get_model_config(model_type)
+    exp_config = dict(exp_config)
+    exp_config.update(model_defaults)
+
+    train_data, features = preprocess_data(full_df, is_train=True, stockid2idx=stockid2idx)
+    train_data[features] = train_data[features].replace([np.inf, -np.inf], np.nan)
+    train_data = train_data.dropna(subset=features)
+    train_instrument = train_data["instrument"].copy()
+    train_data[features] = scaler.transform(train_data[features])
+    train_data["instrument"] = train_instrument
+
+    train_sequences, train_targets, train_relevance, train_stock_indices, _, train_hs300_rets, _ = \
+        create_ranking_dataset_vectorized(
+            train_data, features, exp_config["sequence_length"],
+            ranking_data_path=None, hs300_labels_map=hs300_labels_map,
+        )
+
+    train_dataset = RankingDataset(
+        train_sequences, train_targets, train_relevance,
+        train_stock_indices, train_hs300_rets,
+    )
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset, batch_size=exp_config["batch_size"],
+        shuffle=True, collate_fn=collate_fn, num_workers=0,
+    )
+
+    model_config = config_module.get_model_config(model_type)
+    model_config.update(exp_config)
+    model = create_model(model_type, len(features), model_config, num_stocks).to(device)
+
+    criterion = WeightedRankingLoss(
+        temperature=1.0, k=exp_config.get("top_k", 5),
+        weight_factor=exp_config.get("top5_weight", 2.0),
+        pairwise_weight=exp_config.get("pairwise_weight", 1),
+        base_weight=exp_config.get("base_weight", 1.0),
+    )
+    optimizer = torch.optim.AdamW(model.parameters(), lr=exp_config["learning_rate"])
+    scheduler = torch.optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=1.0, end_factor=0.2,
+        total_iters=num_epochs,
+    )
+
+    epoch_scores_file = os.path.join(full_out, "epoch_scores.txt")
+    with open(epoch_scores_file, "w") as f:
+        f.write("epoch,train_loss,lr,epoch_time_sec\n")
+
+    for epoch in range(num_epochs):
+        t0 = time.time()
+        train_loss, _ = train_ranking_model(
+            model, train_loader, criterion, optimizer, device, epoch, None,
+        )
+        current_lr = scheduler.get_last_lr()[0]
+        elapsed = time.time() - t0
+        with open(epoch_scores_file, "a") as f:
+            f.write(f"{epoch+1},{train_loss:.6f},{current_lr:.2e},{elapsed:.2f}\n")
+        scheduler.step()
+
+    final_path = os.path.join(full_out, "best_model.pth")
+    torch.save(model.state_dict(), final_path)
+    sharpe_path = os.path.join(full_out, "best_model_sharpe.pth")
+    torch.save(model.state_dict(), sharpe_path)
+    joblib.dump(scaler, os.path.join(full_out, "scaler.pkl"))
+
+    with open(os.path.join(full_out, "config.json"), "w") as f:
+        json.dump(exp_config, f, indent=2)
+
+    print(f"  Full model trained: {num_epochs} epochs, {len(train_dataset)} samples")
+    print(f"  Saved: {final_path}")
 
 
 def main(args):
@@ -1618,7 +1684,7 @@ if __name__ == "__main__":
 
     # 默认搜索的模型类型（不传 --model-type 时全部搜索）
     # SEARCH_MODEL_TYPES = ["itransformer", "gru", "tcn", "dlinear", "lstm", "timesnet", "nlinear", "patchtst", "mamba"]
-    SEARCH_MODEL_TYPES = ["dlinear", "itransformer", "timesnet", "tcn", "patchtst", "gru"]
+    SEARCH_MODEL_TYPES = ["tcn", "gru"]
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="config")

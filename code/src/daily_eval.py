@@ -1297,7 +1297,7 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
             ec = hseq.get("equity_curve", [])
             ec_seg_f = [e for e in ec if e["date"] <= cur_date]
             if ec_seg_f:
-                disp = hkey.replace("search_", "").replace("_exp_", " ")
+                disp = hkey.replace("search_", "").replace("_exp_", " ").replace("_full", " (full)")
                 hist_equity[disp] = ec_seg_f
         # 上期持仓（最近一次调仓前的持仓）
         pre_holdings = []
@@ -1332,7 +1332,7 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
         try:
             html = build_report_html(
                 date=cur_date,
-                model_display="历史调仓" if not model_key else model_key.replace("search_", "").replace("_exp_", " "),
+                model_display="历史调仓" if not model_key else model_key.replace("search_", "").replace("_exp_", " ").replace("_full", " (full)"),
                 total_value=today_total,
                 cash=cash,
                 holdings=holdings,
@@ -1434,7 +1434,7 @@ def _compute_model_stats(trades, current_prices=None, report_date=None):
 def _make_model_key(m):
     """生成 {search_type}_{model_type}_exp_X 格式的模型标识"""
     if isinstance(m, dict):
-        exp_dir = m["exp_dir"]
+        exp_dir = m.get("exp_dir", m.get("dir", ""))
     elif isinstance(m, (list, tuple)):
         exp_dir = m[0]
     else:
@@ -1442,6 +1442,10 @@ def _make_model_key(m):
     parent = os.path.basename(os.path.dirname(exp_dir))
     parent = re.sub(r'_\d+_\d+', '', parent)
     name = os.path.basename(exp_dir)
+    if name == "full":
+        grandparent = os.path.basename(os.path.dirname(os.path.dirname(exp_dir)))
+        grandparent = re.sub(r'_\d+_\d+', '', grandparent)
+        return f"{grandparent}_{parent}_{name}"
     return f"{parent}_{name}"
 
 
@@ -2909,9 +2913,9 @@ def run_from_predictions(
                 _dn = {"average": "平均", "voting": "投票"}
                 if report_key == "juejin":
                     _rk = next((k for k in sequences if k not in ("juejin", "average", "voting")), report_key)
-                    model_display = _dn.get(_rk, _rk.replace("search_", "").replace("_exp_", " "))
+                    model_display = _dn.get(_rk, _rk.replace("search_", "").replace("_exp_", " ").replace("_full", " (full)"))
                 else:
-                    model_display = _dn.get(report_key, report_key.replace("search_", "").replace("_exp_", " "))
+                    model_display = _dn.get(report_key, report_key.replace("search_", "").replace("_exp_", " ").replace("_full", " (full)"))
                 print(f"\n[邮件] 发送报告: {model_display}...")
             send_report(model_key=report_key)
         except Exception as e:
@@ -3343,9 +3347,9 @@ def run_from_juejin(verbose=True, start_date="2026-04-01", initial_capital=10000
             _dn = {"average": "平均", "voting": "投票"}
             if report_key == "juejin":
                 _rk = next((k for k in sequences if k not in ("juejin", "average", "voting")), report_key)
-                model_display = _dn.get(_rk, _rk.replace("search_", "").replace("_exp_", " "))
+                model_display = _dn.get(_rk, _rk.replace("search_", "").replace("_exp_", " ").replace("_full", " (full)"))
             else:
-                model_display = _dn.get(report_key, report_key.replace("search_", "").replace("_exp_", " "))
+                model_display = _dn.get(report_key, report_key.replace("search_", "").replace("_exp_", " ").replace("_full", " (full)"))
             print(f"\n[邮件] 发送报告: {model_display}...")
             send_report(model_key=report_key, verbose=verbose)
         except Exception as e:

@@ -16,6 +16,8 @@ import re
 import shutil
 import gc
 import time
+import numpy as np
+import joblib
 import torch
 from datetime import datetime
 from pathlib import Path
@@ -248,6 +250,80 @@ def cmd_reproduce(args):
     else:
         _log(f"错误: {msg}")
         sys.exit(1)
+
+
+# ============================================================
+#  Retrain (full-data from TSCV experiment)
+# ============================================================
+
+def cmd_retrain(args):
+    """在全量数据上训练部署模型（从 TSCV 实验的超参 + 中位数 epoch）。"""
+    source = Path(args.source)
+    if not source.exists():
+        _log(f"源目录不存在: {source}")
+        sys.exit(1)
+
+    config_path = source / "config.json"
+    if not config_path.exists():
+        _log(f"{config_path} 不存在")
+        sys.exit(1)
+    with open(config_path) as f:
+        exp_config = json.load(f)
+
+    # Determine num_epochs: from tscv_results.json fold_best_epoch median, or fallback
+    tscv_path = source / "tscv_results.json"
+    if tscv_path.exists():
+        with open(tscv_path) as f:
+            tscv_data = json.load(f)
+        epoch_list = tscv_data.get("fold_best_epoch", [])
+        if epoch_list:
+            num_epochs = int(np.median(epoch_list))
+            _log(f"  TSCV best epochs: {epoch_list}, median: {num_epochs}")
+        else:
+            num_epochs = exp_config.get("num_epochs", 15)
+            _log(f"  TSCV results found but no fold_best_epoch, fallback num_epochs={num_epochs}")
+    else:
+        num_epochs = exp_config.get("num_epochs", 15)
+        _log(f"  非 TSCV 实验, fallback num_epochs={num_epochs}")
+
+    # Find scaler
+    scaler = None
+    for cand in [source / "scaler.pkl", source / "fold_0" / "scaler.pkl", source.parent / "scaler.pkl"]:
+        if cand.exists():
+            scaler = joblib.load(str(cand))
+            _log(f"  Scaler: {cand}")
+            break
+    if scaler is None:
+        _log("错误: 找不到 scaler.pkl (checked: source/, source/fold_0/, source/../)")
+        sys.exit(1)
+
+    full_out = str(source / "full")
+    if os.path.exists(full_out):
+        if args.force:
+            shutil.rmtree(full_out)
+        else:
+            _log(f"目标目录已存在: {full_out} (使用 --force 覆盖)")
+            sys.exit(1)
+
+    if args.data_file:
+        exp_config = dict(exp_config)
+        exp_config["data_file"] = args.data_file
+        _log(f"  数据文件覆盖: {args.data_file}")
+
+    import config as config_module
+    from train_search_v2 import train_full
+
+    _log(f"  训练全量模型 ({num_epochs} epochs) …", end="")
+    try:
+        train_full(exp_config, scaler, full_out, config_module, num_epochs=num_epochs)
+    except Exception as e:
+        import traceback
+        _log(f" 失败: {e}")
+        _log(traceback.format_exc())
+        sys.exit(1)
+
+    _log(f"  完成: {full_out}")
+    _log(f"  可直接引用 config.yaml: dir={source.name}/full, file=best_model_sharpe.pth")
 
 
 # ============================================================
@@ -1011,6 +1087,165 @@ def cmd_reproduce_live(args):
 
 
 # ============================================================
+#  TSCV — 时间序列交叉验证评估
+# ============================================================
+
+def cmd_tscv(args):
+    """搜索结果的 TSCV 多折评估。"""
+    from train_search_v2 import run_experiment_cv
+    from config import load_tscv_config, config as base_config
+    import config as config_module
+
+    tscv_eval_dir, folds, enabled = load_tscv_config()
+    if not enabled or not folds:
+        _log("错误: TSCV 未启用 (config.py 中 use_tscv=False 或无 fold 定义)")
+        sys.exit(1)
+
+    _log(f"TSCV 评估目录: {tscv_eval_dir}")
+    _log(f"Fold 数: {len(folds)}")
+    for i, f in enumerate(folds):
+        _log(f"  Fold {i}: val {f['val_start']} ~ {f['val_end']}")
+
+    model_root = PROJECT_ROOT / "model"
+
+    # 确定实验列表
+    experiments = []
+    if args.experiment:
+        raw = args.experiment
+        if "_exp_" in raw:
+            parts = raw.split("_exp_")
+            experiments.append((parts[0], int(parts[1])))
+        else:
+            en = int(raw.replace("exp_", ""))
+            experiments.append(("", en))
+    else:
+        top_n = args.top_n or 5
+        seen = {}
+        for d in sorted(os.listdir(str(model_root))):
+            if not d.startswith("bayes_"):
+                continue
+            search_dir = model_root / d
+            results_file = search_dir / "search_results.json"
+            if not results_file.exists():
+                continue
+            with open(results_file) as f:
+                raw = json.load(f)
+            # Normalize: ML (dict of str→dict) vs DL (list of dict)
+            if isinstance(raw, dict):
+                results_list = [v for v in raw.values() if isinstance(v, dict)]
+            else:
+                results_list = raw
+            mt = _parse_model_type_from_dir(d)
+            sorted_results = sorted(
+                [r for r in results_list if r.get("success")],
+                key=lambda x: float(x.get("sharpe", x.get("score", 0))), reverse=True,
+            )
+            for r in sorted_results[:top_n]:
+                en = r.get("exp_idx", -1)
+                if en >= 0 and en not in seen:
+                    seen[en] = True
+                    experiments.append((mt, en))
+
+    if not experiments:
+        _log("错误: 无有效的实验")
+        sys.exit(1)
+
+    experiments.sort(key=lambda x: x[1])
+    _log(f"\n共 {len(experiments)} 个实验待评估:\n")
+
+    for mt, en in experiments:
+        # 定位实验目录
+        exp_dir = None
+        if mt:
+            for d in sorted(os.listdir(str(model_root))):
+                if not d.startswith(f"bayes_{mt}"):
+                    continue
+                candidate = model_root / d / f"exp_{en}"
+                if candidate.exists():
+                    exp_dir = candidate
+                    break
+        else:
+            for d in sorted(os.listdir(str(model_root))):
+                candidate = model_root / d / f"exp_{en}"
+                if candidate.exists():
+                    exp_dir = candidate
+                    break
+
+        if exp_dir is None:
+            _log(f"  [skip] {mt} exp_{en}: 未找到实验目录")
+            continue
+
+        config_path = exp_dir / "config.json"
+        if not config_path.exists():
+            _log(f"  [skip] {mt} exp_{en}: 无 config.json")
+            continue
+
+        with open(config_path) as f:
+            exp_cfg = json.load(f)
+
+        # 跳过已完成的
+        result_dir = PROJECT_ROOT / tscv_eval_dir / f"exp_{en}"
+        result_file = result_dir / "tscv_results.json"
+        if result_file.exists() and not args.force:
+            with open(result_file) as f:
+                prev = json.load(f)
+            _log(f"  [skip] {mt} exp_{en}: 已完成 cv_score={prev.get('cv_score', '?'):.4f} (使用 --force 重评)")
+            continue
+
+        mt_display = mt or exp_cfg.get("model_type", "?")
+        _log(f"\n  [{en}] {mt_display}  折数={len(folds)}  epochs={exp_cfg.get('num_epochs', '?')}")
+        _log(f"  Params: lr={exp_cfg.get('learning_rate', '?'):.2e}  d_model={exp_cfg.get('d_model', '?')}  "
+             f"dropout={exp_cfg.get('dropout', '?'):.2f}")
+
+        result = run_experiment_cv(
+            params=exp_cfg,
+            config=base_config,
+            folds=folds,
+            tscv_eval_dir=str(PROJECT_ROOT / tscv_eval_dir),
+            exp_idx=en,
+            config_module=config_module,
+        )
+        if result.get("success"):
+            _log(f"  ✓ {mt_display} exp_{en}: mean_sharpe={result['mean_sharpe']:.4f}  "
+                 f"std_sharpe={result['std_sharpe']:.4f}  cv_score={result['cv_score']:.4f}")
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+
+    # 汇总
+    _log(f"\n{'=' * 60}")
+    _log("TSCV 评估汇总")
+    _log(f"{'=' * 60}")
+    all_results = []
+    for mt, en in experiments:
+        result_file = PROJECT_ROOT / tscv_eval_dir / f"exp_{en}" / "tscv_results.json"
+        if result_file.exists():
+            with open(result_file) as f:
+                r = json.load(f)
+            all_results.append({
+                "exp": en,
+                "model": mt,
+                "cv_score": r.get("cv_score", 0),
+                "mean_sharpe": r.get("mean_sharpe", 0),
+                "std_sharpe": r.get("std_sharpe", 0),
+                "fold_sharpe": r.get("fold_sharpe", []),
+            })
+
+    all_results.sort(key=lambda x: x["cv_score"], reverse=True)
+    _log(f"\n{'exp':>6}  {'model':<14}  {'cv_score':>9}  {'mean_sharpe':>11}  {'std_sharpe':>10}  folds")
+    _log("-" * 75)
+    for r in all_results:
+        folds_str = " ".join(f"{s:.2f}" for s in r["fold_sharpe"])
+        _log(f"{r['exp']:>6}  {r['model']:<14}  {r['cv_score']:>9.4f}  {r['mean_sharpe']:>11.4f}  "
+             f"{r['std_sharpe']:>10.4f}  [{folds_str}]")
+
+    best = all_results[0] if all_results else None
+    if best:
+        _log(f"\n最佳: exp_{best['exp']} ({best['model']})  cv_score={best['cv_score']:.4f}")
+
+
+# ============================================================
 #  CLI
 # ============================================================
 
@@ -1070,6 +1305,18 @@ def main():
     p.add_argument("--max-exps", type=int, default=20, help="对比时每版最多回测实验数")
     p.add_argument("--dry-run", action="store_true", help="存档时仅预览")
 
+    # tscv
+    p = sub.add_parser("tscv", help="对搜索结果做 TSCV 多折评估")
+    p.add_argument("--experiment", help="指定单个实验 (格式: dlinear_exp_57)")
+    p.add_argument("--top-n", type=int, default=5, help="取 search_results 前 N 名 (默认 5)")
+    p.add_argument("--force", action="store_true", help="覆盖已完成的评估")
+
+    # retrain
+    p = sub.add_parser("retrain", help="从 TSCV 实验在全量数据上训练部署模型")
+    p.add_argument("--source", required=True, help="实验目录路径 (如 model/TSCV/bayes_dlinear_74_3/exp_11)")
+    p.add_argument("--force", action="store_true", help="覆盖已存在的 full/ 目录")
+    p.add_argument("--data-file", default=None, help="训练数据文件 (默认使用实验 config.json 中的 data_file)")
+
     args = parser.parse_args()
 
     # Setup log file for batch commands
@@ -1085,6 +1332,8 @@ def main():
         "reproduce-live": cmd_reproduce_live,
         "compare": cmd_compare,
         "upgrade": cmd_upgrade,
+        "tscv": cmd_tscv,
+        "retrain": cmd_retrain,
     }
     fns[args.command](args)
 

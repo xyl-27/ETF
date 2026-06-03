@@ -129,7 +129,7 @@ def _build_model_stats_table(sequences):
         m = seq.get("metrics", {})
         if not ms:
             continue
-        display = key.replace("search_", "").replace("_exp_", " ")
+        display = key.replace("search_", "").replace("_exp_", " ").replace("_full", " (full)")
         ret = ms.get("reb_pnl_pct", ms["last_trade_return_pct"])
         ret_clr = "#cc0000" if ret >= 0 else "#009900"
         l3 = ms.get("last_3_reb_avg_pct", ms["last_3_avg_return_pct"])
@@ -512,7 +512,7 @@ def _build_pred_signals_merged(sequences, report_date, weight_strategy="equal", 
         _merged_sp = {**_sp, **_ph_sp}
         w_dict = compute_weights(all_preds, top_k, weight_strategy, _merged_sp)
 
-        mn = _display_names.get(sk, sk.replace("search_", "").replace("_exp_", " "))
+        mn = _display_names.get(sk, sk.replace("search_", "").replace("_exp_", " ").replace("_full", " (full)"))
 
         # 投票序列: score = 票数/总模型数, advantage = -
         _is_voting = (sk == "voting")
@@ -1015,9 +1015,9 @@ def send_report(model_key=None, verbose=False):
     _display_names = {"average": "平均", "voting": "投票"}
     if model_key in ("juejin",):
         real_key = next((k for k in sequences if k not in ("juejin", "average", "voting")), model_key)
-        model_display = _display_names.get(real_key, real_key.replace("search_", "").replace("_exp_", " "))
+        model_display = _display_names.get(real_key, real_key.replace("search_", "").replace("_exp_", " ").replace("_full", " (full)"))
     else:
-        model_display = _display_names.get(model_key, model_key.replace("search_", "").replace("_exp_", " "))
+        model_display = _display_names.get(model_key, model_key.replace("search_", "").replace("_exp_", " ").replace("_full", " (full)"))
 
     model_stats_section = _build_model_stats_table(sequences)
 
@@ -1053,7 +1053,7 @@ def send_report(model_key=None, verbose=False):
     for key, seq in sequences.items():
         ec = seq.get("equity_curve", [])
         if ec:
-            display = key.replace("search_", "").replace("_exp_", " ")
+            display = key.replace("search_", "").replace("_exp_", " ").replace("_full", " (full)")
             equity_data[display] = ec
     hs300 = report.get("hs300_curve", [])
     if hs300:
