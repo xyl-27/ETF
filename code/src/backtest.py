@@ -38,6 +38,7 @@ class BacktestResult:
     equity_curve: pd.DataFrame = field(default_factory=pd.DataFrame)
     hs300_data: pd.DataFrame = field(default_factory=pd.DataFrame)
     rebalance_stats: Dict[str, Any] = field(default_factory=dict)
+    trades: List[Dict] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         result = {
@@ -439,6 +440,11 @@ class BacktestEngine:
         revenue = shares * exec_price * (1 - self.commission)
         self.cash += revenue
 
+        old_shares = self.positions[stock]["shares"]
+        old_cost = self.positions[stock]["cost"]
+        cost_of_sold = old_cost * (shares / old_shares) if old_shares > 0 else 0
+        pnl = revenue - cost_of_sold
+
         trade_cost = round(shares * price - revenue, 2)
         self.trades.append(
             {
@@ -449,12 +455,13 @@ class BacktestEngine:
                 "shares": shares,
                 "amount": revenue,
                 "trade_cost": trade_cost,
+                "pnl": round(pnl, 2),
             }
         )
 
         self.positions[stock]["shares"] -= shares
-        self.positions[stock]["cost"] -= self.positions[stock]["cost"] * (
-            shares / (self.positions[stock]["shares"] + shares)
+        self.positions[stock]["cost"] -= old_cost * (
+            shares / old_shares
         )
 
         if self.positions[stock]["shares"] == 0:
@@ -932,6 +939,11 @@ class ETFBacktester:
     def _load_model(self):
         """加载模型和配置"""
         config_path = f"{self.model_dir}/config.json"
+        if not os.path.exists(config_path):
+            parent = os.path.dirname(os.path.normpath(self.model_dir))
+            parent_cfg = os.path.join(parent, "config.json")
+            if os.path.exists(parent_cfg):
+                config_path = parent_cfg
         model_path = f"{self.model_dir}/{self.model_file}"
 
         with open(config_path, "r") as f:
@@ -1444,6 +1456,7 @@ def run_backtest_from_predictions(
         equity_curve=equity_df,
         hs300_data=hs300_data,
         rebalance_stats=rebalance_stats,
+        trades=engine.trades,
     )
 
 

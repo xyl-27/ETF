@@ -331,7 +331,7 @@ def _format_strategy_info(weight_strategy, strategy_params, top_k, position_pct,
     extra = ""
     if weight_strategy == "softmax":
         extra = f" T={sp.get('temperature', 1.0)}"
-    elif weight_strategy in ("risk_parity", "score_risk", "score_risk_v1"):
+    elif weight_strategy in ("risk_parity", "score_risk", "score_risk_v1", "kelly"):
         extra = f" w={sp.get('vol_window', 20)}"
     sname = {"equal": "等权", "softmax": "Softmax", "rank_linear": "线性排名",
              "risk_parity": "风险平价", "score_risk": "评分风险",
@@ -1627,7 +1627,7 @@ def daily_eval(
 
         model_types = set(m.get("type", "dl") for m in single_models)
         has_ml = bool(model_types & {"xgb", "lightgbm", "catboost"})
-        has_dl = "dl" in model_types
+        has_dl = bool(model_types & {"dl", "ensemble_folds"})
 
         cached_data = cached_features = None
         ml_cached_data = None
@@ -1650,8 +1650,12 @@ def daily_eval(
             )
 
         single_backtesters = []
+        ensemble_models = []
         for m in single_models:
             mtype = m.get("type", "dl")
+            if mtype == "ensemble_folds":
+                ensemble_models.append(m)
+                continue
             if mtype in ("xgb", "lightgbm", "catboost"):
                 bt = MLBacktester.from_cached_data(
                     model_dir=m["exp_dir"],
@@ -1799,6 +1803,64 @@ def daily_eval(
             sequences["voting"] = result
             if verbose:
                 print(f"    ✓ ({time.time()-_t_vote:.0f}s)")
+
+        if ensemble_models:
+            for m in ensemble_models:
+                _t_ens = time.time()
+                model_key = _make_model_key(m) + "_ensemble"
+                if verbose:
+                    print(f"  回测 fold 集成: {model_key}...")
+                fold_dirs = sorted([
+                    d for d in os.listdir(m["exp_dir"])
+                    if d.startswith("fold_") and os.path.isdir(os.path.join(m["exp_dir"], d))
+                ])
+                fold_bts = []
+                for fd in fold_dirs:
+                    fold_dir = os.path.join(m["exp_dir"], fd)
+                    bt = ETFBacktester.from_cached_data(
+                        model_dir=fold_dir,
+                        cached_data=cached_data,
+                        cached_features=cached_features,
+                        device=device,
+                        model_file=m["model_file"],
+                        verbose=False,
+                    )
+                    fold_bts.append(bt)
+
+                def _make_ensemble_pred_func(bts):
+                    def ensemble_pred(date):
+                        all_score_dicts = []
+                        for bti in bts:
+                            preds = bti._get_predictions(date)
+                            if preds is None:
+                                return None
+                            all_score_dicts.append({p["stock_id"]: p["score"] for p in preds})
+                        avg_scores = {}
+                        for sid in all_score_dicts[0].keys():
+                            scores = [sd[sid] for sd in all_score_dicts]
+                            avg_scores[sid] = float(np.mean(scores))
+                        sorted_stocks = sorted(avg_scores.items(), key=lambda x: x[1], reverse=True)
+                        return [{"rank": i+1, "stock_id": sid, "score": sc} for i, (sid, sc) in enumerate(sorted_stocks)]
+                    return ensemble_pred
+
+                result = run_backtest_sequence(
+                    predictions_func=_make_ensemble_pred_func(fold_bts),
+                    data_file=str(DATA_FILE),
+                    start_date=start_date,
+                    end_date=end_date,
+                    top_k=top_k,
+                    rebalance_days=rebalance_days,
+                    position_pct=position_pct,
+                    weight_strategy=weight_strategy,
+                    strategy_params=strategy_params,
+                    initial_capital=initial_capital,
+                    commission=config.get("commission", 0.0003),
+                    slippage=config.get("slippage", 0.001),
+                    trade_mode=trade_mode,
+                )
+                sequences[model_key] = result
+                if verbose:
+                    print(f"    ✓ ({time.time()-_t_ens:.0f}s)")
 
         print(f"  ✓ 回测完成 ({time.time()-_t0:.0f}s)")
 
@@ -2150,7 +2212,7 @@ def daily_eval(
                 if _match_inj:
                     _sp_snap_inj = dict(strategy_params) if strategy_params else {}
                     _sp_snap_inj.pop("vol_dict", None)
-                    if weight_strategy in ("risk_parity", "score_risk", "score_risk_v1"):
+                    if weight_strategy in ("risk_parity", "score_risk", "score_risk_v1", "kelly"):
                         _top_ids_inj = [p["stock_id"] for p in _match_inj[:top_k]]
                         _vol_win_inj = _sp_snap_inj.get("vol_window", 20)
                         _vd_inj = compute_volatility(raw_df, _top_ids_inj, _latest_d_inj, _vol_win_inj)
@@ -2424,7 +2486,7 @@ def generate_predictions_only(
 
         model_types = set(m.get("type", "dl") for m in single_models)
         has_ml = bool(model_types & {"xgb", "lightgbm", "catboost"})
-        has_dl = "dl" in model_types
+        has_dl = bool(model_types & {"dl", "ensemble_folds"})
 
         cached_data = cached_features = None
         ml_cached_data = None
@@ -2452,8 +2514,12 @@ def generate_predictions_only(
             )
 
         single_backtesters = []
+        ensemble_models = []
         for m in single_models:
             mtype = m.get("type", "dl")
+            if mtype == "ensemble_folds":
+                ensemble_models.append(m)
+                continue
             if mtype in ("xgb", "lightgbm", "catboost"):
                 bt = MLBacktester.from_cached_data(
                     model_dir=m["exp_dir"],
@@ -2554,6 +2620,45 @@ def generate_predictions_only(
             all_predictions["voting"] = vote_preds
             if verbose:
                 print(f"    → {len(vote_preds)} 个交易日")
+
+        # Fold 集成平均预测
+        if ensemble_models:
+            for m in ensemble_models:
+                model_key = _make_model_key(m) + "_ensemble"
+                if verbose:
+                    print(f"  预测: {model_key} ({len(ensemble_models)} 个 fold)...")
+                fold_dirs = sorted([
+                    d for d in os.listdir(m["exp_dir"])
+                    if d.startswith("fold_") and os.path.isdir(os.path.join(m["exp_dir"], d))
+                ])
+                fold_bts = []
+                for fd in fold_dirs:
+                    fold_dir = os.path.join(m["exp_dir"], fd)
+                    bt = ETFBacktester.from_cached_data(
+                        model_dir=fold_dir, cached_data=cached_data, cached_features=cached_features,
+                        device=device, model_file=m["model_file"], verbose=False,
+                    )
+                    fold_bts.append(bt)
+                ens_preds = {}
+                for d in sorted(seed_dates):
+                    d_str = d.strftime("%Y-%m-%d")
+                    all_scores = []
+                    for bt in fold_bts:
+                        preds = bt._get_predictions(d)
+                        if preds is None:
+                            all_scores = None
+                            break
+                        all_scores.append({p["stock_id"]: p["score"] for p in preds})
+                    if all_scores:
+                        avg_map = {}
+                        for sid in all_scores[0].keys():
+                            scores = [sd[sid] for sd in all_scores]
+                            avg_map[sid] = float(np.mean(scores))
+                        sorted_stocks = sorted(avg_map.items(), key=lambda x: x[1], reverse=True)
+                        ens_preds[d_str] = [{"rank": i+1, "stock_id": sid, "score": sc} for i, (sid, sc) in enumerate(sorted_stocks)]
+                all_predictions[model_key] = ens_preds
+                if verbose:
+                    print(f"    → {len(ens_preds)} 个交易日")
 
         # 保存（附带交易日历元信息，供掘金策略对齐调仓日）
         all_predictions["_meta"] = {
@@ -2690,7 +2795,7 @@ def run_from_predictions(
                 ph = seq.get("predictions_history", [])
                 _sp_snapshot = dict(strategy_params) if strategy_params else {}
                 _sp_snapshot.pop("vol_dict", None)
-                if weight_strategy in ("risk_parity", "score_risk", "score_risk_v1"):
+                if weight_strategy in ("risk_parity", "score_risk", "score_risk_v1", "kelly"):
                     top_ids = [p["stock_id"] for p in latest_preds[:top_k]]
                     _vol_window = _sp_snapshot.get("vol_window", 20)
                     _vd = compute_volatility(raw_df, top_ids, _found, _vol_window)
@@ -3282,7 +3387,7 @@ def run_from_juejin(verbose=True, start_date="2026-04-01", initial_capital=10000
         _ws = cfg.get("weight_strategy", "equal")
         _tk = cfg.get("top_k", 3)
         _sp = dict(cfg.get("strategy_params", {}))
-        if _ws in ("risk_parity", "score_risk", "score_risk_v1") and "vol_dict" not in _sp:
+        if _ws in ("risk_parity", "score_risk", "score_risk_v1", "kelly") and "vol_dict" not in _sp:
             latest_ph_seq = None
             for entry in reversed(rk_seq.get("predictions_history", [])):
                 if entry.get("predictions"):
@@ -3383,6 +3488,8 @@ def sync_models_to_live():
 
     for m in models:
         if not m.get("enabled", True):
+            continue
+        if m.get("type") == "ensemble_folds":
             continue
         model_rel = m["dir"]
         model_file = m.get("file", "")

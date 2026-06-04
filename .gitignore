@@ -62,3 +62,9 @@ catboost_info/
 # 其他
 test.py
 etf_data/
+code/src/train_search_v2.py
+juejin/live/TSCV/bayes_timesnet_74_3/exp_20/full/best_model_sharpe.pth
+juejin/live/TSCV/bayes_dlinear_74_3/exp_11/full/best_model_sharpe.pth
+juejin/live/bayes_tcn_74_3_2026-01-01_2026-03-31/exp_63/best_model_sliding.pth
+juejin/live/bayes_dlinear_74_3_2026-01-01_2026-03-31/exp_57/best_model.pth
+juejin/live/bayes_gru_74_3_2026-01-01_2026-03-31/exp_47/best_model.pth

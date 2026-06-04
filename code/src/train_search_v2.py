@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import glob
 import time
 import traceback
 import joblib
@@ -789,36 +790,55 @@ def plot_epoch_scores(output_dir, search_metric="ndcg"):
 
 def _eval_ckpt_on_backtest(ckpt_path, model, device, val_sliding_loader,
                             stockid2idx, val_sliding_dates, val_start, val_end,
-                            exp_config, backtest_data_path, label=""):
-    if not os.path.exists(ckpt_path):
-        return None
-    model.load_state_dict(torch.load(ckpt_path, map_location=device))
-    model.eval()
+                            exp_config, backtest_data_path, label="", fold_dir=None):
     idx2stockid = {v: k for k, v in stockid2idx.items()}
 
-    preds = {}
-    sample_idx = 0
-    with torch.no_grad():
-        for batch in val_sliding_loader:
-            sequences = batch["sequences"].to(device)
-            outputs = model(sequences)
-            masks = batch["masks"].cpu().numpy()
-            stock_indices = batch["stock_indices"].cpu().numpy()
+    preds = None
+    if os.path.exists(ckpt_path):
+        try:
+            model.load_state_dict(torch.load(ckpt_path, map_location=device))
+        except RuntimeError as e:
+            print(f"  {label}: checkpoint architecture mismatch, trying saved predictions")
+            preds = None
+        else:
+            model.eval()
+            preds = {}
+            sample_idx = 0
+            with torch.no_grad():
+                for batch in val_sliding_loader:
+                    sequences = batch["sequences"].to(device)
+                    outputs = model(sequences)
+                    masks = batch["masks"].cpu().numpy()
+                    stock_indices = batch["stock_indices"].cpu().numpy()
 
-            for bi in range(outputs.size(0)):
-                date_str = val_sliding_dates[sample_idx + bi]
-                valid_mask = masks[bi] > 0
-                valid_scores = outputs[bi].cpu().numpy()[valid_mask]
-                valid_stocks = stock_indices[bi][valid_mask]
+                    for bi in range(outputs.size(0)):
+                        date_str = val_sliding_dates[sample_idx + bi]
+                        valid_mask = masks[bi] > 0
+                        valid_scores = outputs[bi].cpu().numpy()[valid_mask]
+                        valid_stocks = stock_indices[bi][valid_mask]
 
-                if date_str not in preds:
-                    preds[date_str] = []
-                for score, sidx in zip(valid_scores, valid_stocks):
-                    sid = int(sidx)
-                    if sid not in idx2stockid:
-                        continue
-                    preds[date_str].append({"stock_id": idx2stockid[sid], "score": float(score)})
-            sample_idx += outputs.size(0)
+                        if date_str not in preds:
+                            preds[date_str] = []
+                        for score, sidx in zip(valid_scores, valid_stocks):
+                            sid = int(sidx)
+                            if sid not in idx2stockid:
+                                continue
+                            preds[date_str].append({"stock_id": idx2stockid[sid], "score": float(score)})
+                    sample_idx += outputs.size(0)
+
+    # Fallback: load saved predictions if checkpoint loading failed
+    if preds is None and fold_dir:
+        saved_preds_path = os.path.join(fold_dir, "val_predictions.json")
+        if os.path.exists(saved_preds_path):
+            print(f"  {label}: loading saved predictions from {saved_preds_path}")
+            with open(saved_preds_path) as f:
+                preds = json.load(f)
+        else:
+            print(f"  {label}: no saved predictions found, skipping")
+            return None
+
+    if preds is None:
+        return None
 
     for date_str in preds:
         preds[date_str].sort(key=lambda x: x["score"], reverse=True)
@@ -832,6 +852,7 @@ def _eval_ckpt_on_backtest(ckpt_path, model, device, val_sliding_loader,
 
     all_dates = sorted(preds.keys())
     sub_curves = []
+    all_sell_pnls = []
     for offset in range(5):
         if offset >= len(all_dates):
             break
@@ -848,11 +869,16 @@ def _eval_ckpt_on_backtest(ckpt_path, model, device, val_sliding_loader,
             ec = ec.rename(columns={"total_value": "v"})
             ec["v"] = ec["v"] * 5
             sub_curves.append(ec)
+            for t in getattr(sr, "trades", []):
+                if t.get("action") == "卖出" and "pnl" in t:
+                    all_sell_pnls.append(t["pnl"])
         except Exception:
             pass
 
     sub_sharpe = 0.0
     sub_calmar = 0.0
+    sub_max_dd = 0.0
+    sub_sortino = 0.0
     if sub_curves:
         all_dts = sorted(set().union(*[set(ec["date"]) for ec in sub_curves]))
         aligned = pd.DataFrame({"date": all_dts})
@@ -865,9 +891,15 @@ def _eval_ckpt_on_backtest(ckpt_path, model, device, val_sliding_loader,
         cwm = _cwm(aligned, 100000)
         sub_sharpe = cwm.get("sharpe_ratio", 0.0)
         sub_calmar = cwm.get("calmar_ratio", 0.0)
+        sub_max_dd = cwm.get("max_drawdown_pct", 0.0)
+        sub_sortino = cwm.get("sortino_ratio", 0.0)
 
-    print(f"  {label}: 5sub_sharpe={sub_sharpe:.2f}  5sub_calmar={sub_calmar:.2f}")
-    return sub_sharpe, sub_calmar, preds
+    total_trades = len(all_sell_pnls)
+    total_wins = sum(1 for p in all_sell_pnls if p > 0)
+    sub_win_rate = round(total_wins / total_trades, 4) if total_trades > 0 else 0.0
+
+    print(f"  {label}: sharpe={sub_sharpe:.2f}  calmar={sub_calmar:.2f}  max_dd={sub_max_dd:.2f}%  sortino={sub_sortino:.2f}  win_rate={sub_win_rate:.2%}")
+    return sub_sharpe, sub_calmar, sub_win_rate, sub_max_dd, sub_sortino, preds
 
 
 def run_experiment_cv(params, config, folds, tscv_eval_dir, exp_idx, config_module):
@@ -1124,7 +1156,7 @@ def run_experiment_cv(params, config, folds, tscv_eval_dir, exp_idx, config_modu
             "best_model_sliding.pth": "sliding_score",
             "best_model_optuna.pth": "best_optuna",
         }
-        best_sharpe, best_calmar, best_preds, best_label = -1e9, -1e9, None, ""
+        best_sharpe, best_calmar, best_win_rate, best_max_dd, best_sortino, best_preds, best_label = -1e9, -1e9, 0.0, 0.0, 0.0, None, ""
         for ckpt_name, label in ckpts.items():
             ckpt_path = os.path.join(fold_out_dir, ckpt_name)
             if not os.path.exists(ckpt_path):
@@ -1133,13 +1165,17 @@ def run_experiment_cv(params, config, folds, tscv_eval_dir, exp_idx, config_modu
                 ckpt_path, model, device, val_sliding_loader,
                 stockid2idx, val_sliding_dates, val_start, val_end,
                 exp_config, backtest_data_path, label=f"fold{fold_i}/{label}",
+                fold_dir=fold_out_dir,
             )
             if result is None:
                 continue
-            sub_sharpe, sub_calmar, preds = result
+            sub_sharpe, sub_calmar, sub_win_rate, sub_max_dd, sub_sortino, preds = result
             if sub_sharpe > best_sharpe:
                 best_sharpe = sub_sharpe
                 best_calmar = sub_calmar
+                best_win_rate = sub_win_rate
+                best_max_dd = sub_max_dd
+                best_sortino = sub_sortino
                 best_preds = preds
                 best_label = label
 
@@ -1160,10 +1196,17 @@ def run_experiment_cv(params, config, folds, tscv_eval_dir, exp_idx, config_modu
             with open(val_pred_path, "w") as f:
                 json.dump(best_preds, f, indent=2)
 
+        if not best_ckpt_name:
+            print(f"  Fold {fold_i}: all checkpoints failed, skipping")
+            continue
+
         fold_results.append({
             "fold": fold_i,
             "sharpe": best_sharpe,
             "calmar": best_calmar,
+            "win_rate": best_win_rate,
+            "max_dd": best_max_dd,
+            "sortino": best_sortino,
             "val_start": str(val_start)[:10],
             "val_end": str(val_end)[:10],
         })
@@ -1185,8 +1228,15 @@ def run_experiment_cv(params, config, folds, tscv_eval_dir, exp_idx, config_modu
     # 10. Aggregate
     sharpe_list = [r["sharpe"] for r in fold_results]
     calmar_list = [r["calmar"] for r in fold_results]
+    win_rate_list = [r["win_rate"] for r in fold_results]
+    max_dd_list = [r["max_dd"] for r in fold_results]
+    sortino_list = [r["sortino"] for r in fold_results]
     mean_sharpe = float(np.mean(sharpe_list)) if sharpe_list else 0.0
     std_sharpe = float(np.std(sharpe_list)) if sharpe_list else 0.0
+    mean_win_rate = float(np.mean(win_rate_list)) if win_rate_list else 0.0
+    mean_max_dd = float(np.mean(max_dd_list)) if max_dd_list else 0.0
+    mean_sortino = float(np.mean(sortino_list)) if sortino_list else 0.0
+    mean_calmar = float(np.mean(calmar_list)) if calmar_list else 0.0
     cv_score = mean_sharpe - std_sharpe
 
     result = {
@@ -1194,18 +1244,38 @@ def run_experiment_cv(params, config, folds, tscv_eval_dir, exp_idx, config_modu
         "sharpe": cv_score,  # 兼容现有 summary/printing 代码
         "fold_sharpe": sharpe_list,
         "fold_calmar": calmar_list,
+        "fold_win_rate": win_rate_list,
+        "fold_max_dd": max_dd_list,
+        "fold_sortino": sortino_list,
         "mean_sharpe": mean_sharpe,
         "std_sharpe": std_sharpe,
+        "mean_win_rate": mean_win_rate,
+        "mean_max_dd": mean_max_dd,
+        "mean_sortino": mean_sortino,
+        "mean_calmar": mean_calmar,
         "cv_score": cv_score,
         "params": params,
     }
-    with open(os.path.join(exp_out_dir, "tscv_results.json"), "w") as f:
+
+    results_path = os.path.join(exp_out_dir, "tscv_results.json")
+    if not fold_results and os.path.exists(results_path):
+        with open(results_path) as f:
+            old = json.load(f)
+        for k in ("success", "sharpe", "fold_sharpe", "fold_calmar",
+                  "mean_sharpe", "std_sharpe", "cv_score", "params"):
+            if k in old:
+                result[k] = old[k]
+        print(f"  Warning: all folds failed, preserving original data + new empty fields")
+    with open(results_path, "w") as f:
         json.dump(result, f, indent=2)
 
     print(f"\n{'=' * 60}")
     print(f"TSCV 完成: {exp_name}")
     print(f"  Fold Sharpe: {[f'{s:.4f}' for s in sharpe_list]}")
+    print(f"  Fold Win Rate: {[f'{w:.2%}' for w in win_rate_list]}")
+    print(f"  Fold Max DD: {[f'{d:.2f}%' for d in max_dd_list]}")
     print(f"  Mean Sharpe: {mean_sharpe:.4f}  Std: {std_sharpe:.4f}  CV Score: {cv_score:.4f}")
+    print(f"  Mean Win Rate: {mean_win_rate:.2%}  Mean Max DD: {mean_max_dd:.2f}%  Mean Sortino: {mean_sortino:.2f}")
     print(f"{'=' * 60}")
 
     return result
@@ -1679,6 +1749,107 @@ def main(args):
         print(f"\nBest: {best['params']}, sharpe: {best_sharpe:.4f}, calmar: {best.get('calmar_ratio', 0):.4f}")
 
 
+# ============================================================
+# Re-evaluate existing experiments (load checkpoints, re-run
+# backtest evaluation, save updated tscv_results.json)
+# ============================================================
+
+def find_incomplete_tscv_experiments(config, config_module):
+    """Find all TSCV experiments missing fold_max_dd or with empty fold_max_dd in tscv_results.json."""
+    tscv_eval_dir = getattr(config_module, "tscv_eval_dir", "model/TSCV")
+    results_files = sorted(glob.glob(os.path.join(tscv_eval_dir, "*/exp_*/tscv_results.json")))
+
+    incomplete = []
+    for rf in results_files:
+        try:
+            with open(rf) as f:
+                data = json.load(f)
+            mdd = data.get("fold_max_dd")
+            if not mdd:
+                incomplete.append(os.path.dirname(rf))
+        except (json.JSONDecodeError, IOError):
+            incomplete.append(os.path.dirname(rf))
+
+    return incomplete
+
+
+def reevaluate_one_experiment(exp_dir, config, config_module):
+    """Re-evaluate a single TSCV experiment's checkpoints to populate new metrics."""
+    exp_dir = str(exp_dir)
+    exp_name = os.path.basename(exp_dir)
+
+    config_path = os.path.join(exp_dir, "config.json")
+    if not os.path.exists(config_path):
+        print(f"[{exp_name}] No config.json found, skipping")
+        return None
+
+    with open(config_path) as f:
+        saved_config = json.load(f)
+
+    # Extract trial params
+    trial_param_keys = [
+        "model_type", "learning_rate", "d_model", "dropout", "num_layers",
+        "kernel_size", "num_epochs", "batch_size", "sequence_length",
+        "pairwise_weight", "base_weight", "top5_weight", "top_k",
+        "max_grad_norm", "feature_num",
+    ]
+    params = {k: saved_config[k] for k in trial_param_keys if k in saved_config}
+
+    # Merge saved config into base config
+    merged_config = config.copy()
+    merged_config.update(saved_config)
+
+    # Determine experiment index and parent dir from path
+    try:
+        exp_idx = int(exp_name.split("_")[1])
+    except (IndexError, ValueError):
+        print(f"[{exp_name}] Cannot parse experiment index")
+        return None
+    tscv_eval_dir = os.path.dirname(exp_dir)
+
+    # Determine folds from existing directories on disk
+    all_folds = getattr(config_module, "tscv_folds", [])
+    existing_fold_dirs = sorted(glob.glob(os.path.join(exp_dir, "fold_*/")))
+    n_folds = len(existing_fold_dirs)
+    if n_folds == 0:
+        print(f"[{exp_name}] No fold directories found, skipping")
+        return None
+    folds = all_folds[:n_folds]
+
+    print(f"[{exp_name}] Re-evaluating {n_folds} folds...")
+    result = run_experiment_cv(params, merged_config, folds, tscv_eval_dir, exp_idx, config_module)
+    if result:
+        wr = result.get("mean_win_rate", 0)
+        print(f"[{exp_name}] Done. CV Score: {result.get('cv_score', 0):.4f}, Mean Win Rate: {wr:.2%}")
+    return result
+
+
+def cmd_reevaluate(args, config_module):
+    """Re-evaluate existing TSCV experiments to populate new metrics without retraining."""
+    config = config_module.config.copy()
+
+    if args.reevaluate_dir:
+        exp_dirs = [args.reevaluate_dir]
+    elif args.reevaluate_all:
+        print("Scanning for incomplete experiments...")
+        exp_dirs = find_incomplete_tscv_experiments(config, config_module)
+        print(f"Found {len(exp_dirs)} experiments missing fold_win_rate.")
+    else:
+        print("Specify --reevaluate-dir DIR or --reevaluate-all")
+        return
+
+    for idx, exp_dir in enumerate(exp_dirs):
+        print(f"\n[{idx + 1}/{len(exp_dirs)}] {exp_dir}")
+        try:
+            start_t = time.time()
+            reevaluate_one_experiment(exp_dir, config, config_module)
+            elapsed = time.time() - start_t
+            print(f"  Time: {elapsed:.1f}s")
+        except Exception as e:
+            print(f"  Error: {e}")
+            traceback.print_exc()
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -1704,12 +1875,20 @@ if __name__ == "__main__":
                         help="优化目标 (sharpe=夏普比率, ndcg=NDCG@K)")
     parser.add_argument("--fresh", action="store_true", help="删除旧的 Optuna study，重新开始")
     parser.add_argument("--save-predictions", action="store_true", help="保存每 epoch 的预测结果 npy 文件（默认不保存）")
+    parser.add_argument("--reevaluate-dir", type=str, default=None,
+                        help="Re-evaluate a single experiment dir (no retraining)")
+    parser.add_argument("--reevaluate-all", action="store_true",
+                        help="Re-evaluate all experiments missing fold_win_rate")
     args = parser.parse_args()
 
-    model_types = [args.model_type] if args.model_type else SEARCH_MODEL_TYPES
-    for mt in model_types:
-        args.model_type = mt
-        print(f"\n{'=' * 60}")
-        print(f"  搜索模型: {mt}  ({model_types.index(mt) + 1}/{len(model_types)})")
-        print(f"{'=' * 60}")
-        main(args)
+    if args.reevaluate_dir or args.reevaluate_all:
+        config_module = __import__(args.config, fromlist=["config"])
+        cmd_reevaluate(args, config_module)
+    else:
+        model_types = [args.model_type] if args.model_type else SEARCH_MODEL_TYPES
+        for mt in model_types:
+            args.model_type = mt
+            print(f"\n{'=' * 60}")
+            print(f"  搜索模型: {mt}  ({model_types.index(mt) + 1}/{len(model_types)})")
+            print(f"{'=' * 60}")
+            main(args)
