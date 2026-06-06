@@ -782,9 +782,23 @@ def _build_scatter_section(scatter_data, cur_date):
     import numpy as np
     from scipy.stats import pearsonr, spearmanr, t as t_dist
 
-    models = ['search_itransformer_exp_54', 'search_itransformer_exp_64', 'search_itransformer_exp_6']
-    labels = ['itransformer 54', 'itransformer 64', 'itransformer 6']
-    colors = ['#E24A33', '#348ABD', '#988ED5']
+    all_models = sorted(set(
+        m for date_data in scatter_data.values() for m in date_data
+    ))
+    models = []
+    labels = []
+    colors_list = []
+    cmap = plt.cm.tab10
+    for i, m in enumerate(all_models):
+        valid_dates = [d for d in scatter_data if scatter_data[d].get(m, {}).get("ret") is not None]
+        if len(valid_dates) >= 3:
+            models.append(m)
+            labels.append(m.replace("search_", "").replace("_exp_", " exp "))
+            colors_list.append(cmap(i % 10))
+    n_models = len(models)
+    if n_models == 0:
+        return '<h3>相关性分析</h3><p>无有效模型数据</p>'
+
     metrics_cfg = [
         ("ksp", "KS-p"),
         ("ic", "Rank IC"),
@@ -808,7 +822,7 @@ def _build_scatter_section(scatter_data, cur_date):
                 v = d.get(key)
                 pairs[m][key].append(v if v is not None else np.nan)
 
-    fig, axes = plt.subplots(4, 3, figsize=(14, 16))
+    fig, axes = plt.subplots(4, n_models, figsize=(5 * n_models, 16))
     fig.suptitle(f'相关性分析（截至 {cur_date}）', fontsize=14, fontweight='bold')
 
     def _fmt_p(pv):
@@ -856,7 +870,7 @@ def _build_scatter_section(scatter_data, cur_date):
             ax = axes[ri][ai]
             p = pairs.get(m)
             if p and len(p["ret"]) > 0:
-                _plot_one(ax, p[key], p["ret"], xlabel, labels[ai], colors[ai])
+                _plot_one(ax, p[key], p["ret"], xlabel, labels[ai], colors_list[ai])
             else:
                 ax.text(0.5, 0.5, '无数据', ha='center', va='center', transform=ax.transAxes, fontsize=10, color='gray')
                 ax.set_title(labels[ai])
@@ -3551,6 +3565,7 @@ if __name__ == "__main__":
     weight_strategy = _cli("weight_strategy")
     config_name = _cli("config") or "config"
     update_data = cfg.get("update_data", True) and not args.no_update
+    initial_capital = cfg.get("initial_capital", 100000)
 
     # 策略参数
     strategy_params = dict(cfg.get("strategy_params", {}))
@@ -3625,7 +3640,7 @@ if __name__ == "__main__":
             print(f"\n无法读取数据文件: {_e}")
         print("\n数据更新完成。")
     elif mode == "from_juejin":
-        run_from_juejin(verbose=args.debug, start_date=start_date, trade_mode=trade_mode)
+        run_from_juejin(verbose=args.debug, start_date=start_date, trade_mode=trade_mode, initial_capital=initial_capital, rebalance_days=rebalance_days)
         sync_models_to_live()
     elif mode == "predictions_only":
         generate_predictions_only(

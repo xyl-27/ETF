@@ -50,8 +50,8 @@ def load_config_from_yaml():
             STRATEGY_PARAMS.setdefault("temperature", float(jcfg.get("weight_temperature", 1.0)))
         if WEIGHT_STRATEGY in ("risk_parity", "score_risk", "score_risk_v1"):
             STRATEGY_PARAMS.setdefault("vol_window", int(raw_params.get("vol_window", 20)))
-        if data.get("model_key"):
-            MODEL_KEY = str(data["model_key"])
+        if data.get("master"):
+            MODEL_KEY = str(data["master"])
         else:
             # 从第一个启用模型推导 model_key
             for m in data.get("models", []):

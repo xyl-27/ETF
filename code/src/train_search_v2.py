@@ -85,10 +85,8 @@ def preprocess_and_save(config, search_dir):
     val_data, _ = preprocess_val_data(val_df, stockid2idx=stockid2idx)
 
     scaler = StandardScaler()
-    train_data[features] = train_data[features].replace([np.inf, -np.inf], np.nan)
-    val_data[features] = val_data[features].replace([np.inf, -np.inf], np.nan)
-    train_data = train_data.dropna(subset=features)
-    val_data = val_data.dropna(subset=features)
+    train_data[features] = train_data[features].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    val_data[features] = val_data[features].replace([np.inf, -np.inf], np.nan).fillna(0.0)
     # Preserve original instrument (int 0-73) before scaling — "instrument" is in features
     train_instrument = train_data["instrument"].copy()
     val_instrument = val_data["instrument"].copy()
@@ -790,7 +788,9 @@ def plot_epoch_scores(output_dir, search_metric="ndcg"):
 
 def _eval_ckpt_on_backtest(ckpt_path, model, device, val_sliding_loader,
                             stockid2idx, val_sliding_dates, val_start, val_end,
-                            exp_config, backtest_data_path, label="", fold_dir=None):
+                            exp_config, backtest_data_path, label="", fold_dir=None,
+                            weight_strategy="equal"):
+    """Evaluate checkpoint via backtest. weight_strategy from config.yaml, default 'equal'."""
     idx2stockid = {v: k for k, v in stockid2idx.items()}
 
     preds = None
@@ -861,7 +861,7 @@ def _eval_ckpt_on_backtest(ckpt_path, model, device, val_sliding_loader,
                 predictions_dict=preds, data_path=backtest_data_path,
                 start_date=all_dates[offset], end_date=str(val_end)[:10],
                 top_k=bt_top_k, rebalance_days=5, position_pct=0.95,
-                initial_capital=100000 / 5, weight_strategy="equal",
+                initial_capital=100000 / 5, weight_strategy=weight_strategy,
                 first_rebalance_date=all_dates[offset], trade_mode="open",
                 log=False, verbose=False,
             )
@@ -902,8 +902,10 @@ def _eval_ckpt_on_backtest(ckpt_path, model, device, val_sliding_loader,
     return sub_sharpe, sub_calmar, sub_win_rate, sub_max_dd, sub_sortino, preds
 
 
-def run_experiment_cv(params, config, folds, tscv_eval_dir, exp_idx, config_module):
-    """在多个时间序列折上独立训练和评估，返回聚合指标。"""
+def run_experiment_cv(params, config, folds, tscv_eval_dir, exp_idx, config_module,
+                       weight_strategy="equal"):
+    """在多个时间序列折上独立训练和评估，返回聚合指标。
+       weight_strategy: 配置中的权重策略名，默认为 'equal'。"""
     set_seed(42)
 
     exp_name = f"exp_{exp_idx}"
@@ -968,12 +970,10 @@ def run_experiment_cv(params, config, folds, tscv_eval_dir, exp_idx, config_modu
         train_data, features = preprocess_data(train_df, is_train=True, stockid2idx=stockid2idx)
         val_data, _ = preprocess_val_data(val_df, stockid2idx=stockid2idx)
 
-        # 3. Scale
+        # 3. Scale (fillna(0.0) 而非 dropna，与 backtest.py:load_data_once 一致)
         scaler = StandardScaler()
-        train_data[features] = train_data[features].replace([np.inf, -np.inf], np.nan)
-        val_data[features] = val_data[features].replace([np.inf, -np.inf], np.nan)
-        train_data = train_data.dropna(subset=features)
-        val_data = val_data.dropna(subset=features)
+        train_data[features] = train_data[features].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        val_data[features] = val_data[features].replace([np.inf, -np.inf], np.nan).fillna(0.0)
         train_instrument = train_data["instrument"].copy()
         val_instrument = val_data["instrument"].copy()
         train_data[features] = scaler.fit_transform(train_data[features])
@@ -1001,17 +1001,11 @@ def run_experiment_cv(params, config, folds, tscv_eval_dir, exp_idx, config_modu
             pd.to_datetime(val_first_window_date) if val_first_window_date else val_start
         )
         val_context_start = val_start - pd.tseries.offsets.BDay(config["sequence_length"] - 1)
-        full_df_dates = pd.to_datetime(full_df["日期"])
-        full_df["日期"] = full_df_dates
-        val_sliding_df = full_df[
-            (full_df["日期"] >= val_context_start) & (full_df["日期"] <= val_end)
-        ]
-        val_sliding_data, _ = preprocess_val_data(val_sliding_df, stockid2idx=stockid2idx)
-        val_sliding_data[features] = val_sliding_data[features].replace([np.inf, -np.inf], np.nan)
-        val_sliding_data = val_sliding_data.dropna(subset=features)
-        val_sliding_instrument = val_sliding_data["instrument"].copy()
-        val_sliding_data[features] = scaler.transform(val_sliding_data[features])
-        val_sliding_data["instrument"] = val_sliding_instrument
+        # 滑动验证: 从已处理好的 val_data 切片（特征工程基于全量数据，与训练一致）
+        val_data_dates = pd.to_datetime(val_data["日期"])
+        val_sliding_data = val_data[
+            (val_data_dates >= val_context_start) & (val_data_dates <= val_end)
+        ].copy()
 
         min_date_for_sliding = val_first_sample_date.strftime("%Y-%m-%d")
         (val_sliding_sequences, val_sliding_targets, val_sliding_relevance,
@@ -1023,8 +1017,7 @@ def run_experiment_cv(params, config, folds, tscv_eval_dir, exp_idx, config_modu
             hs300_labels_map=hs300_labels_map,
         )
 
-        # Restore full_df dates (may have been mutated above)
-        full_df["日期"] = full_df_dates
+        # full_df["日期"] unchanged (no mutation needed)
 
         # 5. Dataloaders
         train_dataset = RankingDataset(
@@ -1165,7 +1158,7 @@ def run_experiment_cv(params, config, folds, tscv_eval_dir, exp_idx, config_modu
                 ckpt_path, model, device, val_sliding_loader,
                 stockid2idx, val_sliding_dates, val_start, val_end,
                 exp_config, backtest_data_path, label=f"fold{fold_i}/{label}",
-                fold_dir=fold_out_dir,
+                fold_dir=fold_out_dir, weight_strategy=weight_strategy,
             )
             if result is None:
                 continue
@@ -1200,6 +1193,11 @@ def run_experiment_cv(params, config, folds, tscv_eval_dir, exp_idx, config_modu
             print(f"  Fold {fold_i}: all checkpoints failed, skipping")
             continue
 
+        best_epoch_label_map = {"best_model": best_epoch,
+                                "sliding_score": best_sliding_epoch,
+                                "best_optuna": best_ndcg_epoch}
+        fold_best_epoch = best_epoch_label_map.get(best_label, 0)
+
         fold_results.append({
             "fold": fold_i,
             "sharpe": best_sharpe,
@@ -1207,6 +1205,7 @@ def run_experiment_cv(params, config, folds, tscv_eval_dir, exp_idx, config_modu
             "win_rate": best_win_rate,
             "max_dd": best_max_dd,
             "sortino": best_sortino,
+            "best_epoch": fold_best_epoch,
             "val_start": str(val_start)[:10],
             "val_end": str(val_end)[:10],
         })
@@ -1247,6 +1246,7 @@ def run_experiment_cv(params, config, folds, tscv_eval_dir, exp_idx, config_modu
         "fold_win_rate": win_rate_list,
         "fold_max_dd": max_dd_list,
         "fold_sortino": sortino_list,
+        "fold_best_epoch": [r.get("best_epoch", 0) for r in fold_results],
         "mean_sharpe": mean_sharpe,
         "std_sharpe": std_sharpe,
         "mean_win_rate": mean_win_rate,
@@ -1313,8 +1313,7 @@ def train_full(exp_config, scaler, full_out, config_module, num_epochs=15):
     exp_config.update(model_defaults)
 
     train_data, features = preprocess_data(full_df, is_train=True, stockid2idx=stockid2idx)
-    train_data[features] = train_data[features].replace([np.inf, -np.inf], np.nan)
-    train_data = train_data.dropna(subset=features)
+    train_data[features] = train_data[features].replace([np.inf, -np.inf], np.nan).fillna(0.0)
     train_instrument = train_data["instrument"].copy()
     train_data[features] = scaler.transform(train_data[features])
     train_data["instrument"] = train_instrument
@@ -1855,7 +1854,7 @@ if __name__ == "__main__":
 
     # 默认搜索的模型类型（不传 --model-type 时全部搜索）
     # SEARCH_MODEL_TYPES = ["itransformer", "gru", "tcn", "dlinear", "lstm", "timesnet", "nlinear", "patchtst", "mamba"]
-    SEARCH_MODEL_TYPES = ["tcn", "gru"]
+    SEARCH_MODEL_TYPES = ["tcn", "dlinear", "gru", "timesnet", "patchtst"]
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="config")
