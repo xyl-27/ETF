@@ -23,7 +23,7 @@ slippage: 0.001              # 滑点
 
 # Top-K 与加权策略
 top_k: 3
-weight_strategy: "kelly"           # equal | softmax | rank_linear | risk_parity | score_risk | score_risk_v1 | kelly
+weight_strategy: "equal"           # equal | softmax | rank_linear | risk_parity | score_risk | score_risk_v1 | kelly
 strategy_params:
   temperature: 1.0           # softmax 温度
   vol_window: 20             # 波动率回看天数
@@ -32,21 +32,32 @@ strategy_params:
 
 # 模型列表
 models:
-  - dir: model/TSCV/bayes_dlinear_74_3/exp_11/full
+  - dir: model/TSCV/bayes_gru_74_3/exp_16/fold_3
     file: best_model_sharpe.pth
     enabled: true
-  - dir: model/TSCV/bayes_timesnet_74_3/exp_20/full
+    name: gru_16_3
+
+  - dir: model/TSCV/bayes_gru_74_3/exp_16/fold_2
+    file: best_model_sharpe.pth
+    enabled: false
+    name: gru_16_2
+
+  - dir: model/TSCV/bayes_tcn_74_3/exp_5/fold_3
     file: best_model_sharpe.pth
     enabled: true
-  - dir: model/bayes_tcn_74_3_2026-01-01_2026-03-31/exp_63
+    name: tcn_5_3
+
+  - dir: model/TSCV/bayes_dlinear_74_3/exp_17/fold_3
+    file: best_model_sharpe.pth
+    enabled: true
+    name: dlinear_17_3
+
+  - dir: model/bayes_gru_74_3_2026-01-01_2026-03-31/exp_57
     file: best_model_sliding.pth
     enabled: true
-  - dir: model/TSCV/bayes_tcn_74_3/exp_7/full
-    file: best_model_sharpe.pth
-    enabled: true
-  - dir: model/TSCV/bayes_tcn_74_3/exp_7
-    type: ensemble_folds
-    file: best_model_sharpe.pth
+
+  - dir: model/bayes_tcn_74_3_2026-01-01_2026-03-31/exp_63
+    file: best_model_sliding.pth
     enabled: true
 
 # 融合序列
@@ -59,7 +70,7 @@ voting: true                 # 启用投票模型
 #   average       → 平均模型
 #   voting        → 投票模型
 #   <model_key>   → 指定模型
-master: "first"
+master: "average"
 
 # ---- Juejin 掘金回测专属 ----
 # 此处配置覆盖顶层同名参数

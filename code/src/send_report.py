@@ -152,9 +152,12 @@ def _build_model_stats_table(sequences):
         ks_p_str = f"{ks_p:.4f}" if ks_p is not None else "—"
         calmar = m.get("calmar_ratio", 0)
         sortino = m.get("sortino_ratio", 0)
+        dtk = ms.get("distinct_topk", "—")
+        dtk_str = str(dtk) if isinstance(dtk, int) else dtk
         rows += f"""
         <tr>
             <td style="font-size:11px;color:#555;">{display}</td>
+            <td style="text-align:right;">{dtk_str}</td>
             <td style="text-align:right;font-weight:bold;color:{ret_clr};">{ret:+.2f}%</td>
             <td style="text-align:right;font-weight:bold;color:{l3_clr};">{l3:+.2f}%</td>
             <td style="text-align:right;">{l3w:.1f}%</td>
@@ -180,6 +183,7 @@ def _build_model_stats_table(sequences):
         <thead>
             <tr>
                 <th>模型</th>
+                <th style="text-align:right;">不同标的</th>
                 <th style="text-align:right;">调仓盈亏</th>
                 <th style="text-align:right;">近3次平均盈亏</th>
                 <th style="text-align:right;">近3次胜率</th>
@@ -515,7 +519,9 @@ def _build_pred_signals_merged(sequences, report_date, weight_strategy="equal", 
         mn = _display_names.get(sk, sk.replace("search_", "").replace("_exp_", " ").replace("_full", " (full)"))
 
         # 投票序列: score = 票数/总模型数, advantage = -
+        # 平均序列: score = -avg_rank (权重计算用), 展示时取正数
         _is_voting = (sk == "voting")
+        _is_average = (sk == "average")
         if _is_voting:
             _voting_total = voting_total_models or latest_ph.get("voting_total_models")
             if not _voting_total:
@@ -532,9 +538,12 @@ def _build_pred_signals_merged(sequences, report_date, weight_strategy="equal", 
             if _is_voting and _voting_total:
                 score_display = f"{int(score)}/{_voting_total}"
                 adv_display = "-"
+            elif _is_average:
+                score_display = f"{-score:.1f}"  # 平均排位 (越低越好)
+                adv_display = "-"
             else:
                 score_display = f"{score:.4f}"
-                adv_display = f"{(score - cutoff_score) / score_std:+.4f}"
+                adv_display = f"{score - cutoff_score:+.4f}"
             w = w_dict.get(code, 0) * position_pct * 100
             _all_rows.append({
                 "rank": rank, "model": mn, "model_key": sk, "code": code, "name": name,

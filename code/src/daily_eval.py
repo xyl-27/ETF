@@ -322,6 +322,7 @@ def load_model_selection(path: str = None, cfg_dict: dict = None) -> Tuple[List[
                 "model_file": m.get("file", ""),
                 "type": m.get("type", "dl"),
                 "enabled": enabled,
+                "name": m.get("name", ""),
             })
     return models, master, average_enabled, voting_enabled
 
@@ -1375,6 +1376,14 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
             print(f"  [历史报告] {cur_date} 保存失败: {e}")
 
 
+def _compute_distinct_topk(predictions_history, top_k):
+    all_stocks = set()
+    for ph in predictions_history:
+        for p in ph.get("predictions", [])[:top_k]:
+            all_stocks.add(p["stock_id"])
+    return len(all_stocks)
+
+
 def _compute_model_stats(trades, current_prices=None, report_date=None):
     """从trades列表计算模型级交易统计。
     current_prices: {stock: price} 持仓股的当前价格，用于计算浮盈。
@@ -1448,6 +1457,9 @@ def _compute_model_stats(trades, current_prices=None, report_date=None):
 def _make_model_key(m):
     """生成 {search_type}_{model_type}_exp_X 格式的模型标识"""
     if isinstance(m, dict):
+        name_override = m.get("name", "")
+        if name_override:
+            return name_override
         exp_dir = m.get("exp_dir", m.get("dir", ""))
     elif isinstance(m, (list, tuple)):
         exp_dir = m[0]
@@ -1483,7 +1495,7 @@ def _resolve_report_key(sequences):
                     models = sel.get("models", [])
                     for m in models:
                         if m.get("enabled", True):
-                            master = _make_model_key(m.get("dir", ""))
+                            master = _make_model_key(m)
                             break
                 if master:
                     break
@@ -1631,7 +1643,17 @@ def daily_eval(
 
         first_model = single_models[0]
         scaler_path = os.path.join(first_model["exp_dir"], "scaler.pkl")
+        if not os.path.exists(scaler_path):
+            parent = os.path.dirname(os.path.normpath(first_model["exp_dir"]))
+            parent_scaler = os.path.join(parent, "scaler.pkl")
+            if os.path.exists(parent_scaler):
+                scaler_path = parent_scaler
         config_path = os.path.join(first_model["exp_dir"], "config.json")
+        if not os.path.exists(config_path):
+            parent = os.path.dirname(os.path.normpath(first_model["exp_dir"]))
+            parent_cfg = os.path.join(parent, "config.json")
+            if os.path.exists(parent_cfg):
+                config_path = parent_cfg
         with open(config_path, "r") as f:
             first_config = json.load(f)
         feature_num = first_config["feature_num"]
@@ -2034,20 +2056,20 @@ def daily_eval(
                 _avg_p = {}
                 for _d in sorted(_seed_dates_full):
                     _d_str = _d.strftime("%Y-%m-%d")
-                    _all_scores = []
+                    _all_ranks = []
                     for _, _bt2 in single_backtesters:
                         _p2 = _bt2._get_predictions(_d)
                         if _p2 is None:
-                            _all_scores = None
+                            _all_ranks = None
                             break
-                        _all_scores.append({_p["stock_id"]: _p["score"] for _p in _p2})
-                    if _all_scores:
+                        _all_ranks.append({_p["stock_id"]: _p["rank"] for _p in _p2})
+                    if _all_ranks:
                         _avg_map = {}
-                        for _sid in _all_scores[0].keys():
-                            _scs = [_sd[_sid] for _sd in _all_scores]
-                            _avg_map[_sid] = float(np.mean(_scs))
-                        _sorted = sorted(_avg_map.items(), key=lambda x: x[1], reverse=True)
-                        _avg_p[_d_str] = [{"rank": i+1, "stock_id": sid, "score": sc} for i, (sid, sc) in enumerate(_sorted)]
+                        for _sid in _all_ranks[0].keys():
+                            _rks = [_sd[_sid] for _sd in _all_ranks]
+                            _avg_map[_sid] = float(np.mean(_rks))
+                        _sorted = sorted(_avg_map.items(), key=lambda x: x[1])
+                        _avg_p[_d_str] = [{"rank": i+1, "stock_id": sid, "score": -sc} for i, (sid, sc) in enumerate(_sorted)]
                 _full_preds["average"] = _avg_p
             if voting_enabled and len(single_backtesters) >= 2:
                 _vote_p = {}
@@ -2250,6 +2272,7 @@ def daily_eval(
             seq_pnl = {p["stock_id"]: p for p in seq.get("today_pnl", {}).get("positions", [])}
             seq_current_prices = {sid: p["today_close"] for sid, p in seq_pnl.items() if p.get("today_close", 0) > 0}
             model_stats = _compute_model_stats(seq["trades"], seq_current_prices, report_date=latest_date_str)
+            model_stats["distinct_topk"] = _compute_distinct_topk(seq.get("predictions_history", []), top_k)
             seq["model_stats"] = model_stats
             sequences_summary[key] = {
                 "metrics": seq["metrics"],
@@ -2590,14 +2613,14 @@ def generate_predictions_only(
                     if preds is None:
                         all_scores = None
                         break
-                    all_scores.append({p["stock_id"]: p["score"] for p in preds})
+                    all_scores.append({p["stock_id"]: p["rank"] for p in preds})
                 if all_scores:
                     avg_map = {}
                     for sid in all_scores[0].keys():
-                        scores = [sd[sid] for sd in all_scores]
-                        avg_map[sid] = float(np.mean(scores))
-                    sorted_stocks = sorted(avg_map.items(), key=lambda x: x[1], reverse=True)
-                    avg_preds[d_str] = [{"rank": i+1, "stock_id": sid, "score": sc} for i, (sid, sc) in enumerate(sorted_stocks)]
+                        ranks = [sd[sid] for sd in all_scores]
+                        avg_map[sid] = float(np.mean(ranks))
+                    sorted_stocks = sorted(avg_map.items(), key=lambda x: x[1])
+                    avg_preds[d_str] = [{"rank": i+1, "stock_id": sid, "score": -sc} for i, (sid, sc) in enumerate(sorted_stocks)]
             all_predictions["average"] = avg_preds
             if verbose:
                 print(f"    → {len(avg_preds)} 个交易日")
@@ -2960,6 +2983,7 @@ def run_from_predictions(
             seq_pnl = {p["stock_id"]: p for p in seq.get("today_pnl", {}).get("positions", [])}
             seq_current_prices = {sid: p["today_close"] for sid, p in seq_pnl.items() if p.get("today_close", 0) > 0}
             model_stats = _compute_model_stats(seq["trades"], seq_current_prices, report_date=latest_date_str)
+            model_stats["distinct_topk"] = _compute_distinct_topk(seq.get("predictions_history", []), top_k)
             seq["model_stats"] = model_stats
             sequences_summary[key] = {
                 "metrics": seq["metrics"],
@@ -3219,10 +3243,12 @@ def run_from_juejin(verbose=True, start_date="2026-04-01", initial_capital=10000
 
         # 构建 sequences_summary
         sequences_summary = {}
+        _jj_top_k = cfg.get("top_k", 3)
         for key, seq in sequences.items():
             seq_pnl = {p["stock_id"]: p for p in seq.get("today_pnl", {}).get("positions", [])}
             seq_current_prices = {sid: p["today_close"] for sid, p in seq_pnl.items() if p.get("today_close", 0) > 0}
             model_stats = _compute_model_stats(seq.get("trades", []), seq_current_prices, report_date=latest_date_str)
+            model_stats["distinct_topk"] = _compute_distinct_topk(seq.get("predictions_history", []), _jj_top_k)
             seq["model_stats"] = model_stats
             sequences_summary[key] = {
                 "metrics": seq["metrics"],
@@ -3235,7 +3261,6 @@ def run_from_juejin(verbose=True, start_date="2026-04-01", initial_capital=10000
                 "equity_curve": seq.get("equity_curve", []),
                 "skipped_trades": seq.get("skipped_trades", []),
                 "predictions_history": seq.get("predictions_history", []),
-                "voting_total_models": len(single_backtesters) if key == "voting" else None,
             }
 
         # 注入最新预测到 predictions_history（掘金 state 可能没有最新日期的数据）
