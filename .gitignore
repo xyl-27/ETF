@@ -68,3 +68,6 @@ code/src/train_search_v2.py
 juejin/live/**/*.pth
 juejin/live/**/fold_*/
 juejin/live/**/full/
+
+# 实盘预测数据
+juejin/live/predictions.json

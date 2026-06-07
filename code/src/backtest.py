@@ -863,6 +863,9 @@ class ETFBacktester:
         processed = processed.dropna(subset=["instrument"]).copy()
         processed["instrument"] = processed["instrument"].astype(np.int64)
 
+        # 保存原始 instrument 再缩放（DL 模型需要整数索引而非缩放值）
+        instrument_raw = processed["instrument"].copy()
+
         processed_cln = (
             processed[features].replace([np.inf, -np.inf], np.nan).fillna(0.0)
         )
@@ -873,6 +876,7 @@ class ETFBacktester:
             processed_raw[features] = processed_cln
 
         processed[features] = scaler.transform(processed_cln)
+        processed["instrument"] = instrument_raw
 
         # 缓存
         cached_entry = {

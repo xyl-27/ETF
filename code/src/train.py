@@ -1051,10 +1051,8 @@ def split_train_val_by_last_month(df, sequence_length, val_months=2, val_folds=1
         val_start = (last_date - pd.DateOffset(months=val_months)).normalize()
         val_end = last_date
 
-    val_context_start = val_start - pd.tseries.offsets.BDay(sequence_length - 1)
-
     train_df = df[df["日期"] < val_start].copy()
-    val_df = df[(df["日期"] >= val_context_start) & (df["日期"] <= val_end)].copy()
+    val_df = df[df["日期"] <= val_end].copy()
 
     print(f"全量数据范围: {df['日期'].min().date()} 到 {last_date.date()}")
     print(f"训练集范围: {train_df['日期'].min().date()} 到 {train_df['日期'].max().date()}")
@@ -1062,7 +1060,7 @@ def split_train_val_by_last_month(df, sequence_length, val_months=2, val_folds=1
         print(f"验证集目标范围(固定日期): {val_start.date()} 到 {val_end.date()}")
     else:
         print(f"验证集目标范围(最后{val_months}个月): {val_start.date()} 到 {val_end.date()}")
-    print(f"验证集实际取数范围(含序列上下文): {val_df['日期'].min().date()} 到 {val_df['日期'].max().date()}")
+    print(f"验证集取数范围(全量历史至): {val_df['日期'].min().date()} 到 {val_df['日期'].max().date()}")
 
     if val_folds > 1:
         print(f"[时间序列交叉验证] 验证集折数: {val_folds}, 每折长度: {val_months}个月")
@@ -1160,11 +1158,8 @@ def main():
     # 3. 标准化
     scaler = StandardScaler()
 
-    train_data[features] = train_data[features].replace([np.inf, -np.inf], np.nan)
-    val_data[features] = val_data[features].replace([np.inf, -np.inf], np.nan)
-    # 丢弃nan数据
-    train_data = train_data.dropna(subset=features)
-    val_data = val_data.dropna(subset=features)
+    train_data[features] = train_data[features].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    val_data[features] = val_data[features].replace([np.inf, -np.inf], np.nan).fillna(0.0)
     # 保留原始 instrument（int 0-73）再缩放 — "instrument" 在 features 中
     train_instrument = train_data["instrument"].copy()
     val_instrument = val_data["instrument"].copy()
@@ -1219,32 +1214,20 @@ def main():
 
     # 4.3 滑动验证集: 使用验证期内数据
     print("\n[验证集-滑动]")
-    full_df_dates = pd.to_datetime(full_df["日期"])
     val_context_start = val_start - pd.tseries.offsets.BDay(
         config["sequence_length"] - 1
     )
-    full_df["日期"] = full_df_dates
-    val_sliding_df = full_df[
-        (full_df["日期"] >= val_context_start) & (full_df["日期"] <= val_end)
-    ]
+    # 从已处理好的 val_data 切片（特征工程基于全量数据，与训练一致）
+    val_data_dates = pd.to_datetime(val_data["日期"])
+    val_sliding_data = val_data[
+        (val_data_dates >= val_context_start) & (val_data_dates <= val_end)
+    ].copy()
     print(
         f"滑动验证取数范围: {val_context_start.strftime('%Y-%m-%d')} 到 {val_end.strftime('%Y-%m-%d')}"
     )
     print(
-        f"滑动验证原始数据: {len(val_sliding_df)} 行, {val_sliding_df['日期'].nunique()} 唯一日期"
+        f"滑动验证数据: {len(val_sliding_data)} 行, {val_sliding_data['日期'].nunique()} 唯一日期"
     )
-
-    val_sliding_data, _ = preprocess_val_data(val_sliding_df, stockid2idx=stockid2idx)
-    print(
-        f"滑动验证预处理后: {len(val_sliding_data)} 行, {val_sliding_data['日期'].nunique()} 唯一日期"
-    )
-    val_sliding_data[features] = val_sliding_data[features].replace(
-        [np.inf, -np.inf], np.nan
-    )
-    val_sliding_data = val_sliding_data.dropna(subset=features)
-    val_sliding_instrument = val_sliding_data["instrument"].copy()
-    val_sliding_data[features] = scaler.transform(val_sliding_data[features])
-    val_sliding_data["instrument"] = val_sliding_instrument
 
     # 滑动验证使用val_first_sample_date作为min_window_end_date，与按周验证对齐
     min_date_for_sliding = val_first_sample_date.strftime("%Y-%m-%d")

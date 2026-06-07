@@ -16,8 +16,6 @@ import re
 import shutil
 import gc
 import time
-import numpy as np
-import joblib
 import torch
 from datetime import datetime
 from pathlib import Path
@@ -32,11 +30,10 @@ _LOG_FILE = None
 
 
 def _log(msg: str, end: str = "\n"):
-    safe = msg.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
-    print(safe, end=end, flush=True)
+    print(msg, end=end, flush=True)
     if _LOG_FILE:
-        with open(_LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(safe + end)
+        with open(_LOG_FILE, "a") as f:
+            f.write(msg + end)
 
 
 # ============================================================
@@ -54,21 +51,20 @@ def _parse_val_dates_from_dir(dir_name: str):
     return m.groups() if m else (None, None)
 
 
-def _get_exp_score(exp_dir: str, search_root: Path) -> float:
+def _get_exp_score(exp_dir: Path, search_root: Path) -> float:
     """从 search_results.json 读取指定实验的 score，读取失败则回退到 exp 序号顺序。"""
-    exp_path = Path(exp_dir) if isinstance(exp_dir, str) else exp_dir
     results_file = search_root / "search_results.json"
     if results_file.exists():
         try:
             with open(results_file) as f:
                 results = json.load(f)
-            exp_idx = int(exp_path.name.split("_")[-1])
+            exp_idx = int(exp_dir.name.split("_")[-1])
             for r in results:
                 if r.get("exp_idx") == exp_idx and r.get("success"):
-                    return float(r.get("sharpe", r.get("score", 0)))
+                    return float(r["score"])
         except Exception:
             pass
-    exp_idx = int(exp_path.name.split("_")[-1])
+    exp_idx = int(exp_dir.name.split("_")[-1])
     return -float(exp_idx)
 
 
@@ -224,7 +220,7 @@ def _reproduce_one(
         "new_val_start": new_val_start, "new_val_end": new_val_end,
         "fixed_params": params,
         "reproduced_at": datetime.now().isoformat(),
-        "training_result": {k: result.get(k) for k in ("sharpe", "calmar_ratio", "weekly_score", "sliding_score", "best_epoch", "success")},
+        "training_result": {k: result.get(k) for k in ("score", "metric", "sliding_score", "best_epoch", "success")},
     }
     with open(os.path.join(search_dir, "source.json"), "w") as f:
         json.dump(source_info, f, indent=2, ensure_ascii=False)
@@ -253,80 +249,6 @@ def cmd_reproduce(args):
 
 
 # ============================================================
-#  Retrain (full-data from TSCV experiment)
-# ============================================================
-
-def cmd_retrain(args):
-    """在全量数据上训练部署模型（从 TSCV 实验的超参 + 中位数 epoch）。"""
-    source = Path(args.source)
-    if not source.exists():
-        _log(f"源目录不存在: {source}")
-        sys.exit(1)
-
-    config_path = source / "config.json"
-    if not config_path.exists():
-        _log(f"{config_path} 不存在")
-        sys.exit(1)
-    with open(config_path) as f:
-        exp_config = json.load(f)
-
-    # Determine num_epochs: from tscv_results.json fold_best_epoch median, or fallback
-    tscv_path = source / "tscv_results.json"
-    if tscv_path.exists():
-        with open(tscv_path) as f:
-            tscv_data = json.load(f)
-        epoch_list = tscv_data.get("fold_best_epoch", [])
-        if epoch_list:
-            num_epochs = int(np.median(epoch_list))
-            _log(f"  TSCV best epochs: {epoch_list}, median: {num_epochs}")
-        else:
-            num_epochs = exp_config.get("num_epochs", 15)
-            _log(f"  TSCV results found but no fold_best_epoch, fallback num_epochs={num_epochs}")
-    else:
-        num_epochs = exp_config.get("num_epochs", 15)
-        _log(f"  非 TSCV 实验, fallback num_epochs={num_epochs}")
-
-    # Find scaler
-    scaler = None
-    for cand in [source / "scaler.pkl", source / "fold_0" / "scaler.pkl", source.parent / "scaler.pkl"]:
-        if cand.exists():
-            scaler = joblib.load(str(cand))
-            _log(f"  Scaler: {cand}")
-            break
-    if scaler is None:
-        _log("错误: 找不到 scaler.pkl (checked: source/, source/fold_0/, source/../)")
-        sys.exit(1)
-
-    full_out = str(source / "full")
-    if os.path.exists(full_out):
-        if args.force:
-            shutil.rmtree(full_out)
-        else:
-            _log(f"目标目录已存在: {full_out} (使用 --force 覆盖)")
-            sys.exit(1)
-
-    if args.data_file:
-        exp_config = dict(exp_config)
-        exp_config["data_file"] = args.data_file
-        _log(f"  数据文件覆盖: {args.data_file}")
-
-    import config as config_module
-    from train_search_v2 import train_full
-
-    _log(f"  训练全量模型 ({num_epochs} epochs) …", end="")
-    try:
-        train_full(exp_config, scaler, full_out, config_module, num_epochs=num_epochs)
-    except Exception as e:
-        import traceback
-        _log(f" 失败: {e}")
-        _log(traceback.format_exc())
-        sys.exit(1)
-
-    _log(f"  完成: {full_out}")
-    _log(f"  可直接引用 config.yaml: dir={source.name}/full, file=best_model_sharpe.pth")
-
-
-# ============================================================
 #  Batch Reproduce
 # ============================================================
 
@@ -344,7 +266,7 @@ def cmd_batch_reproduce(args):
 
     DL_TYPES = {"dlinear", "timesnet", "tcn", "gru", "patchtst", "itransformer", "mamba", "nlinear"}
 
-    _log("Scanning experiments ...")
+    _log("扫描 2026 实验 …")
     for d in sorted(os.listdir(str(model_dir))):
         if "2026-01-01_2026-03-31" not in d or not d.startswith("bayes_"):
             continue
@@ -361,128 +283,74 @@ def cmd_batch_reproduce(args):
                 continue
             all_sources.append((mt, str(exp_dir), exp))
 
-    _log(f"Found {len(all_sources)} experiments")
+    _log(f"发现 {len(all_sources)} 个实验")
 
-    # 2. Group by model_type, select top N by score
+    # 2. Group by model_type, apply limit (按 search_results.json 的 score 降序选 Top-N)
     from collections import defaultdict
     by_type: Dict[str, List[Tuple[str, str, float]]] = defaultdict(list)
     for mt, exp_dir, exp_name in all_sources:
         score = _get_exp_score(exp_dir, Path(exp_dir).parent)
         by_type[mt].append((exp_dir, exp_name, score))
 
-    total = sum(min(max_per_type, len(exps)) if max_per_type > 0 else len(exps)
-                for exps in by_type.values())
-    _log(f"Plan: {total} experiments (top-{max_per_type if max_per_type > 0 else 'all'} per type by score)")
+    plan = []
     for mt in sorted(by_type.keys()):
-        top_score = sorted(by_type[mt], key=lambda x: -x[2])[0][2] if by_type[mt] else 0
-        count = min(max_per_type, len(by_type[mt])) if max_per_type > 0 else len(by_type[mt])
-        _log(f"  {mt}: {count}/{len(by_type[mt])} (best score: {top_score:.4f})")
-
-    # 3. Process — share preprocessed data across experiments of same model_type
-    from train_search_v2 import preprocess_and_save, run_experiment
-    import config as config_module
-
-    success, failed, skipped = 0, 0, 0
-    start_global = time.time()
-    processed = 0
-
-    for mt in sorted(by_type.keys()):
-        exps = sorted(by_type[mt], key=lambda x: -x[2])
+        exps = sorted(by_type[mt], key=lambda x: -x[2])  # sort by score desc
         limit = max_per_type if max_per_type > 0 else len(exps)
-        selected = exps[:limit]
+        for exp_dir, exp_name, _ in exps[:limit]:
+            plan.append((mt, exp_dir, exp_name))
 
-        # --- Shared cache dir for preprocessing (one per model_type) ---
-        cache_tag = f".cache_{mt}_{val_start}_{val_end}"
-        cache_dir = str(PROJECT_ROOT / "model" / "reproduced" / cache_tag)
-        os.makedirs(cache_dir, exist_ok=True)
+    _log(f"\n计划: {len(plan)} 个实验 (按 score 选 Top-{max_per_type if max_per_type > 0 else '全部'} / 类型)")
+    for mt in sorted(by_type.keys()):
+        count = min(max_per_type, len(by_type[mt])) if max_per_type > 0 else len(by_type[mt])
+        top_score = by_type[mt][0][2] if by_type[mt] else 0
+        _log(f"  {mt}: {count}/{len(by_type[mt])}  (best score: {top_score:.4f})")
 
-        # Build base config from the first experiment's config template
-        first_src = json.load(open(Path(selected[0][0]) / "config.json"))
-        base_config = config_module.config.copy()
-        for k, v in first_src.items():
-            if k in ("val_start_date", "val_end_date", "output_dir", "output_base", "model_type"):
-                continue
-            base_config[k] = v
-        base_config["val_start_date"] = val_start
-        base_config["val_end_date"] = val_end
-        base_config["output_dir"] = cache_dir
+    # 3. Process
+    success, failed, skipped = 0, 0, 0
+    total = len(plan)
+    start_global = time.time()
 
-        # Preprocess ONCE per model_type
-        _log(f"\n[{mt}] preprocessing ({val_start} ~ {val_end}) ...")
-        preprocessed_data, scaler = preprocess_and_save(base_config, cache_dir)
+    for idx, (mt, exp_dir, exp_name) in enumerate(plan):
+        output_name = f"{mt}_from_{exp_name}_{val_start}_{val_end}"
+        target_dir = str(PROJECT_ROOT / "model" / "reproduced" / output_name)
 
-        # --- Train each experiment with locked params ---
-        for exp_dir, exp_name, score in selected:
-            processed += 1
-            output_name = f"{mt}_from_{exp_name}_{val_start}_{val_end}"
-            target_dir = str(PROJECT_ROOT / "model" / "reproduced" / output_name)
-
-            # Resume check: look for best_model.pth under exp_reproduced/
-            model_path = os.path.join(target_dir, "exp_reproduced", "best_model.pth")
-            if args.resume and os.path.exists(model_path):
+        # Skip if already exists
+        if args.resume and os.path.exists(target_dir) and os.path.isdir(target_dir):
+            # Verify it has model files
+            has_files = any(
+                os.path.exists(os.path.join(target_dir, f))
+                for f in ("best_model.pth", "best_model_sliding.pth", "best_model_ndcg.pth")
+            )
+            if has_files:
                 skipped += 1
-                _log(f"  [{processed}/{total}] SKIP {output_name}")
+                _log(f"[{idx + 1}/{total}] SKIP {output_name} (已存在)")
                 continue
 
-            elapsed = time.time() - start_global
-            _log(f"  [{processed}/{total}] ({elapsed/60:.1f}min) {mt}/{exp_name} ...", end=" ")
+        elapsed = time.time() - start_global
+        _log(f"[{idx + 1}/{total}] ({elapsed / 60:.1f}min) {mt}/{exp_name} …", end=" ")
 
-            # Lock hyperparams from source experiment
-            src_cfg = json.load(open(Path(exp_dir) / "config.json"))
-            model_defaults = config_module.get_model_config(mt)
-            param_keys = set(model_defaults.keys()) | {"learning_rate"}
-            if "num_experts" in src_cfg:
-                param_keys.add("num_experts")
-            params = {k: src_cfg[k] for k in param_keys if k in src_cfg}
+        t0 = time.time()
+        ok, _, msg = _reproduce_one(exp_dir, val_start, val_end, force=False, quiet=True)
+        dt = time.time() - t0
 
-            # Experiment config (overrides base)
-            exp_config = base_config.copy()
-            exp_config["output_dir"] = target_dir
-            os.makedirs(target_dir, exist_ok=True)
+        if ok:
+            success += 1
+            _log(f"✓ ({dt:.0f}s) {msg}")
+        else:
+            failed += 1
+            _log(f"✗ ({dt:.0f}s) {msg}")
 
-            t0 = time.time()
-            try:
-                result = run_experiment(
-                    params, exp_config, preprocessed_data, scaler,
-                    target_dir, "reproduced", config_module,
-                )
-                dt = time.time() - t0
-                success += 1
-                _log(f"OK ({dt:.0f}s) score={result.get('score', '?'):.4f}")
-
-                # Save provenance
-                source_info = {
-                    "source_dir": str(exp_dir), "model_type": mt,
-                    "source_exp_idx": exp_name.split("_")[-1],
-                    "source_val_start": src_cfg.get("val_start_date"),
-                    "source_val_end": src_cfg.get("val_end_date"),
-                    "new_val_start": val_start, "new_val_end": val_end,
-                    "fixed_params": params,
-                    "reproduced_at": datetime.now().isoformat(),
-                    "training_result": {k: result.get(k) for k in ("sharpe", "calmar_ratio", "weekly_score", "sliding_score", "best_epoch", "success")},
-                }
-                with open(os.path.join(target_dir, "source.json"), "w") as f:
-                    json.dump(source_info, f, indent=2)
-            except Exception as e:
-                dt = time.time() - t0
-                failed += 1
-                _log(f"FAIL ({dt:.0f}s) {e}")
-
-            if processed > 0:
-                avg = (time.time() - start_global) / processed
-                remaining = avg * (total - processed)
-                _log(f"    est. remaining: {remaining/60:.0f}min")
-
-        # Clean GPU memory between model types
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        gc.collect()
+        # Estimate remaining time
+        if idx > 0:
+            avg = (time.time() - start_global) / (idx + 1)
+            remaining = avg * (total - idx - 1)
+            _log(f"  预计剩余: {remaining / 60:.0f}min")
 
     total_elapsed = time.time() - start_global
     _log(f"\n{'=' * 50}")
-    _log(f"batch-reproduce done")
-    _log(f"  total: {total}, success: {success}, skipped: {skipped}, failed: {failed}")
-    _log(f"  time: {total_elapsed/60:.1f}min")
+    _log(f"批量 reproduce 完成")
+    _log(f"  总计: {total}, 成功: {success}, 跳过: {skipped}, 失败: {failed}")
+    _log(f"  耗时: {total_elapsed / 60:.1f}min")
     _log(f"{'=' * 50}")
 
     if failed > 0:
@@ -493,285 +361,7 @@ def cmd_batch_reproduce(args):
 #  Compare — 对比两版模型
 # ============================================================
 
-def _backtest_one_model(exp_dir, model_file, cached_data, cached_features,
-                         bt_start, bt_end, data_path, config_dict,
-                         weight_strategy="equal", strategy_params=None):
-    """Run single backtest, return result dict or None."""
-    from backtest import run_backtest_from_predictions, ETFBacktester
-    try:
-        bt = ETFBacktester.from_cached_data(
-            model_dir=exp_dir, cached_data=cached_data, cached_features=cached_features,
-            device="cpu", model_file=model_file, verbose=False,
-        )
-        rbd = config_dict.get("rebalance_days", 5)
-        top_k = config_dict.get("top_k", 3)
-        ppct = config_dict.get("position_pct", 0.95)
-        icap = config_dict.get("initial_capital", 100000)
-        tmode = config_dict.get("trade_mode", "open")
-
-        preds = bt.generate_predictions_dict(
-            start_date=bt_start, end_date=bt_end,
-            rebalance_days=rbd, first_rebalance_date=bt_start,
-        )
-        r = run_backtest_from_predictions(
-            predictions_dict=preds, data_path=str(data_path),
-            start_date=bt_start, end_date=bt_end,
-            top_k=top_k, rebalance_days=rbd, position_pct=ppct,
-            initial_capital=icap, trade_mode=tmode,
-            weight_strategy=weight_strategy,
-            strategy_params=strategy_params,
-            first_rebalance_date=bt_start,
-            verbose=False,
-        )
-        return {
-            "return": r.strategy_return, "dd": r.max_drawdown,
-            "hs300": r.hs300_return, "excess": r.excess_return,
-            "win_rate": r.rebalance_stats.get("win_rate", 0),
-            "avg_return": r.rebalance_stats.get("avg_return", 0),
-            "rebalances": r.rebalance_stats.get("total", 0),
-        }
-    except Exception as e:
-        _log(f"  ✗ {Path(exp_dir).name}: {e}")
-        return None
-
-
-def cmd_compare_live(args):
-    """对比 juejin/live 实盘模型 vs 历史重训版本"""
-    from daily_eval import load_full_config
-
-    cfg = load_full_config()
-    bt_start = cfg.get("start_date", "2026-04-01")
-    repro_val_start = args.repro_val_start
-    repro_val_end = args.repro_val_end
-
-    # Read weight_strategy & strategy_params from config
-    weight_strategy = cfg.get("weight_strategy", "equal")
-    strategy_params = cfg.get("strategy_params", None)
-    _log(f"使用权重策略: {weight_strategy}")
-
-    data_path = PROJECT_ROOT / "etf_data" / "etf_74.csv"
-    if data_path.exists():
-        import pandas as _pd
-        df = _pd.read_csv(data_path)
-        df["日期"] = _pd.to_datetime(df["日期"])
-        bt_end = df["日期"].max().strftime("%Y-%m-%d")
-    else:
-        bt_end = "2026-05-12"
-
-    live_root = PROJECT_ROOT / "juejin" / "live"
-    if not live_root.exists():
-        _log("错误: juejin/live/ 不存在")
-        sys.exit(1)
-
-    # Discover live model experiments
-    live_pairs = []  # (model_type, exp_num, live_dir, repro_dir)
-    for d in sorted(os.listdir(str(live_root))):
-        if not d.startswith("bayes_"):
-            continue
-        exp_root = live_root / d
-        if not exp_root.is_dir():
-            continue
-        for exp in sorted(os.listdir(str(exp_root))):
-            if not exp.startswith("exp_"):
-                continue
-            exp_dir = exp_root / exp
-            if not exp_dir.is_dir():
-                continue
-            mt = _parse_model_type_from_dir(d)
-            en = exp.split("_")[-1]
-            repro_tag = f"{mt}_from_exp_{en}_{repro_val_start}_{repro_val_end}"
-            repro_dir = PROJECT_ROOT / "model" / "reproduced" / repro_tag
-            if not repro_dir.exists():
-                _log(f"  [skip] {mt} exp_{en}: 历史重训不存在 ({repro_tag})")
-                continue
-            live_pairs.append((mt, int(en), str(exp_dir), str(repro_dir)))
-
-    if not live_pairs:
-        _log("错误: 无有效配对的实盘实验")
-        sys.exit(1)
-
-    _log(f"发现 {len(live_pairs)} 个实盘实验配对\n")
-    _log(f"回测区间: {bt_start} → {bt_end}")
-
-    # Build config model pairs when --use-config
-    use_config_filter = args.use_config
-    config_pairs = []  # (model_type, exp_num, live_dir, repro_dir, model_file)
-    if use_config_filter:
-        for m in cfg.get("models", []):
-            if not m.get("enabled", True):
-                continue
-            md = m.get("dir", "")
-            mf = m.get("file", "")
-            if not md or not mf:
-                continue
-            md_path = PROJECT_ROOT / md
-            if not md_path.exists():
-                _log(f"  [skip] config dir not found: {md}")
-                continue
-            mt = _parse_model_type_from_dir(Path(md).parent.name if Path(md).parent.name.startswith("bayes_") else Path(md).name)
-            en_str = Path(md).name.replace("exp_", "")
-            if not en_str.isdigit():
-                continue
-            en = int(en_str)
-            repro_tag = f"{mt}_from_exp_{en}_{repro_val_start}_{repro_val_end}"
-            repro_dir = PROJECT_ROOT / "model" / "reproduced" / repro_tag
-            if not repro_dir.exists():
-                _log(f"  [skip] {mt} exp_{en}: 历史重训不存在 ({repro_tag})")
-                continue
-            config_pairs.append((mt, en, str(md_path), str(repro_dir), mf))
-        _log(f"  config 中启用模型: {len(config_pairs)} 个")
-
-    # When --use-config, replace live_pairs with config_pairs
-    if use_config_filter:
-        live_pairs = [(mt, en, ld, rd) for mt, en, ld, rd, _ in config_pairs]
-
-    # Find scaler
-    scaler_path = None
-    for _, _, ld, _ in live_pairs:
-        sp = f"{ld}/../scaler.pkl"
-        if os.path.exists(sp):
-            scaler_path = sp
-            break
-    if not scaler_path:
-        for _, _, _, rd in live_pairs:
-            for root, dirs, files in os.walk(rd):
-                for f in files:
-                    if f == "scaler.pkl":
-                        scaler_path = os.path.join(root, f)
-                        break
-                if scaler_path:
-                    break
-            if scaler_path:
-                break
-    if not scaler_path:
-        _log("错误: 未找到 scaler.pkl")
-        sys.exit(1)
-
-    _log("\n加载数据 …")
-    from backtest import ETFBacktester
-    cached_data, cached_features = ETFBacktester.load_data_once(
-        data_path=str(data_path), scaler_path=scaler_path,
-        feature_num="39", verbose=False, store_unscaled=True,
-    )
-
-    all_results = []
-    model_files = ("best_model.pth", "best_model_sliding.pth", "best_model_optuna.pth")
-
-    for mt, en, live_dir, repro_dir in live_pairs:
-        _log(f"\n{'─'*60}")
-        _log(f"  {mt} exp_{en}")
-        _log(f"{'─'*60}")
-
-        repro_model_dir = os.path.join(repro_dir, "exp_reproduced")
-
-        # Determine which model files to test
-        if use_config_filter:
-            matched = [cp for cp in config_pairs if cp[0] == mt and cp[1] == en]
-            files_to_test = [cp[4] for cp in matched] if matched else []
-            if not files_to_test:
-                _log(f"  [skip] 不在 config.yaml 中")
-                continue
-        else:
-            files_to_test = model_files
-
-        for mf in files_to_test:
-            live_pth = os.path.join(live_dir, mf)
-            repro_pth = os.path.join(repro_model_dir, mf)
-            if not os.path.exists(live_pth) or not os.path.exists(repro_pth):
-                continue
-
-            _log(f"  {mf} …", end=" ")
-
-            curr_res = _backtest_one_model(live_dir, mf, cached_data, cached_features,
-                                            bt_start, bt_end, data_path, cfg,
-                                            weight_strategy=weight_strategy,
-                                            strategy_params=strategy_params)
-            hist_res = _backtest_one_model(repro_model_dir, mf, cached_data, cached_features,
-                                            bt_start, bt_end, data_path, cfg,
-                                            weight_strategy=weight_strategy,
-                                            strategy_params=strategy_params)
-
-            if curr_res and hist_res:
-                diff = hist_res["return"] - curr_res["return"]
-                better = "历史 ✓" if diff > 0 else "当前 ✓"
-                row = {
-                    "model_type": mt, "exp_num": en, "model_file": mf,
-                    "curr_return": curr_res["return"], "hist_return": hist_res["return"],
-                    "ret_diff": diff, "curr_dd": curr_res["dd"], "hist_dd": hist_res["dd"],
-                    "better": better,
-                }
-                all_results.append(row)
-                _log(f"curr={curr_res['return']:+.2f}%  hist={hist_res['return']:+.2f}%  diff={diff:+.2f}%  {better}")
-            else:
-                _log("失败")
-
-        # Save per-pair to cache
-        import pickle as _pk
-        cache_key = f"live_{mt}_exp_{en}_comparison.pkl"
-        cache_path = PROJECT_ROOT / "output" / cache_key
-        pair_rows = [r for r in all_results if r["model_type"] == mt and r["exp_num"] == en]
-        if pair_rows:
-            with open(cache_path, "wb") as f:
-                _pk.dump(pair_rows, f)
-
-    # Summary
-    _log(f"\n{'=' * 60}")
-    _log(f"Live 模型对比汇总")
-    _log(f"{'=' * 60}")
-    if all_results:
-        import pandas as _pd
-        df = _pd.DataFrame(all_results)
-        avg_curr = df["curr_return"].mean()
-        avg_hist = df["hist_return"].mean()
-        avg_diff = df["ret_diff"].mean()
-        better_count = (df["ret_diff"] > 0).sum()
-        total = len(df)
-        _log(f"  总配对数: {total}")
-        _log(f"  当前模型平均收益: {avg_curr:+.2f}%")
-        _log(f"  历史模型平均收益: {avg_hist:+.2f}%")
-        _log(f"  平均衰退: {avg_diff:+.2f}%")
-        _log(f"  历史胜出: {better_count}/{total} = {better_count/total*100:.1f}%")
-
-        # Summary by model type
-        _log(f"\n  按模型类型:")
-        for mt_name in sorted(df["model_type"].unique()):
-            g = df[df["model_type"] == mt_name]
-            _log(f"    {mt_name:12s}: curr={g['curr_return'].mean():+.2f}%  hist={g['hist_return'].mean():+.2f}%  "
-                 f"diff={g['ret_diff'].mean():+.2f}%  n={len(g)}")
-
-        # Save full results
-        out_name = f"live_model_comparison_{repro_val_start}_{repro_val_end}.json"
-        out_path = PROJECT_ROOT / "output" / out_name
-        extra = {"weight_strategy_used": weight_strategy, "repro_label": f"{repro_val_start}~{repro_val_end}"}
-        if use_config_filter:
-            extra["model_filter"] = "config"
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump({
-                "backtest_start": bt_start,
-                "backtest_end": bt_end,
-                "results": all_results,
-                "summary": {
-                    "total_pairs": total,
-                    "avg_curr_return": round(avg_curr, 2),
-                    "avg_hist_return": round(avg_hist, 2),
-                    "avg_decay": round(avg_diff, 2),
-                    "hist_win_rate": round(better_count / total * 100, 1),
-                    "repro_val_start": repro_val_start,
-                    "repro_val_end": repro_val_end,
-                    **extra,
-                }
-            }, f, indent=2, ensure_ascii=False)
-        _log(f"\n  结果已保存: {out_path}")
-        _log(f"\n  {avg_diff:+.2f}% 衰退  |  历史胜出 {better_count}/{total}")
-    else:
-        _log("  无有效回测结果")
-
-
 def cmd_compare(args):
-    if args.live_only:
-        cmd_compare_live(args)
-        return
-
     from daily_eval import load_full_config
 
     cfg = load_full_config()
@@ -801,7 +391,7 @@ def cmd_compare(args):
                 exp_dir = exp_root / exp
                 if not exp_dir.is_dir():
                     continue
-                for mf in ("best_model.pth", "best_model_sliding.pth", "best_model_optuna.pth"):
+                for mf in ("best_model.pth", "best_model_sliding.pth", "best_model_ndcg.pth"):
                     if (exp_dir / mf).exists():
                         results.append((str(exp_dir), mf))
         if include_reproduced:
@@ -815,7 +405,7 @@ def cmd_compare(args):
                     exp_dir = repro_root / d
                     if not exp_dir.is_dir():
                         continue
-                    for mf in ("best_model.pth", "best_model_sliding.pth", "best_model_optuna.pth"):
+                    for mf in ("best_model.pth", "best_model_sliding.pth", "best_model_ndcg.pth"):
                         if (exp_dir / mf).exists():
                             results.append((str(exp_dir), mf))
         return results
@@ -892,7 +482,7 @@ def cmd_compare(args):
         _log(f"\n回测 {label} …")
         for exp_dir, mf in exps:
             tag = f"{Path(exp_dir).parent.name}/{Path(exp_dir).name}/{mf}"
-            _log(f"  {tag} …", end=" ")
+            _log(f"  {tag} …", end=" ", flush=True)
             r = _backtest_one(exp_dir, mf)
             if r:
                 r["version"] = "A" if label.startswith("版本 A") else "B"
@@ -985,267 +575,6 @@ def cmd_upgrade(args):
 
 
 # ============================================================
-#  Reproduce Live — 只重训 juejin/live 中的实盘模型
-# ============================================================
-
-def cmd_reproduce_live(args):
-    global _LOG_FILE
-    _LOG_FILE = args.log
-    os.makedirs(os.path.dirname(args.log), exist_ok=True)
-
-    live_root = PROJECT_ROOT / "juejin" / "live"
-    if not live_root.exists():
-        _log(f"错误: 目录不存在 {live_root}")
-        sys.exit(1)
-
-    val_start = args.val_start
-    val_end = args.val_end
-
-    sources = []  # (model_type, exp_dir, exp_name)
-    for d in sorted(os.listdir(str(live_root))):
-        if not d.startswith("bayes_"):
-            continue
-        exp_root = live_root / d
-        if not exp_root.is_dir():
-            continue
-        for exp in sorted(os.listdir(str(exp_root))):
-            if not exp.startswith("exp_"):
-                continue
-            exp_dir = exp_root / exp
-            if not exp_dir.is_dir():
-                continue
-
-            # Prioritise config.json inside live dir; fallback to original model dir
-            cfg = exp_dir / "config.json"
-            if not cfg.exists():
-                vs, ve = _parse_val_dates_from_dir(d)
-                if vs and ve:
-                    orig_cfg = PROJECT_ROOT / "model" / d / exp / "config.json"
-                    if orig_cfg.exists():
-                        import shutil as _su
-                        _su.copy2(str(orig_cfg), str(exp_dir / "config.json"))
-                        cfg = exp_dir / "config.json"
-                        _log(f"  [config] 已从原始目录复制: {orig_cfg}")
-                    else:
-                        _log(f"  [skip] {exp_dir}: config.json 不存在 (live 和原始目录均缺失)")
-                        continue
-                else:
-                    _log(f"  [skip] {exp_dir}: config.json 不存在")
-                    continue
-
-            mt = _parse_model_type_from_dir(d)
-            sources.append((mt, str(exp_dir), exp))
-
-    _log(f"扫描 juejin/live/: 找到 {len(sources)} 个实盘实验\n")
-
-    if args.dry_run:
-        for mt, ed, en in sources:
-            _log(f"  [DRY-RUN] {ed}")
-        return
-
-    success, failed, skipped = 0, 0, 0
-    start_global = time.time()
-    total = len(sources)
-
-    for i, (mt, exp_dir, exp_name) in enumerate(sources):
-        output_name = f"{mt}_from_{exp_name}_{val_start}_{val_end}"
-        target_dir = str(PROJECT_ROOT / "model" / "reproduced" / output_name)
-
-        model_path = os.path.join(target_dir, "exp_reproduced", "best_model.pth")
-        if args.resume and os.path.exists(model_path):
-            skipped += 1
-            _log(f"  [{i+1}/{total}] SKIP {output_name}")
-            continue
-
-        elapsed = time.time() - start_global
-        _log(f"  [{i+1}/{total}] ({elapsed/60:.1f}min) {mt}/{exp_name} ...", end=" ")
-
-        ok, td, msg = _reproduce_one(
-            exp_dir, val_start, val_end, force=args.force, quiet=True
-        )
-        if ok:
-            success += 1
-            _log(f"OK  {msg}")
-        else:
-            failed += 1
-            _log(f"FAIL {msg}")
-
-        if (i + 1) % 5 == 0:
-            avg = (time.time() - start_global) / (i + 1)
-            remaining = avg * (total - i - 1)
-            _log(f"    est. remaining: {remaining/60:.0f}min")
-
-    total_elapsed = time.time() - start_global
-    _log(f"\n{'=' * 50}")
-    _log(f"reproduce-live done")
-    _log(f"  total: {total}, success: {success}, skipped: {skipped}, failed: {failed}")
-    _log(f"  time: {total_elapsed/60:.1f}min")
-    _log(f"{'=' * 50}")
-
-    if failed > 0:
-        sys.exit(1)
-
-
-# ============================================================
-#  TSCV — 时间序列交叉验证评估
-# ============================================================
-
-def cmd_tscv(args):
-    """搜索结果的 TSCV 多折评估。"""
-    from train_search_v2 import run_experiment_cv
-    from config import load_tscv_config, config as base_config
-    import config as config_module
-
-    tscv_eval_dir, folds, enabled = load_tscv_config()
-    if not enabled or not folds:
-        _log("错误: TSCV 未启用 (config.py 中 use_tscv=False 或无 fold 定义)")
-        sys.exit(1)
-
-    _log(f"TSCV 评估目录: {tscv_eval_dir}")
-    _log(f"Fold 数: {len(folds)}")
-    for i, f in enumerate(folds):
-        _log(f"  Fold {i}: val {f['val_start']} ~ {f['val_end']}")
-
-    model_root = PROJECT_ROOT / "model"
-
-    # 确定实验列表
-    experiments = []
-    if args.experiment:
-        raw = args.experiment
-        if "_exp_" in raw:
-            parts = raw.split("_exp_")
-            experiments.append((parts[0], int(parts[1])))
-        else:
-            en = int(raw.replace("exp_", ""))
-            experiments.append(("", en))
-    else:
-        top_n = args.top_n or 5
-        seen = {}
-        for d in sorted(os.listdir(str(model_root))):
-            if not d.startswith("bayes_"):
-                continue
-            search_dir = model_root / d
-            results_file = search_dir / "search_results.json"
-            if not results_file.exists():
-                continue
-            with open(results_file) as f:
-                raw = json.load(f)
-            # Normalize: ML (dict of str→dict) vs DL (list of dict)
-            if isinstance(raw, dict):
-                results_list = [v for v in raw.values() if isinstance(v, dict)]
-            else:
-                results_list = raw
-            mt = _parse_model_type_from_dir(d)
-            sorted_results = sorted(
-                [r for r in results_list if r.get("success")],
-                key=lambda x: float(x.get("sharpe", x.get("score", 0))), reverse=True,
-            )
-            for r in sorted_results[:top_n]:
-                en = r.get("exp_idx", -1)
-                if en >= 0 and en not in seen:
-                    seen[en] = True
-                    experiments.append((mt, en))
-
-    if not experiments:
-        _log("错误: 无有效的实验")
-        sys.exit(1)
-
-    experiments.sort(key=lambda x: x[1])
-    _log(f"\n共 {len(experiments)} 个实验待评估:\n")
-
-    for mt, en in experiments:
-        # 定位实验目录
-        exp_dir = None
-        if mt:
-            for d in sorted(os.listdir(str(model_root))):
-                if not d.startswith(f"bayes_{mt}"):
-                    continue
-                candidate = model_root / d / f"exp_{en}"
-                if candidate.exists():
-                    exp_dir = candidate
-                    break
-        else:
-            for d in sorted(os.listdir(str(model_root))):
-                candidate = model_root / d / f"exp_{en}"
-                if candidate.exists():
-                    exp_dir = candidate
-                    break
-
-        if exp_dir is None:
-            _log(f"  [skip] {mt} exp_{en}: 未找到实验目录")
-            continue
-
-        config_path = exp_dir / "config.json"
-        if not config_path.exists():
-            _log(f"  [skip] {mt} exp_{en}: 无 config.json")
-            continue
-
-        with open(config_path) as f:
-            exp_cfg = json.load(f)
-
-        # 跳过已完成的
-        result_dir = PROJECT_ROOT / tscv_eval_dir / f"exp_{en}"
-        result_file = result_dir / "tscv_results.json"
-        if result_file.exists() and not args.force:
-            with open(result_file) as f:
-                prev = json.load(f)
-            _log(f"  [skip] {mt} exp_{en}: 已完成 cv_score={prev.get('cv_score', '?'):.4f} (使用 --force 重评)")
-            continue
-
-        mt_display = mt or exp_cfg.get("model_type", "?")
-        _log(f"\n  [{en}] {mt_display}  折数={len(folds)}  epochs={exp_cfg.get('num_epochs', '?')}")
-        _log(f"  Params: lr={exp_cfg.get('learning_rate', '?'):.2e}  d_model={exp_cfg.get('d_model', '?')}  "
-             f"dropout={exp_cfg.get('dropout', '?'):.2f}")
-
-        result = run_experiment_cv(
-            params=exp_cfg,
-            config=base_config,
-            folds=folds,
-            tscv_eval_dir=str(PROJECT_ROOT / tscv_eval_dir),
-            exp_idx=en,
-            config_module=config_module,
-        )
-        if result.get("success"):
-            _log(f"  ✓ {mt_display} exp_{en}: mean_sharpe={result['mean_sharpe']:.4f}  "
-                 f"std_sharpe={result['std_sharpe']:.4f}  cv_score={result['cv_score']:.4f}")
-
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        gc.collect()
-
-    # 汇总
-    _log(f"\n{'=' * 60}")
-    _log("TSCV 评估汇总")
-    _log(f"{'=' * 60}")
-    all_results = []
-    for mt, en in experiments:
-        result_file = PROJECT_ROOT / tscv_eval_dir / f"exp_{en}" / "tscv_results.json"
-        if result_file.exists():
-            with open(result_file) as f:
-                r = json.load(f)
-            all_results.append({
-                "exp": en,
-                "model": mt,
-                "cv_score": r.get("cv_score", 0),
-                "mean_sharpe": r.get("mean_sharpe", 0),
-                "std_sharpe": r.get("std_sharpe", 0),
-                "fold_sharpe": r.get("fold_sharpe", []),
-            })
-
-    all_results.sort(key=lambda x: x["cv_score"], reverse=True)
-    _log(f"\n{'exp':>6}  {'model':<14}  {'cv_score':>9}  {'mean_sharpe':>11}  {'std_sharpe':>10}  folds")
-    _log("-" * 75)
-    for r in all_results:
-        folds_str = " ".join(f"{s:.2f}" for s in r["fold_sharpe"])
-        _log(f"{r['exp']:>6}  {r['model']:<14}  {r['cv_score']:>9.4f}  {r['mean_sharpe']:>11.4f}  "
-             f"{r['std_sharpe']:>10.4f}  [{folds_str}]")
-
-    best = all_results[0] if all_results else None
-    if best:
-        _log(f"\n最佳: exp_{best['exp']} ({best['model']})  cv_score={best['cv_score']:.4f}")
-
-
-# ============================================================
 #  CLI
 # ============================================================
 
@@ -1278,23 +607,10 @@ def main():
 
     # compare
     p = sub.add_parser("compare", help="对比两版模型在相同区间上的表现")
-    p.add_argument("--live-only", action="store_true", help="仅对比 juejin/live 实盘模型 vs 历史重训")
-    p.add_argument("--repro-val-start", default="2025-01-01", help="历史重训验证开始日期，默认 2025-01-01")
-    p.add_argument("--repro-val-end", default="2025-06-30", help="历史重训验证结束日期，默认 2025-06-30")
-    p.add_argument("--model-type", help="模型类型 (tcn/gru/patchtst/…)，--live-only 时忽略")
-    p.add_argument("--val-a", help="版本 A 日期范围 (如 2025-01-01_2025-06-30)，--live-only 时忽略")
-    p.add_argument("--val-b", help="版本 B 日期范围 (如 2026-01-01_2026-03-31)，--live-only 时忽略")
+    p.add_argument("--model-type", required=True, help="模型类型 (tcn/gru/patchtst/…)")
+    p.add_argument("--val-a", required=True, help="版本 A 日期范围 (如 2025-01-01_2025-06-30)")
+    p.add_argument("--val-b", required=True, help="版本 B 日期范围 (如 2026-01-01_2026-03-31)")
     p.add_argument("--max-exps", type=int, default=0, help="每版最多回测实验数 (0=全部)")
-    p.add_argument("--use-config", action="store_true", help="使用 config.yaml 中的模型目录和文件（仅测试配置指定的模型/文件），并读取 weight_strategy")
-
-    # reproduce-live
-    p = sub.add_parser("reproduce-live", help="重训 juejin/live 中所有实盘模型的历史版本")
-    p.add_argument("--val-start", required=True, help="新验证集开始日期 (YYYY-MM-DD)")
-    p.add_argument("--val-end", required=True, help="新验证集结束日期 (YYYY-MM-DD)")
-    p.add_argument("--force", action="store_true", help="覆盖已存在的目标目录")
-    p.add_argument("--resume", action="store_true", help="跳过已完成的实验")
-    p.add_argument("--dry-run", action="store_true", help="仅列出实验，不实际训练")
-    p.add_argument("--log", default="/tmp/reproduce_live.log", help="日志文件路径")
 
     # upgrade
     p = sub.add_parser("upgrade", help="archive + reproduce + compare 一键完成")
@@ -1305,22 +621,10 @@ def main():
     p.add_argument("--max-exps", type=int, default=20, help="对比时每版最多回测实验数")
     p.add_argument("--dry-run", action="store_true", help="存档时仅预览")
 
-    # tscv
-    p = sub.add_parser("tscv", help="对搜索结果做 TSCV 多折评估")
-    p.add_argument("--experiment", help="指定单个实验 (格式: dlinear_exp_57)")
-    p.add_argument("--top-n", type=int, default=5, help="取 search_results 前 N 名 (默认 5)")
-    p.add_argument("--force", action="store_true", help="覆盖已完成的评估")
-
-    # retrain
-    p = sub.add_parser("retrain", help="从 TSCV 实验在全量数据上训练部署模型")
-    p.add_argument("--source", required=True, help="实验目录路径 (如 model/TSCV/bayes_dlinear_74_3/exp_11)")
-    p.add_argument("--force", action="store_true", help="覆盖已存在的 full/ 目录")
-    p.add_argument("--data-file", default=None, help="训练数据文件 (默认使用实验 config.json 中的 data_file)")
-
     args = parser.parse_args()
 
     # Setup log file for batch commands
-    if hasattr(args, "log") and args.command in ("batch-reproduce", "reproduce-live"):
+    if hasattr(args, "log") and args.command in ("batch-reproduce",):
         global _LOG_FILE
         _LOG_FILE = args.log
         os.makedirs(os.path.dirname(args.log), exist_ok=True)
@@ -1329,11 +633,8 @@ def main():
         "archive": cmd_archive,
         "reproduce": cmd_reproduce,
         "batch-reproduce": cmd_batch_reproduce,
-        "reproduce-live": cmd_reproduce_live,
         "compare": cmd_compare,
         "upgrade": cmd_upgrade,
-        "tscv": cmd_tscv,
-        "retrain": cmd_retrain,
     }
     fns[args.command](args)
 
