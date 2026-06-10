@@ -13,6 +13,10 @@ import tempfile
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field
 from datetime import datetime
+try:
+    from .risk_strategies import RiskStrategy
+except ImportError:
+    from risk_strategies import RiskStrategy
 
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
@@ -358,6 +362,7 @@ class BacktestEngine:
         strategy_params=None,
         log=False,
         log_file=None,
+        risk_manager_config=None,
     ):
         self.initial_capital = initial_capital
         self.commission = commission
@@ -370,6 +375,8 @@ class BacktestEngine:
         self.log_file = log_file
 
         self.cash = initial_capital
+        self._risk_strategy = RiskStrategy.from_config(risk_manager_config or {})
+        self._risk_enabled = (risk_manager_config or {}).get("enabled", False)
         self.positions = {}
         self.positions_prev = {}
         self.pre_rebalance_positions = {}
@@ -688,6 +695,19 @@ class BacktestEngine:
                     self.strategy_params["liq_dict"] = liq_dict
                 weights = self._compute_weights(predictions, self.top_k)
 
+                # 风控: 计算仓位乘数
+                if self._risk_enabled:
+                    risk_mult = self._risk_strategy.get_multiplier(
+                        current_date, price_data, self.positions, self.equity_curve
+                    )
+                    if risk_mult < 1.0 and self.log:
+                        self._write_log(
+                            f"风控触发: multiplier={risk_mult:.2f} (策略={type(self._risk_strategy).__name__})"
+                        )
+                else:
+                    risk_mult = 1.0
+                effective_pct = self.position_pct * risk_mult
+
                 for pred in predictions[: self.top_k]:
                     stock = pred["stock_id"]
                     price = price_dict.get(stock, 0)
@@ -697,7 +717,7 @@ class BacktestEngine:
                     exec_price_buy = price * (1 + self.slippage)
                     exec_price_sell = price * (1 - self.slippage)
 
-                    target_value = total_value * self.position_pct * weights.get(stock, 0)
+                    target_value = total_value * effective_pct * weights.get(stock, 0)
                     target_shares = int(target_value / exec_price_buy / 100) * 100
                     if target_shares == 0:
                         continue

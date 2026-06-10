@@ -424,6 +424,7 @@ def run_backtest_sequence(
     commission: float = 0.0003,
     slippage: float = 0.001,
     trade_mode: str = "open",
+    risk_manager_config: dict = None,
 ) -> Dict[str, Any]:
     raw_df = load_etf_data(data_file, dtype={"股票代码": str})
     raw_df["股票代码"] = raw_df["股票代码"].astype(str).str.zfill(6)
@@ -444,6 +445,7 @@ def run_backtest_sequence(
         weight_strategy=weight_strategy,
         strategy_params=strategy_params,
         log=False,
+        risk_manager_config=risk_manager_config,
     )
 
     engine.run(
@@ -1772,6 +1774,7 @@ def daily_eval(
                 commission=config.get("commission", 0.0003),
                 slippage=config.get("slippage", 0.001),
                 trade_mode=trade_mode,
+                risk_manager_config=config.get("risk_manager", {}),
             )
             sequences["average"] = result
             if verbose:
@@ -1823,6 +1826,7 @@ def daily_eval(
                 commission=config.get("commission", 0.0003),
                 slippage=config.get("slippage", 0.001),
                 trade_mode=trade_mode,
+                risk_manager_config=config.get("risk_manager", {}),
             )
             voting_total_models = len(single_backtesters)
             for ph in result.get("predictions_history", []):
@@ -1879,24 +1883,25 @@ def daily_eval(
                         return [{"rank": i+1, "stock_id": sid, "score": sc} for i, (sid, sc) in enumerate(sorted_stocks)]
                     return ensemble_pred
 
-                result = run_backtest_sequence(
-                    predictions_func=_make_ensemble_pred_func(fold_bts),
-                    data_file=str(DATA_FILE),
-                    start_date=start_date,
-                    end_date=end_date,
-                    top_k=top_k,
-                    rebalance_days=rebalance_days,
-                    position_pct=position_pct,
-                    weight_strategy=weight_strategy,
-                    strategy_params=strategy_params,
-                    initial_capital=initial_capital,
-                    commission=config.get("commission", 0.0003),
-                    slippage=config.get("slippage", 0.001),
-                    trade_mode=trade_mode,
-                )
-                sequences[model_key] = result
-                if verbose:
-                    print(f"    ✓ ({time.time()-_t_ens:.0f}s)")
+            result = run_backtest_sequence(
+                predictions_func=pred_func,
+                data_file=str(DATA_FILE),
+                start_date=start_date,
+                end_date=end_date,
+                top_k=top_k,
+                rebalance_days=rebalance_days,
+                position_pct=position_pct,
+                weight_strategy=weight_strategy,
+                strategy_params=strategy_params,
+                initial_capital=initial_capital,
+                commission=config.get("commission", 0.0003),
+                slippage=config.get("slippage", 0.001),
+                trade_mode=trade_mode,
+                risk_manager_config=config.get("risk_manager", {}),
+            )
+            sequences[model_key] = result
+            if verbose:
+                print(f"    ✓ ({time.time()-_t_ens:.0f}s)")
 
         print(f"  ✓ 回测完成 ({time.time()-_t0:.0f}s)")
 
@@ -2807,6 +2812,7 @@ def run_from_predictions(
                 commission=config.get("commission", 0.0003),
                 slippage=config.get("slippage", 0.001),
                 trade_mode=trade_mode,
+                risk_manager_config=config.get("risk_manager", {}),
             )
             sequences[model_key] = result
 

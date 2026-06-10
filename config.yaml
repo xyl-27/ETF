@@ -32,33 +32,34 @@ strategy_params:
 
 # 模型列表
 models:
-  - dir: model/TSCV/bayes_gru_74_3/exp_16/fold_3
+
+  - dir: model/TSCV/bayes_tcn_74_3/exp_43/fold_3
     file: best_model_sharpe.pth
     enabled: true
-    name: gru_16_3
+    name: tcn_43_3
 
-  - dir: model/TSCV/bayes_gru_74_3/exp_16/fold_2
-    file: best_model_sharpe.pth
-    enabled: false
-    name: gru_16_2
-
-  - dir: model/TSCV/bayes_tcn_74_3/exp_5/fold_3
+  - dir: model/TSCV/bayes_gru_74_3/exp_14/fold_3
     file: best_model_sharpe.pth
     enabled: true
-    name: tcn_5_3
+    name: gru_14_3
 
-  - dir: model/TSCV/bayes_dlinear_74_3/exp_17/fold_3
+  - dir: model/TSCV/bayes_dlinear_74_3/exp_22/fold_3
     file: best_model_sharpe.pth
     enabled: true
-    name: dlinear_17_3
+    name: dlinear_22_3
 
-  - dir: model/bayes_gru_74_3_2026-01-01_2026-03-31/exp_57
-    file: best_model_sliding.pth
+  - dir: model/TSCV/bayes_tcn_74_3/exp_54/fold_3
+    file: best_model_sharpe.pth
     enabled: true
+    name: tcn_54_3
 
-  - dir: model/bayes_tcn_74_3_2026-01-01_2026-03-31/exp_63
-    file: best_model_sliding.pth
-    enabled: true
+  # - dir: model/bayes_gru_74_3_2026-01-01_2026-03-31/exp_57
+  #   file: best_model_sliding.pth
+  #   enabled: false
+
+  # - dir: model/bayes_tcn_74_3_2026-01-01_2026-03-31/exp_63
+  #   file: best_model_sliding.pth
+  #   enabled: false
 
 # 融合序列
 average: true                # 启用平均模型
@@ -70,7 +71,7 @@ voting: true                 # 启用投票模型
 #   average       → 平均模型
 #   voting        → 投票模型
 #   <model_key>   → 指定模型
-master: "average"
+master: "first"
 
 # ---- Juejin 掘金回测专属 ----
 # 此处配置覆盖顶层同名参数
@@ -83,6 +84,16 @@ juejin:
   weight_strategy: "kelly"
   strategy_params:
     vol_window: 20
+
+# ---- 风控/止损策略（可插拔） ----
+#   strategy: none | market_breadth | volatility_target | trend_filter | drawdown_stop
+risk_manager:
+  enabled: false
+  strategy: "market_breadth"
+  params:
+    lookback_days: 20
+    high_threshold: 0.30
+    low_threshold: 0.10
 
 # ---- 邮件通知 ----
 email:
