@@ -87,13 +87,14 @@ juejin:
 
 # ---- 风控/止损策略（可插拔） ----
 #   strategy: none | market_breadth | volatility_target | trend_filter | drawdown_stop
+# Optuna搜索最优: lb=11, high_th=16%, low_th=7% → Sharpe+0.085, Calmar+0.238, 99%+实验改善
 risk_manager:
-  enabled: false
+  enabled: true
   strategy: "market_breadth"
   params:
-    lookback_days: 20
-    high_threshold: 0.30
-    low_threshold: 0.10
+    lookback_days: 11
+    high_threshold: 0.16
+    low_threshold: 0.07
 
 # ---- 邮件通知 ----
 email:

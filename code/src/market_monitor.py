@@ -264,13 +264,25 @@ def compute_top_etf_rankings(window=5, current_holdings_set=None, prev_holdings_
         except Exception:
             holdings = set()
 
+    # 5日趋势: 归一化线性回归斜率 (%/day)
+    _trend_map = {}
+    if pivot.shape[1] >= 5:
+        x_t = np.arange(5)
+        for code_t in pivot.index:
+            vals_t = pivot.loc[code_t].iloc[-5:].values
+            if np.any(np.isnan(vals_t)) or np.any(vals_t <= 0):
+                continue
+            mean_t = np.mean(vals_t)
+            slope_t = np.polyfit(x_t, vals_t, 1)[0]
+            _trend_map[code_t] = round(slope_t / mean_t * 100, 2)
+
     etf_names = _load_etf_names()
     top = []
     for code, r in ret.head(10).items():
-        top.append({"code": code, "name": etf_names.get(code, ""), "return": round(r, 2), "held": code in holdings})
+        top.append({"code": code, "name": etf_names.get(code, ""), "return": round(r, 2), "trend_5d": _trend_map.get(code), "held": code in holdings})
     bot = []
     for code, r in ret.tail(10).items():
-        bot.append({"code": code, "name": etf_names.get(code, ""), "return": round(r, 2), "held": code in holdings})
+        bot.append({"code": code, "name": etf_names.get(code, ""), "return": round(r, 2), "trend_5d": _trend_map.get(code), "held": code in holdings})
 
     rank_map = {code: i + 1 for i, code in enumerate(ret.index)}
 
@@ -284,6 +296,7 @@ def compute_top_etf_rankings(window=5, current_holdings_set=None, prev_holdings_
                 "code": code,
                 "name": etf_names.get(code, ""),
                 "return": round(r, 2),
+                "trend_5d": _trend_map.get(code),
                 "rank": rank_map.get(code, 0),
                 "rank_at_rebalance": rebalance_rank_map.get(code, 0),
                 "total": len(ret),
@@ -306,6 +319,7 @@ def compute_top_etf_rankings(window=5, current_holdings_set=None, prev_holdings_
                     "code": code,
                     "name": etf_names.get(code, ""),
                     "return": round(r, 2),
+                    "trend_5d": _trend_map.get(code),
                     "rank": rank_map.get(code, 0),
                     "rank_at_rebalance": prev_rank_map.get(code, 0),
                     "total": len(ret),
@@ -346,6 +360,7 @@ def compute_top_etf_rankings(window=5, current_holdings_set=None, prev_holdings_
                             "code": code,
                             "name": etf_names.get(code, ""),
                             "return": round(r, 2),
+                            "trend_5d": _trend_map.get(code),
                             "rank": rank_map[code],
                             "rank_at_rebalance": pr,
                             "total": len(ret),
@@ -730,6 +745,136 @@ def build_regime_table_html(stats, current_regime=None, breadth_last=None):
     <p style="font-size:10px;color:#999;">市场状态判定: 以HS300滚动20日收益+波动率为基准。牛: >+5%且波动&lt;30%; 熊: &lt;-5%; 震荡: 其余。市场宽度: 同方法对全ETF池子逐只判定后统计占比。</p>"""
 
 
+def compute_virtual_equity_curve(equity_curve):
+    """回算虚拟无风控组合的权益曲线。
+
+    原理：实际日收益 = stock_exposure × stock_component_return (现金收益≈0)。
+    若未使用风控，stock_exposure 应为 actual_stock_exposure / risk_mult (上限100%)。
+    故 virtual_return = min(actual_stock_exposure / prev_risk_mult, 1.0) × (actual_return / actual_stock_exposure)。
+
+    Parameters
+    ----------
+    equity_curve : list[dict]
+        每项含 date, total_value, risk_multiplier, stock_exposure。
+
+    Returns
+    -------
+    (dates, virtual_vals) or None
+    """
+    if not equity_curve or len(equity_curve) < 2:
+        return None
+
+    actual_vals = [e["total_value"] for e in equity_curve]
+    dates = [str(e["date"])[:10] for e in equity_curve]
+
+    virtual_vals = [actual_vals[0]]
+
+    for i in range(1, len(equity_curve)):
+        prev_entry = equity_curve[i - 1]
+        prev_val = actual_vals[i - 1]
+        cur_val = actual_vals[i]
+        actual_return = (cur_val / prev_val - 1)
+
+        prev_stock_exposure = prev_entry.get("stock_exposure", 1.0)
+        prev_risk_mult = prev_entry.get("risk_multiplier", 1.0)
+
+        if prev_stock_exposure > 1e-8 and prev_risk_mult > 1e-8:
+            stock_return = actual_return / prev_stock_exposure
+            virtual_exposure = min(prev_stock_exposure / prev_risk_mult, 1.0)
+            virtual_return = virtual_exposure * stock_return
+        else:
+            virtual_return = actual_return
+
+        virtual_vals.append(virtual_vals[-1] * (1 + virtual_return))
+
+    return dates, virtual_vals
+
+
+def build_risk_state_html(risk_state):
+    """生成风控状态 HTML 片段"""
+    if risk_state is None:
+        return ""
+    rs = risk_state
+    pct = rs["pos_ratio"] * 100
+    mult = rs["multiplier"]
+    pnl = rs.get("risk_pnl")
+    pnl_line = ""
+    if pnl is not None:
+        actual_ret = rs.get("actual_return", 0)
+        virtual_ret = rs.get("virtual_return", 0)
+        pnl_clr = "#cc0000" if pnl >= 0 else "#009900"
+        pnl_line = f"""<br>
+        风控盈亏: <b style="color:{pnl_clr};">{pnl:+.2f}%</b>
+        (实际 {actual_ret:+.2f}% vs 虚拟 {virtual_ret:+.2f}%)"""
+
+    return f"""<div style="margin:8px 0;padding:10px;background:#f8f9fa;border:1px solid #dee2e6;border-radius:5px;font-size:12px;">
+        <b>风控策略</b>: {rs['label']} ({rs['params_str']}) &nbsp;|&nbsp;
+        当前正收益ETF占比: <b>{pct:.1f}%</b> &nbsp;|&nbsp;
+        仓位乘数: <b>{mult:.2f}</b> &nbsp;|&nbsp;
+        状态: {rs['status']}{pnl_line}
+    </div>"""
+
+
+def compute_breadth_risk_state(risk_config=None):
+    """计算当前市场广度风控状态
+
+    Returns
+    -------
+    dict with keys: pos_ratio, multiplier, status, label, params_str
+    """
+    if not risk_config or not risk_config.get("enabled"):
+        return None
+    params = risk_config.get("params", {})
+    lb = params.get("lookback_days", 20)
+    ht = params.get("high_threshold", 0.30)
+    lt = params.get("low_threshold", 0.10)
+
+    df = pd.read_csv(DATA_PATH)
+    df["日期"] = pd.to_datetime(df["日期"])
+    all_dates = sorted(df["日期"].unique())
+    if len(all_dates) < lb + 1:
+        return None
+    end_date = all_dates[-1]
+    start_date = all_dates[-(lb + 1)]
+    start_prices = df[df["日期"] == start_date][["股票代码", "收盘"]]
+    end_prices = df[df["日期"] == end_date][["股票代码", "收盘"]]
+    merged = pd.merge(start_prices, end_prices, on="股票代码", suffixes=("_start", "_end"))
+    if len(merged) < 5:
+        return None
+    returns = (merged["收盘_end"] - merged["收盘_start"]) / merged["收盘_start"]
+    pos_ratio = (returns > 0).mean()
+
+    if pos_ratio >= ht:
+        mult = 1.0
+    elif pos_ratio <= lt:
+        mult = 0.0
+    else:
+        mult = (pos_ratio - lt) / (ht - lt)
+
+    if mult >= 1.0:
+        status = "🟢 正常"
+    elif mult > 0:
+        status = "🟡 缩仓"
+    else:
+        status = "🔴 空仓"
+
+    label = {"market_breadth": "市场广度止损",
+             "volatility_target": "波动率目标",
+             "trend_filter": "趋势过滤",
+             "drawdown_stop": "回撤止损",
+             "none": "无"}.get(risk_config.get("strategy", ""), risk_config.get("strategy", ""))
+
+    params_str = f"回看{lb}天, 阈值{ht:.0%}/{lt:.0%}"
+
+    return {
+        "pos_ratio": pos_ratio,
+        "multiplier": mult,
+        "status": status,
+        "label": label,
+        "params_str": params_str,
+    }
+
+
 def build_recent_table_html(recent):
     """生成近期表现 HTML 表格"""
     rows = ""
@@ -755,6 +900,12 @@ def build_recent_table_html(recent):
 
 def build_etf_rankings_html(top, bot, holdings_data, prev_holdings_data, date_range):
     """生成ETF涨跌排行 + 持仓排行 HTML"""
+    def _trend_cell(tv):
+        if tv is None:
+            return '<td style="text-align:right;color:#999;font-size:10px;">-</td>'
+        clr = "#cc0000" if tv >= 0 else "#009900"
+        return f'<td style="text-align:right;color:{clr};font-weight:bold;font-size:10px;">{tv:+.2f}%</td>'
+
     def rank_rows(items):
         rows = ""
         for i, item in enumerate(items):
@@ -765,6 +916,7 @@ def build_etf_rankings_html(top, bot, holdings_data, prev_holdings_data, date_ra
                 <td style="text-align:center;">{i+1}</td>
                 <td><code>{item['code']}</code>{name_display}{held_tag}</td>
                 <td style="text-align:right;color:{clr};font-weight:bold;">{item['return']:+.2f}%</td>
+                {_trend_cell(item.get('trend_5d'))}
             </tr>"""
         return rows
 
@@ -779,6 +931,7 @@ def build_etf_rankings_html(top, bot, holdings_data, prev_holdings_data, date_ra
             rows += f"""<tr>
                 <td><code>{item['code']}</code>{name_display}</td>
                 <td style="text-align:right;color:{clr};font-weight:bold;">{item['return']:+.2f}%</td>
+                {_trend_cell(item.get('trend_5d'))}
                 <td style="text-align:center;">第{item['rank']}/{item['total']}名{rebalance_str}</td>
             </tr>"""
         return rows
@@ -786,7 +939,7 @@ def build_etf_rankings_html(top, bot, holdings_data, prev_holdings_data, date_ra
     cur_date = holdings_data[0].get("rebalance_date", "") if holdings_data else ""
     cur_date_display = cur_date if cur_date else "-"
     cur_label = f"📦 当前持仓（调仓日: {cur_date_display}）"
-    cur_sec = f"""<tr style="background:#fffde7;"><td colspan="3" style="font-weight:bold;color:#f57f17;">{cur_label}</td></tr>
+    cur_sec = f"""<tr style="background:#fffde7;"><td colspan="4" style="font-weight:bold;color:#f57f17;">{cur_label}</td></tr>
 {holding_rows(holdings_data)}""" if holdings_data else ""
 
     prev_sec = ""
@@ -794,16 +947,16 @@ def build_etf_rankings_html(top, bot, holdings_data, prev_holdings_data, date_ra
         prev_date = prev_holdings_data[0].get("rebalance_date", "")
         prev_date_display = prev_date if prev_date else "-"
         prev_label = f"📋 上期持仓（{prev_date_display}）"
-        prev_sec = f"""<tr style="background:#f3e5f5;"><td colspan="3" style="font-weight:bold;color:#7b1fa2;">{prev_label}</td></tr>
+        prev_sec = f"""<tr style="background:#f3e5f5;"><td colspan="4" style="font-weight:bold;color:#7b1fa2;">{prev_label}</td></tr>
 {holding_rows(prev_holdings_data)}"""
 
     return f"""<h3>ETF 排行榜 {date_range}</h3>
     <table>
-        <thead><tr><th style="text-align:center;">#</th><th>代码</th><th style="text-align:right;">收益率</th></tr></thead>
+        <thead><tr><th style="text-align:center;">#</th><th>代码</th><th style="text-align:right;">收益率</th><th style="text-align:right;font-size:11px;">涨跌趋势<br>(5日)</th></tr></thead>
         <tbody>
-            <tr style="background:#fff5f5;"><td colspan="3" style="font-weight:bold;color:#cc0000;">📈 涨幅前10</td></tr>
+            <tr style="background:#fff5f5;"><td colspan="4" style="font-weight:bold;color:#cc0000;">📈 涨幅前10</td></tr>
             {rank_rows(top)}
-            <tr style="background:#f0fff0;"><td colspan="3" style="font-weight:bold;color:#009900;">📉 跌幅前10</td></tr>
+            <tr style="background:#f0fff0;"><td colspan="4" style="font-weight:bold;color:#009900;">📉 跌幅前10</td></tr>
             {rank_rows(bot)}
             {cur_sec}
             {prev_sec}
@@ -813,7 +966,7 @@ def build_etf_rankings_html(top, bot, holdings_data, prev_holdings_data, date_ra
 
 def run_market_monitor(seq_key=None, verbose=False, current_holdings_set=None, prev_holdings_set=None,
                        current_rebalance_date=None, prev_rebalance_date=None,
-                       ext_dates=None, ext_values=None):
+                       ext_dates=None, ext_values=None, risk_config=None, ext_equity_curve=None):
     """主函数：运行市场监控，返回 stats dict + chart path + HTML section
 
     Parameters
@@ -830,6 +983,9 @@ def run_market_monitor(seq_key=None, verbose=False, current_holdings_set=None, p
         外部 eq curve dates（来自 juejin 等），替代本地 backtest_state.json。
     ext_values : list[float] or None
         外部 eq curve values。
+    ext_equity_curve : list[dict] or None
+        完整 equity curve（含 total_value, risk_multiplier, stock_exposure），
+        用于虚拟无风控组合回算。若提供则替代 ext_dates/ext_values。
     """
     if verbose:
         print("=" * 50)
@@ -853,7 +1009,10 @@ def run_market_monitor(seq_key=None, verbose=False, current_holdings_set=None, p
     if verbose:
         print(f"  Market breadth: bull={breadth_last['bull_pct']:.0f}%  sideways={breadth_last['sideways_pct']:.0f}%  bear={breadth_last['bear_pct']:.0f}%")
 
-    if ext_dates is not None and ext_values is not None:
+    if ext_equity_curve is not None:
+        dates = [e["date"] for e in ext_equity_curve]
+        values = [e["total_value"] for e in ext_equity_curve]
+    elif ext_dates is not None and ext_values is not None:
         dates, values = list(ext_dates), list(ext_values)
     else:
         dates, values = load_backtest_equity(seq_key)
@@ -873,6 +1032,25 @@ def run_market_monitor(seq_key=None, verbose=False, current_holdings_set=None, p
         print(f"  Chart saved: {chart_path}")
 
     regime_html = build_regime_table_html(stats, current_regime, breadth_last)
+
+    # 风控状态
+    risk_state = compute_breadth_risk_state(risk_config)
+
+    # 风控盈亏: 虚拟无风控组合 vs 实际组合
+    if risk_state is not None and ext_equity_curve is not None and len(ext_equity_curve) > 1:
+        virtual_result = compute_virtual_equity_curve(ext_equity_curve)
+        if virtual_result is not None:
+            virtual_dates, virtual_vals = virtual_result
+            actual_total_return = (values[-1] / values[0] - 1) * 100
+            virtual_total_return = (virtual_vals[-1] / virtual_vals[0] - 1) * 100
+            risk_state["risk_pnl"] = round(actual_total_return - virtual_total_return, 2)
+            risk_state["actual_return"] = round(actual_total_return, 2)
+            risk_state["virtual_return"] = round(virtual_total_return, 2)
+            if verbose:
+                print(f"  风控盈亏: 实际 {actual_total_return:+.2f}% / 虚拟 {virtual_total_return:+.2f}% / 差 {risk_state['risk_pnl']:+.2f}%")
+
+    risk_state_html = build_risk_state_html(risk_state)
+
     top, bot, holdings_data, prev_holdings_data, rank_start, rank_end = compute_top_etf_rankings(
         current_holdings_set=current_holdings_set, prev_holdings_set=prev_holdings_set,
         current_rebalance_date=current_rebalance_date, prev_rebalance_date=prev_rebalance_date,
@@ -912,7 +1090,7 @@ def run_market_monitor(seq_key=None, verbose=False, current_holdings_set=None, p
     except Exception as e:
         print(f"  [子图] 生成失败: {e}")
 
-    html_section = regime_html + subplot_html + "<br>" + (rank_html if rank_html else "")
+    html_section = regime_html + risk_state_html + subplot_html + "<br>" + (rank_html if rank_html else "")
 
     json_path = OUTPUT_DIR / "market_monitor.json"
     with open(json_path, "w") as f:
@@ -920,6 +1098,7 @@ def run_market_monitor(seq_key=None, verbose=False, current_holdings_set=None, p
             "stats": stats,
             "current_regime": current_regime,
             "breadth": breadth_last,
+            "risk_manager": risk_state,
             "etf_rankings": {
                 "period": rank_date,
                 "top": top,
@@ -929,7 +1108,7 @@ def run_market_monitor(seq_key=None, verbose=False, current_holdings_set=None, p
             },
             "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M"),
         }, f, indent=2)
-    print(f"  JSON saved: {json_path}")
+        print(f"  JSON saved: {json_path}")
 
     if verbose:
         print("  Done.")

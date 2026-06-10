@@ -529,16 +529,18 @@ class BacktestEngine:
             )
             self._write_log(f"{'=' * 50}\n")
 
+        _date_data_map = {d: grp for d, grp in price_data.groupby("日期")}
+
         for i in range(start_idx, len(dates)):
             current_date = dates[i]
-            date_data = price_data[price_data["日期"] == current_date]
+            date_data = _date_data_map.get(current_date)
             price_dict = dict(zip(date_data["股票代码"], date_data["收盘"]))
             high_limit_dict = dict(zip(date_data["股票代码"], date_data["涨停价"]))
             low_limit_dict = dict(zip(date_data["股票代码"], date_data["跌停价"]))
             paused_dict = dict(zip(date_data["股票代码"], date_data["停牌"]))
             total_value = self.get_total_value(price_dict)
-            self.equity_curve.append({"date": current_date, "total_value": total_value})
-
+            risk_mult = 1.0
+            self.equity_curve.append({"date": current_date, "total_value": total_value, "risk_multiplier": risk_mult, "stock_exposure": (total_value - self.cash) / total_value if total_value > 0 else 0})
             if self.log:
                 position_pct = (
                     (total_value - self.cash) / total_value * 100
@@ -698,7 +700,8 @@ class BacktestEngine:
                 # 风控: 计算仓位乘数
                 if self._risk_enabled:
                     risk_mult = self._risk_strategy.get_multiplier(
-                        current_date, price_data, self.positions, self.equity_curve
+                        current_date, price_data, self.positions, self.equity_curve,
+                        date_data_map=_date_data_map,
                     )
                     if risk_mult < 1.0 and self.log:
                         self._write_log(
@@ -706,6 +709,7 @@ class BacktestEngine:
                         )
                 else:
                     risk_mult = 1.0
+                self.equity_curve[-1]["risk_multiplier"] = risk_mult
                 effective_pct = self.position_pct * risk_mult
 
                 for pred in predictions[: self.top_k]:
@@ -780,6 +784,8 @@ class BacktestEngine:
                 if self.log:
                     self._write_log(f"调仓完成, 组合价值: {total_value:.2f}")
                     self._write_log(f"{'=' * 50}\n")
+
+                self.equity_curve[-1]["stock_exposure"] = (total_value - self.cash) / total_value if total_value > 0 else 0
 
         return self.equity_curve
 

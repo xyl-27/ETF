@@ -660,10 +660,10 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
                       chart_data_url=None, model_stats_section="",
                        equity_data=None, scatter_section="", health_section="",
                        trade_mode="open", pred_signals_section="",
-                       market_monitor_section="", pre_holdings=None,
-                       rebalance_win_rate=None, source="", is_juejin=False,
-                       strategy_info="", trade_history_section="",
-                       llm_analysis_section=""):
+                        market_monitor_section="", pre_holdings=None,
+                        rebalance_win_rate=None, source="", is_juejin=False,
+                        strategy_info="", trade_history_section="",
+                        llm_analysis_section=""):
     """构建报告HTML，各组件已预先准备好"""
     # 排行数据
     _rank_map = _compute_rank_maps(date) if 'date' in locals() or date else {}
@@ -1085,6 +1085,13 @@ def send_report(model_key=None, verbose=False):
     market_monitor_section = ""
     try:
         from market_monitor import run_market_monitor
+        # 加载风控配置
+        _risk_config = {}
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as _f:
+                _risk_config = (yaml.safe_load(_f) or {}).get("risk_manager", {})
+        except Exception:
+            pass
         cur_set = {h["stock_id"] for h in holdings} if holdings else None
         prev_set = {h["stock_id"] for h in pre_holdings} if pre_holdings else None
         # 从 predictions_history 取调仓日
@@ -1098,13 +1105,12 @@ def send_report(model_key=None, verbose=False):
             prev_rb_date = buy_dates[0] if buy_dates else ""
         # 用 seq_data 的 equity curve（来自 juejin / 主序列）而非本地 backtest_state.json
         _ec = seq_data.get("equity_curve", [])
-        _ec_dates = [e["date"] for e in _ec]
-        _ec_vals = [e["total_value"] for e in _ec]
         mm_stats, _, mm_html = run_market_monitor(
             verbose=verbose,
             current_holdings_set=cur_set, prev_holdings_set=prev_set,
             current_rebalance_date=cur_rb_date, prev_rebalance_date=prev_rb_date,
-            ext_dates=_ec_dates, ext_values=_ec_vals,
+            risk_config=_risk_config,
+            ext_equity_curve=_ec,
         )
         market_monitor_section = mm_html
     except Exception as e:
@@ -1179,6 +1185,7 @@ def send_report(model_key=None, verbose=False):
         _hs = health_scores.get(_sk, {})
         if _sr is not None:
             _seq_summary[_sk] = {
+                "display_name": _display_names.get(_sk, _sk.replace("search_", "").replace("_exp_", " ").replace("_full", " (full)")),
                 "strategy_return_pct": _sr,
                 "total_trades": _smst.get("total_trades", 0),
                 "win_rate": _smst.get("total_win_rate_pct", 0),

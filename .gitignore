@@ -71,3 +71,4 @@ juejin/live/**/full/
 
 # 实盘预测数据
 juejin/live/predictions.json
+.env

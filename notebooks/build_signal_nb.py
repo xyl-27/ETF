@@ -795,6 +795,112 @@ ax.grid(True, alpha=0.2)
 plt.tight_layout()
 plt.show()"""))
 
+# ── 15: 全验证集止损策略对比 ──
+nb["cells"].append(code("""# ═══════════════════════════════════════════
+# 全验证集: 无止损 vs 市场广度止损 对比
+# ═══════════════════════════════════════════
+
+# 用 fwd_matrix 计算每日市场趋势
+# fwd_matrix[d] = 各 stock 在 day d+1 的 open-close 收益
+# 所以 "day d 的市场情况" ≈ fwd_matrix[d-1] 的统计量
+LOOKBACK = 20
+HIGH_TH = 0.30   # 正收益ETF占比≥此值 → 正常仓位
+LOW_TH = 0.10    # 正收益ETF占比≤此值 → 空仓
+
+def _market_multiplier(day_idx):
+    \"\"\"return 0.0~1.0 仓位乘数\"\"\"
+    if day_idx < 1:
+        return 1.0
+    start = max(0, day_idx - 1 - LOOKBACK)
+    end = day_idx  # fwd_matrix[end-1] 是 day_idx-1 的收益
+    window = fwd_matrix[start:end]  # shape: (N, n_stocks)
+    if len(window) < 5:
+        return 1.0
+    # 计算每只股票在窗口内的累计 fwd_ret
+    cum_rets = np.nansum(window, axis=0)
+    valid = cum_rets[~np.isnan(cum_rets)]
+    if len(valid) < 5:
+        return 1.0
+    pos_ratio = (valid > 0).mean()
+    if pos_ratio >= HIGH_TH:
+        return 1.0
+    if pos_ratio <= LOW_TH:
+        return 0.0
+    return (pos_ratio - LOW_TH) / (HIGH_TH - LOW_TH)
+
+# 对每个实验计算有止损版本的 cumulative return
+sl_improvements = []
+for rec in real_records:
+    mt, ei = rec['model_type'], rec['exp_idx']
+    tag = f'{mt}_{ei}'
+    orig = rec['daily_returns']
+    # 止损版本: 每天 apply multiplier
+    sl_ret = []
+    for d in range(len(orig)):
+        mult = _market_multiplier(d)
+        sl_ret.append(orig[d] * mult)
+    sl_ret = np.array(sl_ret)
+    orig_cum = np.cumsum(orig)[-1]
+    sl_cum = np.cumsum(sl_ret)[-1]
+    imp = sl_cum - orig_cum
+    sl_improvements.append((tag, orig_cum, sl_cum, imp))
+
+print('=' * 70)
+print(f'全验证集止损对比 ({len(sl_improvements)} 个实验)')
+print(f'策略: 正收益ETF占比 < {LOW_TH:.0%} 空仓, > {HIGH_TH:.0%} 正常, 中间线性')
+print(f'回看: {LOOKBACK} 天')
+print('=' * 70)
+print(f'{"":<16} {"原始累计":>10} {"止损累计":>10} {"差值":>10} {"改善?":>6}')
+print('-' * 52)
+
+better = [x for x in sl_improvements if x[3] > 0.001]
+worse = [x for x in sl_improvements if x[3] < -0.001]
+neutral = [x for x in sl_improvements if abs(x[3]) <= 0.001]
+
+print(f'改善: {len(better)} 个 ({len(better)/len(sl_improvements)*100:.0f}%)')
+print(f'变差: {len(worse)} 个 ({len(worse)/len(sl_improvements)*100:.0f}%)')
+print(f'持平: {len(neutral)} 个 ({len(neutral)/len(sl_improvements)*100:.0f}%)')
+
+if better:
+    avg_imp = np.mean([x[3] for x in better])
+    print(f'改善平均: +{avg_imp:.4f}')
+if worse:
+    avg_dec = np.mean([x[3] for x in worse])
+    print(f'变差平均: {avg_dec:.4f}')
+
+# 配对 t 检验
+from scipy.stats import ttest_rel
+orig_vals = np.array([x[1] for x in sl_improvements])
+sl_vals = np.array([x[2] for x in sl_improvements])
+t_stat, p_val = ttest_rel(orig_vals, sl_vals)
+print()
+print(f'配对 t 检验: t={t_stat:.3f}, p={p_val:.4f}')
+if p_val < 0.05:
+    print('结论: 止损策略有统计学显著影响')
+else:
+    print('结论: 止损策略无统计学显著影响')
+
+# ── 按模型类型分组 ──
+print()
+print('按模型类型:')
+for mt in sorted(set(x[0].split('_')[0] for x in sl_improvements)):
+    group = [x for x in sl_improvements if x[0].startswith(mt)]
+    g_orig = np.mean([x[1] for x in group])
+    g_sl = np.mean([x[2] for x in group])
+    g_imp = np.mean([x[3] for x in group])
+    print(f'  {mt:<10s} n={len(group):3d}  原始均值={g_orig:.4f}  止损均值={g_sl:.4f}  差值={g_imp:+.4f}')
+
+# ── 频次统计: 止损触发频率 ──
+all_mults = []
+for d in range(n_days):
+    all_mults.append(_market_multiplier(d))
+all_mults = np.array(all_mults)
+print()
+print(f'止损触发统计 ({n_days} 个交易日):')
+print(f'  完全空仓 (mult=0): {(all_mults == 0).sum()} 天 ({(all_mults == 0).mean()*100:.1f}%)')
+print(f'  部分缩仓 (0<mult<1): {((all_mults > 0) & (all_mults < 1)).sum()} 天')
+print(f'  正常仓位 (mult=1): {(all_mults == 1).sum()} 天 ({(all_mults == 1).mean()*100:.1f}%)")"""))
+
 with open("notebooks/signal_vs_random.ipynb", "w") as f:
     json.dump(nb, f, ensure_ascii=False, indent=1)
     f.write("\n")

@@ -180,12 +180,17 @@ def _build_prompt(data: dict) -> str:
     _pri_key = data.get("model_key", "")
     _pri_display = data.get("model_display", _pri_key)
 
-    def _short_name(key):
+    def _model_name(key, sv):
+        dn = sv.get("display_name") if isinstance(sv, dict) else None
+        if dn:
+            return dn
         if key in ("average", "voting", "juejin"):
             return {"average": "平均", "voting": "投票", "juejin": "掘金"}.get(key, key)
         parts = key.split("_")
         if len(parts) >= 2 and parts[-2] == "exp":
             return f"{parts[1]}_exp{parts[-1]}"
+        if len(parts) <= 4 and all(len(p) < 12 for p in parts):
+            return key
         if len(parts) >= 2:
             return f"{parts[1]}_{parts[-1]}"
         return key
@@ -216,7 +221,7 @@ def _build_prompt(data: dict) -> str:
             _sr = _sv.get("strategy_return_pct")
             if _sr is not None:
                 _tag = " ← 主" if _sk == _pri_key else ""
-                _cmp.append(f"{_short_name(_sk)} {_sr:+.2f}%{_tag}")
+                _cmp.append(f"{_model_name(_sk, _sv)} {_sr:+.2f}%{_tag}")
         if _cmp:
             block7_lines.append(f"模型对比: {' | '.join(_cmp)}")
 
@@ -230,7 +235,7 @@ def _build_prompt(data: dict) -> str:
                 _d = _sh.get("details", {})
                 _wr_h = _d.get("wr", "?")
                 _ar_h = _d.get("avgret", "?")
-                _h_details.append(f"{_short_name(_sk)}: {_hs:.0f}分(近3日{_ar_h} / 10日胜率{_wr_h})")
+                _h_details.append(f"{_model_name(_sk, _seqs.get(_sk, {}))}: {_hs:.0f}分(近3日{_ar_h} / 10日胜率{_wr_h})")
         if _h_details:
             block7_lines.append("健康分: " + " | ".join(_h_details))
 
@@ -338,7 +343,7 @@ def _call_deepseek(prompt: str, api_key: str) -> str:
         json={
             "model": LLM_CONFIG["model"],
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 1500,
+            "max_tokens": 4096,
             "temperature": 0.3,
         },
         timeout=45,
