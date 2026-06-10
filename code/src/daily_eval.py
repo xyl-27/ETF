@@ -368,6 +368,7 @@ def load_full_config(config_path=None) -> dict:
         "voting": True,
         "master": "first",
         "juejin": {},
+        "risk_manager": {"enabled": False, "strategy": "none", "params": {}},
     }
     path = Path(config_path) if config_path else CONFIG_PATH
     if not path.exists():
@@ -427,9 +428,10 @@ def run_backtest_sequence(
     risk_manager_config: dict = None,
 ) -> Dict[str, Any]:
     raw_df = load_etf_data(data_file, dtype={"股票代码": str})
-    raw_df["股票代码"] = raw_df["股票代码"].astype(str).str.zfill(6)
+    raw_df["股票代码"] = raw_df["股票代码"].astype(object).str.zfill(6)
     raw_df["日期"] = pd.to_datetime(raw_df["日期"])
     price_data = raw_df.copy()
+    close_pivot = raw_df.pivot_table(index="日期", columns="股票代码", values="收盘")
 
     start_ts = pd.Timestamp(start_date)
     end_ts = pd.Timestamp(end_date)
@@ -459,10 +461,15 @@ def run_backtest_sequence(
 
     equity_curve = []
     for ec in engine.equity_curve:
-        equity_curve.append({
+        entry = {
             "date": ec["date"].strftime("%Y-%m-%d") if isinstance(ec["date"], pd.Timestamp) else str(ec["date"]),
             "total_value": round(ec["total_value"], 2),
-        })
+        }
+        if "risk_multiplier" in ec:
+            entry["risk_multiplier"] = ec["risk_multiplier"]
+        if "stock_exposure" in ec:
+            entry["stock_exposure"] = ec["stock_exposure"]
+        equity_curve.append(entry)
 
     trades = []
     for t in engine.trades:
@@ -562,12 +569,11 @@ def run_backtest_sequence(
         per_position_pnl = []
         for stock_id, pos in engine.positions.items():
             shares = pos["shares"]
-            sub = raw_df[raw_df["股票代码"] == stock_id]
-            today_close_s = sub.loc[sub["日期"] == today_ts, "收盘"]
-            yesterday_close_s = sub.loc[sub["日期"] == yesterday_ts, "收盘"]
-            if not today_close_s.empty and not yesterday_close_s.empty:
-                tc = today_close_s.values[0]
-                yc = yesterday_close_s.values[0]
+            if stock_id not in close_pivot.columns:
+                continue
+            tc = close_pivot.loc[today_ts, stock_id]
+            yc = close_pivot.loc[yesterday_ts, stock_id]
+            if pd.notna(tc) and pd.notna(yc):
                 pnl = round(shares * (tc - yc), 2)
                 pnl_pct = round((tc / yc - 1) * 100, 4) if yc > 0 else 0.0
                 per_position_pnl.append({
@@ -613,11 +619,13 @@ def run_backtest_sequence(
             continue
         cum_rets = []
         for sid in active_stock_ids:
-            sub = raw_df[raw_df["股票代码"] == sid]
-            close_rb = sub.loc[sub["日期"] == pd.Timestamp(active_rb_str), "收盘"]
-            close_d = sub.loc[sub["日期"] == d, "收盘"]
-            if not close_rb.empty and not close_d.empty:
-                cum_rets.append((float(close_d.values[0]) / float(close_rb.values[0]) - 1) * 100)
+            if sid not in close_pivot.columns:
+                cum_rets.append(0.0)
+                continue
+            close_rb = close_pivot.loc[pd.Timestamp(active_rb_str), sid]
+            close_d = close_pivot.loc[d, sid]
+            if pd.notna(close_rb) and pd.notna(close_d):
+                cum_rets.append((float(close_d) / float(close_rb) - 1) * 100)
             else:
                 cum_rets.append(0.0)
 
@@ -1736,6 +1744,7 @@ def daily_eval(
                 commission=config.get("commission", 0.0003),
                 slippage=config.get("slippage", 0.001),
                 trade_mode=trade_mode,
+                risk_manager_config=config.get("risk_manager", {}),
             )
             sequences[model_key] = result
             if verbose:
@@ -2792,7 +2801,7 @@ def run_from_predictions(
             print(f"[3/4] 运行回测...")
 
         sequences = {}
-        config = {"slippage": 0.001, "commission": 0.0003}
+        config = load_full_config()
 
         for model_key, preds_dict in all_predictions.items():
             if verbose:

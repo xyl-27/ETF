@@ -7,7 +7,7 @@ class RiskStrategy(ABC):
     """止损策略基类"""
 
     @abstractmethod
-    def get_multiplier(self, current_date, price_data, positions, equity_curve):
+    def get_multiplier(self, current_date, price_data, positions, equity_curve, date_data_map=None):
         """返回 0.0~1.0 仓位乘数"""
         pass
 
@@ -30,7 +30,7 @@ class NoRiskControl(RiskStrategy):
     def __init__(self, params=None):
         pass
 
-    def get_multiplier(self, current_date, price_data, positions, equity_curve):
+    def get_multiplier(self, current_date, price_data, positions, equity_curve, date_data_map=None):
         return 1.0
 
 
@@ -43,28 +43,34 @@ class MarketBreadthStrategy(RiskStrategy):
         self.high_threshold = p.get("high_threshold", 0.30)
         self.low_threshold = p.get("low_threshold", 0.10)
 
-    def get_multiplier(self, current_date, price_data, positions, equity_curve):
-        data = price_data[price_data["日期"] <= current_date]
-        if len(data) < self.lookback_days + 1:
+    def get_multiplier(self, current_date, price_data, positions, equity_curve, date_data_map=None):
+        if date_data_map is not None:
+            all_dates = sorted(d for d in date_data_map if d <= current_date)
+            if len(all_dates) < self.lookback_days + 1:
+                return 1.0
+            start_date = all_dates[-(self.lookback_days + 1)]
+            start_prices = date_data_map[start_date].set_index("股票代码")["收盘"]
+            end_prices = date_data_map[current_date].set_index("股票代码")["收盘"]
+        else:
+            data = price_data[price_data["日期"] <= current_date]
+            if len(data) < self.lookback_days + 1:
+                return 1.0
+            all_dates = sorted(data["日期"].unique())
+            if len(all_dates) < self.lookback_days + 1:
+                return 1.0
+            start_date = all_dates[-(self.lookback_days + 1)]
+            end_date = all_dates[-1]
+            start_prices = data[data["日期"] == start_date].set_index("股票代码")["收盘"]
+            end_prices = data[data["日期"] == end_date].set_index("股票代码")["收盘"]
+        if len(start_prices) < 5 or len(end_prices) < 5:
             return 1.0
-        all_dates = sorted(data["日期"].unique())
-        if len(all_dates) < self.lookback_days + 1:
-            return 1.0
-        start_date = all_dates[-(self.lookback_days + 1)]
-        end_date = all_dates[-1]
-        start_prices = data[data["日期"] == start_date][["股票代码", "收盘"]]
-        end_prices = data[data["日期"] == end_date][["股票代码", "收盘"]]
-        merged = pd.merge(start_prices, end_prices, on="股票代码", suffixes=("_start", "_end"))
-        if len(merged) < 5:
-            return 1.0
-        returns = (merged["收盘_end"] - merged["收盘_start"]) / merged["收盘_start"]
+        returns = (end_prices - start_prices) / start_prices
         pos_ratio = (returns > 0).mean()
         if pos_ratio >= self.high_threshold:
             return 1.0
         if pos_ratio <= self.low_threshold:
             return 0.0
-        ratio = (pos_ratio - self.low_threshold) / (self.high_threshold - self.low_threshold)
-        return ratio
+        return (pos_ratio - self.low_threshold) / (self.high_threshold - self.low_threshold)
 
 
 class VolatilityTargetStrategy(RiskStrategy):
@@ -76,7 +82,7 @@ class VolatilityTargetStrategy(RiskStrategy):
         self.n_std = p.get("n_std", 1.0)
         self.max_std = p.get("max_std", 2.0)
 
-    def get_multiplier(self, current_date, price_data, positions, equity_curve):
+    def get_multiplier(self, current_date, price_data, positions, equity_curve, date_data_map=None):
         data = price_data[price_data["日期"] <= current_date]
         if len(data) < self.lookback_days + 2:
             return 1.0
@@ -119,7 +125,7 @@ class TrendFilterStrategy(RiskStrategy):
         self.entry_threshold = p.get("entry_threshold", 1.0)
         self.exit_threshold = p.get("exit_threshold", 0.98)
 
-    def get_multiplier(self, current_date, price_data, positions, equity_curve):
+    def get_multiplier(self, current_date, price_data, positions, equity_curve, date_data_map=None):
         data = price_data[price_data["日期"] <= current_date]
         if len(data) < self.slow:
             return 1.0
@@ -152,7 +158,7 @@ class DrawdownStopStrategy(RiskStrategy):
         self.dd_low = p.get("dd_low", 0.05)
         self.dd_high = p.get("dd_high", 0.10)
 
-    def get_multiplier(self, current_date, price_data, positions, equity_curve):
+    def get_multiplier(self, current_date, price_data, positions, equity_curve, date_data_map=None):
         if not equity_curve:
             return 1.0
         values = [e["total_value"] for e in equity_curve]
