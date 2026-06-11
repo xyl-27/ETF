@@ -339,6 +339,7 @@ def load_model_selection(path: str = None, cfg_dict: dict = None) -> Tuple[List[
                 "type": m.get("type", "dl"),
                 "enabled": enabled,
                 "name": m.get("name", ""),
+                "weight": m.get("weight", 1.0),
             })
     return models, master, average_enabled, voting_enabled
 
@@ -353,7 +354,9 @@ def _format_strategy_info(weight_strategy, strategy_params, top_k, position_pct,
     sname = {"equal": "等权", "softmax": "Softmax", "rank_linear": "线性排名",
              "risk_parity": "风险平价", "score_risk": "评分风险",
              "score_risk_v1": "评分风险V1",
-             "kelly": "Kelly", "liquidity": "流动性优先"}.get(weight_strategy, weight_strategy)
+             "kelly": "Kelly", "liquidity": "流动性优先",
+             "dynamic_gap": "动态差距", "concentrated": "集中",
+             "score_power_2": "评分二次", "score_power_3": "评分三次"}.get(weight_strategy, weight_strategy)
     return (
         f"策略: {sname}{extra}"
         f" | Top-K: {top_k}"
@@ -382,6 +385,8 @@ def load_full_config(config_path=None) -> dict:
         "models": [],
         "average": True,
         "voting": True,
+        "wvoting_sr": False,
+        "avg_rank_sub": {"enabled": False, "models": [], "weight_strategy": "dynamic_gap", "position_pct": 0.90},
         "master": "first",
         "juejin": {},
         "risk_manager": {"enabled": False, "strategy": "none", "params": {}},
@@ -1565,10 +1570,10 @@ def _resolve_report_key(sequences):
             return master
         # master 指定了但不存在（如 juejin 但回测尚未运行），取第一个真实模型
         for key in sequences:
-            if key not in ("juejin", "average", "voting"):
+            if key not in ("juejin", "average", "voting", "wvoting_sr", "avg_rank_sub"):
                 return key
-    # 未指定 master: 兜底优先级 juejin → average → voting → 第一个
-    for pref in ["juejin", "average", "voting"]:
+    # 未指定 master: 兜底优先级 juejin → average → voting → wvoting_sr → avg_rank_sub → 第一个
+    for pref in ["juejin", "average", "voting", "wvoting_sr", "avg_rank_sub"]:
         if pref in sequences:
             return pref
     return list(sequences.keys())[0] if sequences else None
@@ -1662,10 +1667,14 @@ def daily_eval(
         single_models = []
         average_enabled = False
         voting_enabled = False
+        wvoting_sr_enabled = False
+        avg_rank_sub_cfg = {"enabled": False, "models": [], "weight_strategy": "dynamic_gap", "position_pct": 0.90}
         config = {"slippage": 0.001, "commission": 0.0003}
         if CONFIG_PATH.exists():
             cfg_dict = load_full_config()
             single_models, master, average_enabled, voting_enabled = load_model_selection(cfg_dict=cfg_dict)
+            wvoting_sr_enabled = cfg_dict.get("wvoting_sr", False)
+            avg_rank_sub_cfg = cfg_dict.get("avg_rank_sub", avg_rank_sub_cfg)
         elif os.path.exists(str(MODEL_SELECTION_PATH)):
             single_models, master, average_enabled, voting_enabled = load_model_selection(path=str(MODEL_SELECTION_PATH))
         if single_models:
@@ -1902,6 +1911,120 @@ def daily_eval(
             sequences["voting"] = result
             if verbose:
                 print(f"    ✓ ({time.time()-_t_vote:.0f}s)")
+
+        # avg_rank sub-ensemble
+        _avg_rank_sub_keys = set(avg_rank_sub_cfg.get("models", []))
+        _avg_rank_sub_ws = avg_rank_sub_cfg.get("weight_strategy", "dynamic_gap")
+        _avg_rank_sub_pp = avg_rank_sub_cfg.get("position_pct", 0.90)
+        _avg_rank_sub_enabled = avg_rank_sub_cfg.get("enabled", False) and len(_avg_rank_sub_keys) >= 2
+        _avg_rank_sub_bts = [(m, bt) for m, bt in single_backtesters
+                             if _make_model_key(m) in _avg_rank_sub_keys] if _avg_rank_sub_enabled else []
+        if _avg_rank_sub_enabled and len(_avg_rank_sub_bts) >= 2:
+            _t_ars = time.time()
+            if verbose:
+                print(f"  回测 avg_rank sub-ensemble ({len(_avg_rank_sub_bts)}个模型, {_avg_rank_sub_ws} pp={_avg_rank_sub_pp})...")
+
+            def avg_rank_sub_pred_func(date):
+                all_preds = []
+                for _, bt in _avg_rank_sub_bts:
+                    preds = bt._get_predictions(date)
+                    if preds is None:
+                        return None
+                    all_preds.append(preds)
+                n = len(all_preds[0])
+                all_r = {}
+                for preds in all_preds:
+                    for i, p in enumerate(preds):
+                        all_r.setdefault(p["stock_id"], []).append(i + 1)
+                avg = {s: float(np.mean(r)) for s, r in all_r.items()}
+                ranked = sorted(avg.items(), key=lambda x: x[1])
+                return [{"rank": i+1, "stock_id": s, "score": float(n-i)} for i, (s, _) in enumerate(ranked)]
+
+            result = run_backtest_sequence(
+                predictions_func=avg_rank_sub_pred_func,
+                data_file=str(DATA_FILE),
+                start_date=start_date,
+                end_date=end_date,
+                top_k=top_k,
+                rebalance_days=rebalance_days,
+                position_pct=_avg_rank_sub_pp,
+                weight_strategy=_avg_rank_sub_ws,
+                strategy_params=strategy_params,
+                initial_capital=initial_capital,
+                commission=config.get("commission", 0.0003),
+                slippage=config.get("slippage", 0.001),
+                trade_mode=trade_mode,
+                risk_manager_config=config.get("risk_manager", {}),
+            )
+            sequences["avg_rank_sub"] = result
+            if verbose:
+                print(f"    ✓ ({time.time()-_t_ars:.0f}s)")
+
+        if wvoting_sr_enabled and len(single_backtesters) >= 2:
+            _t_wv = time.time()
+            if verbose:
+                print(f"  回测加权投票 ({len(single_backtesters)}个模型)...")
+            model_weights = {m["exp_dir"]: m.get("weight", 1.0) for m in single_models}
+            wvoting_pred_cache = {}
+
+            def wvoting_sr_pred_func(date):
+                nonlocal wvoting_pred_cache
+                all_preds = []
+                for m, bt in single_backtesters:
+                    preds = bt._get_predictions(date)
+                    if preds is None:
+                        return None
+                    all_preds.append((m, preds))
+                weighted_freq = {}
+                weighted_score = {}
+                total_weight = {}
+                for m, preds in all_preds:
+                    w = model_weights.get(m["exp_dir"], 1.0)
+                    for i, p in enumerate(preds):
+                        if i >= top_k * 3:
+                            break
+                        sid = p["stock_id"]
+                        weighted_freq[sid] = weighted_freq.get(sid, 0) + w
+                        weighted_score[sid] = weighted_score.get(sid, 0) + w * p["score"]
+                        total_weight[sid] = total_weight.get(sid, 0) + w
+                for sid in weighted_score:
+                    weighted_score[sid] /= total_weight.get(sid, 1)
+                ranked = sorted(weighted_freq.items(), key=lambda x: (-x[1], -weighted_score.get(x[0], 0)))[:max(top_k, 10)]
+                result = [{"rank": i+1, "stock_id": sid, "score": float(freq)} for i, (sid, freq) in enumerate(ranked)]
+                wvoting_pred_cache[date] = {"ranked": ranked, "top_k": top_k}
+                return result
+
+            result = run_backtest_sequence(
+                predictions_func=wvoting_sr_pred_func,
+                data_file=str(DATA_FILE),
+                start_date=start_date,
+                end_date=end_date,
+                top_k=top_k,
+                rebalance_days=rebalance_days,
+                position_pct=position_pct,
+                weight_strategy=weight_strategy,
+                strategy_params=strategy_params,
+                initial_capital=initial_capital,
+                commission=config.get("commission", 0.0003),
+                slippage=config.get("slippage", 0.001),
+                trade_mode=trade_mode,
+                risk_manager_config=config.get("risk_manager", {}),
+            )
+            wvoting_total_models = len(single_backtesters)
+            for ph in result.get("predictions_history", []):
+                ph["voting_total_models"] = wvoting_total_models
+            for t in result.get("trades", []):
+                if t.get("action") == "买入" and t["date"] in wvoting_pred_cache:
+                    cache = wvoting_pred_cache[t["date"]]
+                    full_ranked = cache["ranked"]
+                    k = cache["top_k"]
+                    cutoff_votes = full_ranked[k][1] if len(full_ranked) > k else 0
+                    stock_votes = next((f for sid, f in full_ranked if sid == t["stock"]), 0)
+                    t["score"] = float(stock_votes)
+                    t["advantage"] = int(stock_votes - cutoff_votes)
+            sequences["wvoting_sr"] = result
+            if verbose:
+                print(f"    ✓ ({time.time()-_t_wv:.0f}s)")
 
         if ensemble_models:
             for m in ensemble_models:
@@ -2159,6 +2282,37 @@ def daily_eval(
                         _result = [{"rank": i+1, "stock_id": sid, "score": float(freq)} for i, (sid, freq) in enumerate(_ranked)]
                         _vote_p[_d_str] = _result
                 _full_preds["voting"] = _vote_p
+                if wvoting_sr_enabled and len(single_backtesters) >= 2:
+                    _wv_model_weights = {m["exp_dir"]: m.get("weight", 1.0) for m in single_models}
+                    _wv_p = {}
+                    for _d in sorted(_seed_dates_full):
+                        _d_str = _d.strftime("%Y-%m-%d")
+                        _all_preds = []
+                        for _m_wv, _bt_wv in single_backtesters:
+                            _p2 = _bt_wv._get_predictions(_d)
+                            if _p2 is None:
+                                _all_preds = None
+                                break
+                            _all_preds.append((_m_wv, _p2))
+                        if _all_preds:
+                            _wf = {}
+                            _wsc = {}
+                            _tw = {}
+                            for _m_wv, _preds in _all_preds:
+                                _w_ = _wv_model_weights.get(_m_wv["exp_dir"], 1.0)
+                                for _i, _p in enumerate(_preds):
+                                    if _i >= top_k * 3:
+                                        break
+                                    _sid = _p["stock_id"]
+                                    _wf[_sid] = _wf.get(_sid, 0) + _w_
+                                    _wsc[_sid] = _wsc.get(_sid, 0) + _w_ * _p["score"]
+                                    _tw[_sid] = _tw.get(_sid, 0) + _w_
+                            for _sid in _wsc:
+                                _wsc[_sid] /= _tw.get(_sid, 1)
+                            _ranked = sorted(_wf.items(), key=lambda x: (-x[1], -_wsc.get(x[0], 0)))[:top_k]
+                            _result = [{"rank": i+1, "stock_id": sid, "score": float(freq)} for i, (sid, freq) in enumerate(_ranked)]
+                            _wv_p[_d_str] = _result
+                    _full_preds["wvoting_sr"] = _wv_p
             _full_preds["_meta"] = {
                 "start_date": start_date,
                 "backtest_dates": [d.strftime("%Y-%m-%d") for d in _backtest_dates_full],
@@ -2548,6 +2702,7 @@ def generate_predictions_only(
         single_models = []
         average_enabled = False
         voting_enabled = False
+        cfg_dict = {}
         if CONFIG_PATH.exists():
             cfg_dict = load_full_config()
             single_models, master, average_enabled, voting_enabled = load_model_selection(cfg_dict=cfg_dict)
@@ -2590,7 +2745,17 @@ def generate_predictions_only(
         if has_dl:
             first_model = single_models[0]
             scaler_path = os.path.join(first_model["exp_dir"], "scaler.pkl")
+            if not os.path.exists(scaler_path):
+                parent = os.path.dirname(os.path.normpath(first_model["exp_dir"]))
+                parent_scaler = os.path.join(parent, "scaler.pkl")
+                if os.path.exists(parent_scaler):
+                    scaler_path = parent_scaler
             config_path = os.path.join(first_model["exp_dir"], "config.json")
+            if not os.path.exists(config_path):
+                parent = os.path.dirname(os.path.normpath(first_model["exp_dir"]))
+                parent_cfg = os.path.join(parent, "config.json")
+                if os.path.exists(parent_cfg):
+                    config_path = parent_cfg
             with open(config_path, "r") as f:
                 first_config = json.load(f)
             feature_num = first_config["feature_num"]
@@ -2716,6 +2881,44 @@ def generate_predictions_only(
             all_predictions["voting"] = vote_preds
             if verbose:
                 print(f"    → {len(vote_preds)} 个交易日")
+
+        # 加权投票预测 (wvoting_sr)
+        wvoting_sr_enabled = cfg_dict.get("wvoting_sr", False)
+        if wvoting_sr_enabled and len(single_backtesters) >= 2:
+            if verbose:
+                print(f"  预测: wvoting_sr ({len(single_backtesters)}个模型)...")
+            wv_model_weights = {m["exp_dir"]: m.get("weight", 1.0) for m in single_models}
+            wv_preds = {}
+            for d in sorted(seed_dates):
+                d_str = d.strftime("%Y-%m-%d")
+                all_preds = []
+                for m, bt in single_backtesters:
+                    preds = bt._get_predictions(d)
+                    if preds is None:
+                        all_preds = None
+                        break
+                    all_preds.append((m, preds))
+                if all_preds:
+                    weighted_freq = {}
+                    weighted_score = {}
+                    total_weight = {}
+                    for m, preds in all_preds:
+                        w = wv_model_weights.get(m["exp_dir"], 1.0)
+                        for i, p in enumerate(preds):
+                            if i >= top_k * 3:
+                                break
+                            sid = p["stock_id"]
+                            weighted_freq[sid] = weighted_freq.get(sid, 0) + w
+                            weighted_score[sid] = weighted_score.get(sid, 0) + w * p["score"]
+                            total_weight[sid] = total_weight.get(sid, 0) + w
+                    for sid in weighted_score:
+                        weighted_score[sid] /= total_weight.get(sid, 1)
+                    ranked = sorted(weighted_freq.items(), key=lambda x: (-x[1], -weighted_score.get(x[0], 0)))[:top_k]
+                    result = [{"rank": i+1, "stock_id": sid, "score": float(freq)} for i, (sid, freq) in enumerate(ranked)]
+                    wv_preds[d_str] = result
+            all_predictions["wvoting_sr"] = wv_preds
+            if verbose:
+                print(f"    → {len(wv_preds)} 个交易日")
 
         # Fold 集成平均预测
         if ensemble_models:
@@ -2882,6 +3085,53 @@ def run_from_predictions(
             _t_model_end = _time.time()
             if verbose:
                 print(f"    [TIMING] 回测 {model_key}: {_t_model_end - _t_model:.2f}s")
+
+        # avg_rank sub-ensemble
+        _ars_cfg = config.get("avg_rank_sub", {"enabled": False, "models": [], "weight_strategy": "dynamic_gap", "position_pct": 0.90})
+        _ars_enabled = _ars_cfg.get("enabled", False)
+        _ars_keys = set(_ars_cfg.get("models", []))
+        _ars_pp = _ars_cfg.get("position_pct", 0.90)
+        _ars_ws = _ars_cfg.get("weight_strategy", "dynamic_gap")
+        _ars_preds = {k: v for k, v in all_predictions.items() if k in _ars_keys}
+        if _ars_enabled and len(_ars_preds) >= 2:
+            if verbose:
+                print(f"  回测: avg_rank_sub ({'+'.join(_ars_keys)}, {_ars_ws} pp={_ars_pp})...")
+            _ars_keys_list = sorted(_ars_preds.keys())
+            _ars_all_dates = sorted(set(d for p in _ars_preds.values() for d in p))
+            _ars_fused = {}
+            for d in _ars_all_dates:
+                _dp = {k: _ars_preds[k].get(d) for k in _ars_keys_list}
+                if any(v is None for v in _dp.values()):
+                    continue
+                n = len(_dp[_ars_keys_list[0]])
+                all_r = {}
+                for k in _ars_keys_list:
+                    for i, p in enumerate(_dp[k]):
+                        all_r.setdefault(p["stock_id"], []).append(i + 1)
+                avg = {s: float(np.mean(r)) for s, r in all_r.items()}
+                ranked = sorted(avg.items(), key=lambda x: x[1])
+                _ars_fused[d] = [{"rank": i+1, "stock_id": s, "score": float(n-i)} for i, (s, _) in enumerate(ranked)]
+            _ars_pred_func = _make_predictions_func_from_saved(_ars_fused)
+            _ars_result = run_backtest_sequence(
+                predictions_func=_ars_pred_func,
+                data_file=str(DATA_FILE),
+                start_date=start_date,
+                end_date=end_date,
+                top_k=top_k,
+                rebalance_days=rebalance_days,
+                position_pct=_ars_pp,
+                weight_strategy=_ars_ws,
+                strategy_params=strategy_params,
+                initial_capital=initial_capital,
+                commission=config.get("commission", 0.0003),
+                slippage=config.get("slippage", 0.001),
+                trade_mode=trade_mode,
+                risk_manager_config=config.get("risk_manager", {}),
+            )
+            sequences["avg_rank_sub"] = _ars_result
+            if verbose:
+                print(f"    ✓ ({_time.time()-_t_model:.2f}s)")
+
         _t_backtest = _time.time()
         if verbose:
             print(f"  [TIMING] 全部回测完成: {_t_backtest - _t_data:.2f}s")
@@ -2928,7 +3178,7 @@ def run_from_predictions(
         # 在从预测信号模式中计算投票总模型数
         _voting_n = None
         if "voting" in sequences:
-            _special = {"average", "voting", "juejin"}
+            _special = {"average", "voting", "juejin", "wvoting_sr", "avg_rank_sub"}
             _voting_n = len([k for k in all_predictions if k not in _special])
             for ph in sequences["voting"].get("predictions_history", []):
                 ph["voting_total_models"] = _voting_n
@@ -3129,9 +3379,9 @@ def run_from_predictions(
         # 发送邮件
         try:
             if verbose:
-                _dn = {"average": "平均", "voting": "投票"}
+                _dn = {"average": "平均", "voting": "投票", "wvoting_sr": "加权投票", "avg_rank_sub": "Rank子集成"}
                 if report_key == "juejin":
-                    _rk = next((k for k in sequences if k not in ("juejin", "average", "voting")), report_key)
+                    _rk = next((k for k in sequences if k not in ("juejin", "average", "voting", "wvoting_sr", "avg_rank_sub")), report_key)
                     model_display = _dn.get(_rk, _rk.replace("search_", "").replace("_exp_", " ").replace("_full", " (full)"))
                 else:
                     model_display = _dn.get(report_key, report_key.replace("search_", "").replace("_exp_", " ").replace("_full", " (full)"))
@@ -3651,7 +3901,7 @@ if __name__ == "__main__":
     parser.add_argument("--position-pct", type=float, default=None, help="仓位比例")
     parser.add_argument("--debug", action="store_true", help="打印详细调试日志")
     parser.add_argument("--trade-mode", type=str, default=None, choices=["open", "close"], help="交易模式: open（开盘交易，用前日收盘特征）或 close（收盘交易，用当日收盘特征）")
-    parser.add_argument("--weight-strategy", type=str, default=None, choices=["equal", "softmax", "rank_linear", "risk_parity", "score_risk", "score_risk_v1", "kelly", "liquidity"], help="加权策略")
+    parser.add_argument("--weight-strategy", type=str, default=None, choices=["equal", "softmax", "rank_linear", "risk_parity", "score_risk", "score_risk_v1", "kelly", "liquidity", "dynamic_gap", "concentrated", "score_power_2", "score_power_3"], help="加权策略")
     parser.add_argument("--weight-temperature", type=float, default=None, help="softmax 温度参数，存入 strategy_params['temperature']")
     parser.add_argument("--volatility-window", type=int, default=None, help="波动率计算回看天数，存入 strategy_params['vol_window']")
     parser.add_argument("--clear", action="store_true", help="先清除旧输出文件")

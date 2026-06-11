@@ -43,10 +43,10 @@ models:
     enabled: true
     name: gru_14_3
 
-  - dir: model/TSCV/bayes_dlinear_74_3/exp_22/fold_3
-    file: best_model_sharpe.pth
-    enabled: true
-    name: dlinear_22_3
+  # - dir: model/TSCV/bayes_dlinear_74_3/exp_22/fold_3
+  #   file: best_model_sharpe.pth
+  #   enabled: true
+  #   name: dlinear_22_3
 
   - dir: model/TSCV/bayes_tcn_74_3/exp_54/fold_3
     file: best_model_sharpe.pth
@@ -65,13 +65,25 @@ models:
 average: true                # 启用平均模型
 voting: true                 # 启用投票模型
 
+# 加权投票 (模型权重取 models[].weight)
+wvoting_sr: true
+
+# 子集成 (Rank平均融合，指定模型子集)
+avg_rank_sub:
+  enabled: true
+  models: ["tcn_43_3", "gru_14_3"]   # 参与集成的模型名
+  weight_strategy: "dynamic_gap"
+  position_pct: 0.90
+
 # 主序列
 #   first         → 自动选第一个启用模型
 #   juejin        → 掘金回测
 #   average       → 平均模型
 #   voting        → 投票模型
+#   wvoting_sr    → 加权投票
+#   avg_rank_sub  → Rank平均子集成
 #   <model_key>   → 指定模型
-master: "first"
+master: "avg_rank_sub"
 
 # ---- Juejin 掘金回测专属 ----
 # 此处配置覆盖顶层同名参数

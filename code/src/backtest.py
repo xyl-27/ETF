@@ -345,6 +345,50 @@ def compute_weights(predictions, top_k, weight_strategy="equal", strategy_params
             return {p["stock_id"]: w for p in top_preds}
         return {p["stock_id"]: float(vals[i] / total) for i, p in enumerate(top_preds)}
 
+    if weight_strategy == "score_power_2":
+        scores = np.array([p["score"] for p in top_preds], dtype=np.float64)
+        scores = scores - scores.min() + 1e-8
+        scores = scores ** 2
+        total = scores.sum()
+        if total <= 0:
+            w = 1.0 / n
+            return {p["stock_id"]: w for p in top_preds}
+        return {p["stock_id"]: float(scores[i] / total) for i, p in enumerate(top_preds)}
+
+    if weight_strategy == "score_power_3":
+        scores = np.array([p["score"] for p in top_preds], dtype=np.float64)
+        scores = scores - scores.min() + 1e-8
+        scores = scores ** 3
+        total = scores.sum()
+        if total <= 0:
+            w = 1.0 / n
+            return {p["stock_id"]: w for p in top_preds}
+        return {p["stock_id"]: float(scores[i] / total) for i, p in enumerate(top_preds)}
+
+    if weight_strategy == "dynamic_gap":
+        scores = np.array([p["score"] for p in top_preds], dtype=np.float64)
+        gaps = np.zeros_like(scores)
+        for i in range(n - 1):
+            gaps[i] = max(scores[i] - scores[i + 1], 0)
+        gaps[-1] = max(scores[-1] - 0, 0)
+        total_gap = gaps.sum()
+        if total_gap <= 0:
+            w = 1.0 / n
+            return {p["stock_id"]: w for p in top_preds}
+        return {p["stock_id"]: float(gaps[i] / total_gap) for i, p in enumerate(top_preds)}
+
+    if weight_strategy == "concentrated":
+        weights = {}
+        top_weight = sp.get("top_weight", 0.5)
+        remaining = 1.0 - top_weight
+        rest = max(n - 1, 1)
+        for i, p in enumerate(top_preds):
+            if i == 0:
+                weights[p["stock_id"]] = top_weight
+            else:
+                weights[p["stock_id"]] = remaining / rest
+        return weights
+
     raise ValueError(f"unknown weight_strategy: {weight_strategy}")
 
 
@@ -1382,6 +1426,7 @@ def run_backtest_from_predictions(
     trade_mode: str = "open",
     log: bool = False,
     verbose: bool = False,
+    risk_manager_config: dict = None,
 ) -> BacktestResult:
     """
     从已保存的预测信号运行回测（无需加载模型，速度快）
@@ -1424,6 +1469,7 @@ def run_backtest_from_predictions(
         weight_strategy=weight_strategy,
         strategy_params=strategy_params,
         log=log,
+        risk_manager_config=risk_manager_config,
     )
 
     results = engine.run(
