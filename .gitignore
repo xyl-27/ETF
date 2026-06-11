@@ -59,9 +59,11 @@ joinquant_state.json
 # CatBoost
 catboost_info/
 
-# 其他
+# 临时文件（agent生成）
+tmp/
 test.py
-etf_data/
+
+# 其他
 code/src/train_search_v2.py
 
 # 实盘模型权重

@@ -161,6 +161,29 @@ python code/src/daily_eval.py --predictions-only --no-update
 python code/src/train_search_v2.py --model-type itransformer --fresh
 ```
 
+## Project Structure
+
+```
+ETF/
+├── code/
+│   ├── src/              # 核心源码
+│   ├── models/           # 神经网络结构
+│   └── scripts/          # 辅助脚本（get_etf_data.py, get_stock_data.py）
+├── tmp/                  # ⭐ Agent临时文件目录（所有临时脚本放这里！）
+├── test/                 # ⭐ 正式测试文件放这里
+├── juejin/               # 掘金策略
+├── notebooks/            # Jupyter notebooks
+├── output/               # 生成输出（gitignored）
+├── model/                # 模型文件（gitignored）
+├── etf_data/             # ETF数据（gitignored）
+├── config.yaml           # 主配置文件
+├── AGENTS.md
+├── README.md
+└── pyproject.toml
+```
+
+**规则：所有临时文件必须生成到 `tmp/` 目录下，不得放在项目根目录。**
+
 ## Test Commands
 ```bash
 python -m py_compile code/src/daily_eval.py

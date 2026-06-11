@@ -480,7 +480,7 @@ def main(args):
     output_path = os.path.join("./output/", "result.csv")
 
     raw_df = pd.read_csv(data_file, dtype={"股票代码": str})
-    raw_df["股票代码"] = raw_df["股票代码"].astype(str).str.zfill(6)
+    raw_df["股票代码"] = raw_df["股票代码"].astype(object).str.zfill(6)
     raw_df["日期"] = pd.to_datetime(raw_df["日期"])
     latest_date = raw_df["日期"].max()
     stock_ids = sorted(raw_df["股票代码"].unique())

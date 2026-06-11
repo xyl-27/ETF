@@ -10,6 +10,7 @@ import sys
 import smtplib
 import json
 import yaml
+import functools
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
@@ -82,6 +83,7 @@ def _compute_max_drawdown(values):
     return abs(dd) * 100
 
 
+@functools.lru_cache(maxsize=None)
 def _load_etf_names():
     """加载 ETF 代码→名称映射"""
     if not ETF_LIST_PATH.exists():
@@ -365,7 +367,7 @@ def _compute_rank_maps(target_date):
     """Compute 1-day (实时) and 5-day (近5日) return rankings for all ETFs."""
     _df = pd.read_csv(str(PROJECT_ROOT / "etf_data" / "etf_74.csv"))
     _df["日期"] = pd.to_datetime(_df["日期"])
-    _df["股票代码"] = _df["股票代码"].astype(str).str.zfill(6)
+    _df["股票代码"] = _df["股票代码"].astype(object).str.zfill(6)
     target_dt = pd.Timestamp(target_date)
     dates = sorted(_df["日期"].unique())
     avail = [d for d in dates if d <= target_dt]
@@ -400,7 +402,7 @@ def _compute_rank_maps(target_date):
     return results
 
 
-def _build_pred_signals_table(seq_data, report_date, weight_strategy="equal", strategy_params=None, top_k=3, position_pct=0.95, model_name=""):
+def _build_pred_signals_table(seq_data, report_date, weight_strategy="equal", strategy_params=None, top_k=3, position_pct=0.95, model_name="", rank_map=None):
     """从 predictions_history 构建预测信号表（前10名），含权重策略仓位"""
     from backtest import compute_weights
 
@@ -432,7 +434,7 @@ def _build_pred_signals_table(seq_data, report_date, weight_strategy="equal", st
     w_dict = compute_weights(all_preds, top_k, weight_strategy, _merged_sp)
 
     etf_names = _load_etf_names()
-    rank_map = _compute_rank_maps(report_date)
+    rank_map = _compute_rank_maps(report_date) if rank_map is None else rank_map
 
     def _rank_cell(code, key):
         info = rank_map.get(code, {})
@@ -663,10 +665,10 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
                         market_monitor_section="", pre_holdings=None,
                         rebalance_win_rate=None, source="", is_juejin=False,
                         strategy_info="", trade_history_section="",
-                        llm_analysis_section=""):
+                        llm_analysis_section="", rank_map=None):
     """构建报告HTML，各组件已预先准备好"""
     # 排行数据
-    _rank_map = _compute_rank_maps(date) if 'date' in locals() or date else {}
+    _rank_map = _compute_rank_maps(date) if rank_map is None else rank_map
     def _rc(code, key):
         info = _rank_map.get(code, {})
         r = info.get(key)

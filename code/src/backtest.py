@@ -854,7 +854,7 @@ class ETFBacktester:
         # 加载数据
         df = pd.read_csv(data_path)
         df["日期"] = pd.to_datetime(df["日期"])
-        df["股票代码"] = df["股票代码"].astype(str).str.zfill(6)
+        df["股票代码"] = df["股票代码"].astype(object).str.zfill(6)
         df = df.sort_values(["股票代码", "日期"]).reset_index(drop=True)
 
         # 加载scaler
@@ -1395,7 +1395,7 @@ def run_backtest_from_predictions(
     end_ts = pd.Timestamp(end_date)
 
     raw_df = pd.read_csv(data_path, dtype={"股票代码": str})
-    raw_df["股票代码"] = raw_df["股票代码"].astype(str).str.zfill(6)
+    raw_df["股票代码"] = raw_df["股票代码"].astype(object).str.zfill(6)
     raw_df["日期"] = pd.to_datetime(raw_df["日期"])
     all_dates = sorted(raw_df["日期"].unique())
     backtest_dates = [d for d in all_dates if start_ts <= d < end_ts]

@@ -78,7 +78,7 @@ def plot_equity_curves(sequences: Dict[str, Any], data_file: str, initial_capita
 
     # 2. 加载 HS300 数据，从首个交易日开始归一化
     raw_df = load_etf_data(data_file, dtype={"股票代码": str})
-    raw_df["股票代码"] = raw_df["股票代码"].astype(str).str.zfill(6)
+    raw_df["股票代码"] = raw_df["股票代码"].astype(object).str.zfill(6)
     raw_df["日期"] = pd.to_datetime(raw_df["日期"])
     hs300_df = raw_df[raw_df["股票代码"] == "510300.XSHG"].sort_values("日期").copy()
 
@@ -150,10 +150,26 @@ CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 DATA_FILE = PROJECT_ROOT / "etf_data" / "etf_74.csv"
 
 
+_raw_df_cache = None
+_raw_df_cache_key = None
+
 def load_etf_data(path=None, dtype=None):
-    df = pd.read_csv(path or DATA_FILE, dtype=dtype)
-    # 收盘 = 前复权 (calc), 收盘_原始 = raw (display)
+    global _raw_df_cache, _raw_df_cache_key
+    p = path or DATA_FILE
+    key = (str(p), str(dtype))
+    if _raw_df_cache is not None and _raw_df_cache_key == key:
+        return _raw_df_cache.copy()
+    df = pd.read_csv(p, dtype=dtype)
+    _raw_df_cache = df
+    _raw_df_cache_key = key
     return df
+
+
+def _build_pivots(raw_df):
+    close_pivot = raw_df.pivot_table(index="日期", columns="股票代码", values="收盘")
+    hl_pivot = raw_df.pivot_table(index="日期", columns="股票代码", values="涨停价")
+    ll_pivot = raw_df.pivot_table(index="日期", columns="股票代码", values="跌停价")
+    return close_pivot, hl_pivot, ll_pivot
 
 
 # ============================================================
@@ -168,7 +184,7 @@ def _check_data_integrity(verbose: bool = True) -> bool:
 
     try:
         df = pd.read_csv(data_file)
-        df["股票代码"] = df["股票代码"].astype(str).str.zfill(6)
+        df["股票代码"] = df["股票代码"].astype(object).str.zfill(6)
 
         # 从模型 config 读取 seq_length
         cfg = load_full_config()
@@ -1001,8 +1017,9 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
         return
 
     raw_df = load_etf_data(data_file, dtype={"股票代码": str})
-    raw_df["股票代码"] = raw_df["股票代码"].astype(str).str.zfill(6)
+    raw_df["股票代码"] = raw_df["股票代码"].astype(object).str.zfill(6)
     raw_df["日期"] = pd.to_datetime(raw_df["日期"])
+    close_pivot, hl_pivot, ll_pivot = _build_pivots(raw_df)
     hs300_raw = raw_df[raw_df["股票代码"] == "510300.XSHG"][["日期", "收盘"]].copy()
     hs300_raw = hs300_raw.rename(columns={"日期": "date", "收盘": "close"})
     hs300_raw = hs300_raw.sort_values("date").reset_index(drop=True)
@@ -1022,10 +1039,39 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
         yesterday_total = ec_seg[-2]["total_value"] if len(ec_seg) >= 2 else today_total
         today_ts = pd.Timestamp(cur_date)
 
+        # rank map from close_pivot (avoids CSV read + pivot rebuild)
+        # close_pivot: index=日期 (Timestamp), columns=股票代码 (str)
+        _p = close_pivot[close_pivot.index <= today_ts]
+        _rank_map = {}
+        if len(_p) >= 6:
+            _r5 = (_p.iloc[-1] / _p.iloc[-6] - 1) * 100
+            _rk5 = _r5.dropna().sort_values(ascending=False)
+            for i, code in enumerate(_rk5.index):
+                _rank_map.setdefault(code, {})["rank_5d"] = i + 1
+                _rank_map[code]["ret_5d"] = round(float(_rk5.iloc[i]), 2)
+        if len(_p) >= 2:
+            _r1 = (_p.iloc[-1] / _p.iloc[-2] - 1) * 100
+            _rk1 = _r1.dropna().sort_values(ascending=False)
+            for i, code in enumerate(_rk1.index):
+                _rank_map.setdefault(code, {})["rank_1d"] = i + 1
+                _rank_map[code]["ret_1d"] = round(float(_rk1.iloc[i]), 2)
+        if len(_p) >= 5:
+            _x = np.arange(5)
+            for code in _p.columns:
+                _vals = _p[code].iloc[-5:].values
+                if np.any(np.isnan(_vals)) or np.any(_vals <= 0):
+                    continue
+                _slope = np.polyfit(_x, _vals, 1)[0]
+                _trend = _slope / np.mean(_vals) * 100
+                _rank_map.setdefault(code, {})["trend_5d"] = round(float(_trend), 2)
+
         today_trades_list = []
         if is_rebalance:
-            next_dates = raw_df[raw_df["日期"] > today_ts]["日期"].unique()
-            price_date = min(next_dates) if len(next_dates) > 0 else today_ts
+            _all_trading_dates = close_pivot.index
+            _date_idx = _all_trading_dates.get_loc(today_ts)
+            if isinstance(_date_idx, slice):
+                _date_idx = _date_idx.stop - 1
+            price_date = _all_trading_dates[_date_idx + 1] if _date_idx + 1 < len(_all_trading_dates) else today_ts
             for key, s in all_sequences.items():
                 seq_actual = [t for t in s.get("trades", []) if t["date"] == cur_date and t["action"] in ("买入", "卖出")]
                 for t in seq_actual:
@@ -1036,9 +1082,8 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
                     hist_positions = _rebuild_positions(s.get("trades", []), cur_date)
                     for sid, sp in hist_positions.items():
                         if sid not in seq_buys:
-                            sub = raw_df[raw_df["股票代码"] == sid]
-                            tc_s = sub.loc[sub["日期"] == price_date, "收盘"]
-                            price = tc_s.values[0] if not tc_s.empty else 0
+                            price = close_pivot.loc[price_date, sid] if sid in close_pivot.columns else 0
+                            price = 0 if pd.isna(price) else price
                             today_trades_list.append({
                                 "action": "保持",
                                 "stock": sid,
@@ -1063,11 +1108,11 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
 
             # 涨停价/跌停价
             for t in today_trades_list:
-                sub = raw_df[raw_df["股票代码"] == t["stock"]]
-                hl_s = sub.loc[sub["日期"] == today_ts, "涨停价"]
-                ll_s = sub.loc[sub["日期"] == today_ts, "跌停价"]
-                t["high_limit"] = round(float(hl_s.values[0]), 4) if not hl_s.empty else 0
-                t["low_limit"] = round(float(ll_s.values[0]), 4) if not ll_s.empty else 0
+                sid = t["stock"]
+                hl = hl_pivot.loc[today_ts, sid] if sid in hl_pivot.columns else 0
+                ll = ll_pivot.loc[today_ts, sid] if sid in ll_pivot.columns else 0
+                t["high_limit"] = 0 if pd.isna(hl) else round(float(hl), 4)
+                t["low_limit"] = 0 if pd.isna(ll) else round(float(ll), 4)
 
         # 前一次调仓日
         prev_rb_date = None
@@ -1082,9 +1127,8 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
         if prev_rb_date and is_rebalance:
             prev_ts = pd.Timestamp(prev_rb_date)
             for sid in set(t["stock"] for t in today_trades_list):
-                sub = raw_df[raw_df["股票代码"] == sid]
-                pc_s = sub.loc[sub["日期"] == prev_ts, "收盘"]
-                prev_close_prices[sid] = pc_s.values[0] if not pc_s.empty else 0
+                pc = close_pivot.loc[prev_ts, sid] if sid in close_pivot.columns else 0
+                prev_close_prices[sid] = 0 if pd.isna(pc) else pc
         for t in today_trades_list:
             if t["action"] == "买入":
                 t["reb_pnl"] = None
@@ -1100,8 +1144,8 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
         if cur_date in sorted_dates and sorted_dates.index(cur_date) > 0:
             yesterday_ts = pd.Timestamp(sorted_dates[sorted_dates.index(cur_date) - 1])
         else:
-            prev_dates = raw_df[raw_df["日期"] < today_ts]["日期"].unique()
-            yesterday_ts = pd.Timestamp(max(prev_dates)) if len(prev_dates) > 0 else today_ts
+            _prev_dates = close_pivot.index[close_pivot.index < today_ts]
+            yesterday_ts = _prev_dates[-1] if len(_prev_dates) > 0 else today_ts
 
         today_buys = {t["stock"] for t in trades if t["date"] == cur_date and t["action"] == "买入"}
 
@@ -1122,13 +1166,16 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
                     buy_dates[sid] = hist_trades[0]["date"]
 
         for stock_id, p in positions.items():
-            sub = raw_df[raw_df["股票代码"] == stock_id]
-            tc_s = sub.loc[sub["日期"] == today_ts, "收盘"]
-            yc_s = sub.loc[sub["日期"] == yesterday_ts, "收盘"]
-            hl_s = sub.loc[sub["日期"] == today_ts, "涨停价"]
-            ll_s = sub.loc[sub["日期"] == today_ts, "跌停价"]
-            price = tc_s.values[0] if not tc_s.empty else 0
-            yc = yc_s.values[0] if not yc_s.empty else price
+            if stock_id in close_pivot.columns:
+                price = close_pivot.loc[today_ts, stock_id]
+                price = 0 if pd.isna(price) else price
+                yc = close_pivot.loc[yesterday_ts, stock_id]
+                yc = yc if pd.notna(yc) else price
+            else:
+                price = 0
+                yc = 0
+            hl = hl_pivot.loc[today_ts, stock_id] if stock_id in hl_pivot.columns else 0
+            ll = ll_pivot.loc[today_ts, stock_id] if stock_id in ll_pivot.columns else 0
             if stock_id in today_buys:
                 pnl = 0
             else:
@@ -1142,8 +1189,8 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
                 "shares": p["shares"],
                 "cost": round(p["cost"], 2),
                 "today_pnl": pnl,
-                "high_limit": round(float(hl_s.values[0]), 4) if not hl_s.empty else 0,
-                "low_limit": round(float(ll_s.values[0]), 4) if not ll_s.empty else 0,
+                "high_limit": 0 if pd.isna(hl) else round(float(hl), 4),
+                "low_limit": 0 if pd.isna(ll) else round(float(ll), 4),
             })
 
         def _compute_metrics(ec_segment, init_cap):
@@ -1249,18 +1296,20 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
         for hkey, hseq in all_sequences.items():
             hist_trades = [t for t in hseq.get("trades", []) if t["date"] <= cur_date]
             hist_positions = _rebuild_positions(hseq.get("trades", []), cur_date)
-            next_dates = raw_df[raw_df["日期"] > today_ts]["日期"].unique()
-            price_date = min(next_dates) if len(next_dates) > 0 else today_ts
+            _all_trading_dates = close_pivot.index
+            _date_idx = _all_trading_dates.get_loc(today_ts)
+            if isinstance(_date_idx, slice):
+                _date_idx = _date_idx.stop - 1
+            price_date = _all_trading_dates[_date_idx + 1] if _date_idx + 1 < len(_all_trading_dates) else today_ts
             today_buys_hist = {t["stock"] for t in hist_trades if t["date"] == cur_date and t["action"] == "买入"}
             hist_current_prices = {}
             for sid, sp in hist_positions.items():
-                sub = raw_df[raw_df["股票代码"] == sid]
-                if sid in today_buys_hist:
-                    tc_s = sub.loc[sub["日期"] == today_ts, "收盘"]
-                else:
-                    tc_s = sub.loc[sub["日期"] == price_date, "收盘"]
-                if not tc_s.empty:
-                    hist_current_prices[sid] = tc_s.values[0]
+                if sid not in close_pivot.columns:
+                    continue
+                price_date_lookup = today_ts if sid in today_buys_hist else price_date
+                pc = close_pivot.loc[price_date_lookup, sid]
+                if pd.notna(pc):
+                    hist_current_prices[sid] = pc
             hist_ec = [e for e in hseq.get("equity_curve", []) if e["date"] <= cur_date]
             if len(hist_ec) >= 2:
                 hist_metrics = _compute_metrics(hist_ec, initial_capital)
@@ -1334,9 +1383,8 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
             if day_before_rb:
                 pre_positions = _rebuild_positions(trades, day_before_rb)
                 for stock_id, p in pre_positions.items():
-                    sub = raw_df[raw_df["股票代码"] == stock_id]
-                    tc_s = sub.loc[sub["日期"] == today_ts, "收盘"]
-                    price = tc_s.values[0] if not tc_s.empty else 0
+                    price = close_pivot.loc[today_ts, stock_id] if stock_id in close_pivot.columns else 0
+                    price = 0 if pd.isna(price) else price
                     pre_holdings.append({
                         "stock_id": stock_id,
                         "name": etf_names.get(stock_id, ""),
@@ -1351,9 +1399,9 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
         # 预测信号（截至当前日期）
         hist_ph = [p for p in seq.get("predictions_history", []) if p.get("date", "") <= cur_date]
         hist_seq_data = {**seq, "predictions_history": hist_ph}
-        pred_signals_section = _build_pred_signals_table(hist_seq_data, cur_date, weight_strategy=weight_strategy, strategy_params=strategy_params, top_k=top_k, position_pct=position_pct)
+        pred_signals_section = _build_pred_signals_table(hist_seq_data, cur_date, weight_strategy=weight_strategy, strategy_params=strategy_params, top_k=top_k, position_pct=position_pct, rank_map=_rank_map)
         holdings_at_date = {h["stock_id"] for h in holdings}
-        market_monitor_section = build_market_monitor_section(raw_df, seq, cur_date, holdings_at_date, etf_names)
+        market_monitor_section = build_market_monitor_section(raw_df, seq, cur_date, holdings_at_date, etf_names, close_pivot=close_pivot)
         try:
             html = build_report_html(
                 date=cur_date,
@@ -1378,6 +1426,7 @@ def _save_history_reports(seq, all_sequences, data_file, initial_capital, etf_na
                 source="本地回测",
                 trade_mode=trade_mode,
                 rebalance_win_rate=hist_rebalance_win_rate,
+                rank_map=_rank_map,
             )
             suffix = "(调仓日)" if is_rebalance else ""
             history_path = history_dir / f"{cur_date}{suffix}.html"
@@ -1598,8 +1647,9 @@ def daily_eval(
             _check_data_integrity(verbose=verbose)
 
         raw_df = load_etf_data(DATA_FILE, dtype={"股票代码": str})
-        raw_df["股票代码"] = raw_df["股票代码"].astype(str).str.zfill(6)
+        raw_df["股票代码"] = raw_df["股票代码"].astype(object).str.zfill(6)
         raw_df["日期"] = pd.to_datetime(raw_df["日期"])
+        close_pivot, hl_pivot, ll_pivot = _build_pivots(raw_df)
         latest_date = raw_df["日期"].max()
         latest_date_str = latest_date.strftime("%Y-%m-%d")
         end_date = (latest_date + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
@@ -1970,9 +2020,8 @@ def daily_eval(
                 seq_today_buys = {t["stock"] for t in seq_actual_trades if t["action"] == "买入"}
                 for sid, pos in seq.get("positions", {}).items():
                     if sid not in seq_today_buys:
-                        sub = raw_df[raw_df["股票代码"] == sid]
-                        tc_s = sub.loc[sub["日期"] == hold_price_date, "收盘"]
-                        price = round(tc_s.values[0], 4) if not tc_s.empty else 0
+                        price = close_pivot.loc[hold_price_date, sid] if sid in close_pivot.columns else 0
+                        price = 0 if pd.isna(price) else round(price, 4)
                         all_today_trades.append({
                             "action": "保持",
                             "stock": sid,
@@ -1992,11 +2041,11 @@ def daily_eval(
 
         # 涨停价/跌停价
         for t in all_today_trades:
-            sub = raw_df[raw_df["股票代码"] == t["stock"]]
-            hl_s = sub.loc[sub["日期"] == latest_date, "涨停价"]
-            ll_s = sub.loc[sub["日期"] == latest_date, "跌停价"]
-            t["high_limit"] = round(float(hl_s.values[0]), 4) if not hl_s.empty else 0
-            t["low_limit"] = round(float(ll_s.values[0]), 4) if not ll_s.empty else 0
+            sid = t["stock"]
+            hl = hl_pivot.loc[latest_date, sid] if sid in hl_pivot.columns else 0
+            ll = ll_pivot.loc[latest_date, sid] if sid in ll_pivot.columns else 0
+            t["high_limit"] = 0 if pd.isna(hl) else round(float(hl), 4)
+            t["low_limit"] = 0 if pd.isna(ll) else round(float(ll), 4)
 
         # 持久化保存最新调仓价（仅取主序列的调仓价格）
         last_trade_prices = {}
@@ -2030,10 +2079,8 @@ def daily_eval(
                     if sid in rb_buys:
                         last_trade_prices[sid] = rb_buys[sid]
                     else:
-                        sub = raw_df[raw_df["股票代码"] == sid]
-                        tc_s = sub.loc[sub["日期"] == hold_date, "收盘"]
-                        price = tc_s.values[0] if not tc_s.empty else 0
-                        if price > 0:
+                        price = close_pivot.loc[hold_date, sid] if sid in close_pivot.columns else 0
+                        if pd.notna(price) and price > 0:
                             last_trade_prices[sid] = round(price, 4)
         report_data["metrics"]["last_trade_prices"] = last_trade_prices
 
@@ -2136,7 +2183,7 @@ def daily_eval(
                 prev_rb_date = trade_dates[idx - 1]
         if prev_rb_date:
             m_raw = load_etf_data(DATA_FILE, dtype={"股票代码": str})
-            m_raw["股票代码"] = m_raw["股票代码"].astype(str).str.zfill(6)
+            m_raw["股票代码"] = m_raw["股票代码"].astype(object).str.zfill(6)
             m_raw["日期"] = pd.to_datetime(m_raw["日期"])
             prev_ts = pd.Timestamp(prev_rb_date)
             all_stocks = set(t["stock"] for t in today_trades + all_today_trades)
@@ -2175,10 +2222,9 @@ def daily_eval(
         if rb_ref_date:
             rb_ts = pd.Timestamp(rb_ref_date)
             for stock_id in display_positions:
-                sub = raw_df[raw_df["股票代码"] == stock_id]
-                pc_s = sub.loc[sub["日期"] == rb_ts, "收盘"]
-                if not pc_s.empty:
-                    rb_close_prices[stock_id] = float(pc_s.values[0])
+                pc = close_pivot.loc[rb_ts, stock_id] if stock_id in close_pivot.columns else 0
+                if pd.notna(pc):
+                    rb_close_prices[stock_id] = float(pc)
 
         # 加载ETF名称映射
         etf_names = {}
@@ -2207,9 +2253,8 @@ def daily_eval(
                 pass
         for stock_id, pos in display_positions.items():
             price = pnl_positions.get(stock_id, {}).get("today_close", 0)
-            sub = raw_df[raw_df["股票代码"] == stock_id]
-            hl_s = sub.loc[sub["日期"] == latest_date, "涨停价"]
-            ll_s = sub.loc[sub["日期"] == latest_date, "跌停价"]
+            hl = hl_pivot.loc[latest_date, stock_id] if stock_id in hl_pivot.columns else 0
+            ll = ll_pivot.loc[latest_date, stock_id] if stock_id in ll_pivot.columns else 0
             if stock_id in rb_close_prices:
                 buy_price = rb_close_prices[stock_id]
                 buy_date = rb_ref_date
@@ -2230,8 +2275,8 @@ def daily_eval(
                 "buy_date": buy_date,
                 "shares": pos["shares"],
                 "cost": pos["cost"],
-                "high_limit": round(float(hl_s.values[0]), 4) if not hl_s.empty else 0,
-                "low_limit": round(float(ll_s.values[0]), 4) if not ll_s.empty else 0,
+                "high_limit": 0 if pd.isna(hl) else round(float(hl), 4),
+                "low_limit": 0 if pd.isna(ll) else round(float(ll), 4),
             })
 
         for t in today_trades:
@@ -2486,7 +2531,7 @@ def generate_predictions_only(
             update_etf_data(verbose=verbose)
 
         raw_df = load_etf_data(DATA_FILE, dtype={"股票代码": str})
-        raw_df["股票代码"] = raw_df["股票代码"].astype(str).str.zfill(6)
+        raw_df["股票代码"] = raw_df["股票代码"].astype(object).str.zfill(6)
         raw_df["日期"] = pd.to_datetime(raw_df["日期"])
         latest_date = raw_df["日期"].max()
         end_date = (latest_date + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
@@ -2763,7 +2808,9 @@ def run_from_predictions(
 ):
     """模式2: 读取已保存的 predictions.json，跳过模型推理直接回测+日报"""
     from send_report import build_report_html, send_report
+    import time as _time
 
+    _t_start = _time.time()
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     if verbose:
@@ -2781,6 +2828,9 @@ def run_from_predictions(
         if verbose:
             print(f"[1/4] 加载预测信号...")
         all_predictions = _load_predictions()
+        _t_load = _time.time()
+        if verbose:
+            print(f"  [TIMING] 加载预测信号: {_t_load - _t_start:.2f}s")
         for key in all_predictions:
             if verbose:
                 print(f"  {key}: {len(all_predictions[key])} 个日期")
@@ -2792,10 +2842,14 @@ def run_from_predictions(
             update_etf_data(verbose=verbose)
 
         raw_df = load_etf_data(DATA_FILE, dtype={"股票代码": str})
-        raw_df["股票代码"] = raw_df["股票代码"].astype(str).str.zfill(6)
+        raw_df["股票代码"] = raw_df["股票代码"].astype(object).str.zfill(6)
         raw_df["日期"] = pd.to_datetime(raw_df["日期"])
+        close_pivot, hl_pivot, ll_pivot = _build_pivots(raw_df)
         latest_date = raw_df["日期"].max()
         end_date = (latest_date + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        _t_data = _time.time()
+        if verbose:
+            print(f"  [TIMING] 数据加载+pivot: {_t_data - _t_load:.2f}s")
 
         if verbose:
             print(f"[3/4] 运行回测...")
@@ -2804,6 +2858,7 @@ def run_from_predictions(
         config = load_full_config()
 
         for model_key, preds_dict in all_predictions.items():
+            _t_model = _time.time()
             if verbose:
                 print(f"  回测: {model_key}...")
             pred_func = _make_predictions_func_from_saved(preds_dict)
@@ -2824,6 +2879,12 @@ def run_from_predictions(
                 risk_manager_config=config.get("risk_manager", {}),
             )
             sequences[model_key] = result
+            _t_model_end = _time.time()
+            if verbose:
+                print(f"    [TIMING] 回测 {model_key}: {_t_model_end - _t_model:.2f}s")
+        _t_backtest = _time.time()
+        if verbose:
+            print(f"  [TIMING] 全部回测完成: {_t_backtest - _t_data:.2f}s")
 
         if not sequences:
             print("错误: 回测未产生任何结果")
@@ -2938,16 +2999,14 @@ def run_from_predictions(
         if rb_ref_date:
             rb_ts = pd.Timestamp(rb_ref_date)
             for stock_id in display_positions:
-                sub = raw_df[raw_df["股票代码"] == stock_id]
-                pc_s = sub.loc[sub["日期"] == rb_ts, "收盘"]
-                if not pc_s.empty:
-                    rb_close_prices[stock_id] = float(pc_s.values[0])
+                pc = close_pivot.loc[rb_ts, stock_id] if stock_id in close_pivot.columns else 0
+                if pd.notna(pc):
+                    rb_close_prices[stock_id] = float(pc)
         holdings = []
         for stock_id, pos in display_positions.items():
             price = pnl_positions.get(stock_id, {}).get("today_close", 0)
-            sub = raw_df[raw_df["股票代码"] == stock_id]
-            hl_s = sub.loc[sub["日期"] == latest_date, "涨停价"]
-            ll_s = sub.loc[sub["日期"] == latest_date, "跌停价"]
+            hl = hl_pivot.loc[latest_date, stock_id] if stock_id in hl_pivot.columns else 0
+            ll = ll_pivot.loc[latest_date, stock_id] if stock_id in ll_pivot.columns else 0
             if stock_id in rb_close_prices:
                 buy_price = rb_close_prices[stock_id]
                 buy_date = rb_ref_date
@@ -2968,8 +3027,8 @@ def run_from_predictions(
                 "buy_date": buy_date,
                 "shares": pos["shares"],
                 "cost": pos["cost"],
-                "high_limit": round(float(hl_s.values[0]), 4) if not hl_s.empty else 0,
-                "low_limit": round(float(ll_s.values[0]), 4) if not ll_s.empty else 0,
+                "high_limit": 0 if pd.isna(hl) else round(float(hl), 4),
+                "low_limit": 0 if pd.isna(ll) else round(float(ll), 4),
             })
 
         # 今日调仓（全部序列）
@@ -3017,9 +3076,8 @@ def run_from_predictions(
         pre_holdings = []
         pre_positions = report_data.get("pre_rebalance_positions", {})
         for stock_id, pos in pre_positions.items():
-            sub = raw_df[raw_df["股票代码"] == stock_id]
-            tc_s = sub.loc[sub["日期"] == latest_date, "收盘"]
-            price = float(tc_s.values[0]) if not tc_s.empty else 0
+            price = close_pivot.loc[latest_date, stock_id] if stock_id in close_pivot.columns else 0
+            price = 0 if pd.isna(price) else float(price)
             pre_holdings.append({
                 "stock_id": stock_id,
                 "name": etf_names.get(stock_id, ""),
@@ -3064,6 +3122,9 @@ def run_from_predictions(
         }
         with open(STATE_PATH, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
+        _t_report = _time.time()
+        if verbose:
+            print(f"  [TIMING] 报表构建+序列化: {_t_report - _t_backtest:.2f}s")
 
         # 发送邮件
         try:
@@ -3079,6 +3140,9 @@ def run_from_predictions(
         except Exception as e:
             if verbose:
                 print(f"\n[邮件] 发送失败: {e}")
+        _t_email = _time.time()
+        if verbose:
+            print(f"  [TIMING] 发送邮件: {_t_email - _t_report:.2f}s")
 
         # 历史报告
         try:
@@ -3086,6 +3150,9 @@ def run_from_predictions(
         except Exception as e:
             print(f"\n[历史] 生成失败: {e}")
             traceback.print_exc()
+        _t_history = _time.time()
+        if verbose:
+            print(f"  [TIMING] 历史报告: {_t_history - _t_email:.2f}s")
 
         if verbose:
             m = report_data["metrics"]
@@ -3095,6 +3162,7 @@ def run_from_predictions(
             print(f"  累计收益: {m['strategy_return_pct']:+.2f}%")
             print(f"  账户总值: {m['latest_value']:,.2f}")
             print(f"{'='*60}")
+            print(f"  [TIMING] 总计: {_time.time() - _t_start:.2f}s")
 
         return state
 
@@ -3146,8 +3214,9 @@ def run_from_juejin(verbose=True, start_date="2026-04-01", initial_capital=10000
 
         # 加载价格数据
         raw_df = load_etf_data(DATA_FILE, dtype={"股票代码": str})
-        raw_df["股票代码"] = raw_df["股票代码"].astype(str).str.zfill(6)
+        raw_df["股票代码"] = raw_df["股票代码"].astype(object).str.zfill(6)
         raw_df["日期"] = pd.to_datetime(raw_df["日期"])
+        close_pivot, hl_pivot, ll_pivot = _build_pivots(raw_df)
         latest_date = raw_df["日期"].max()
         latest_date_str = latest_date.strftime("%Y-%m-%d")
         end_date = (latest_date + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
@@ -3244,17 +3313,16 @@ def run_from_juejin(verbose=True, start_date="2026-04-01", initial_capital=10000
         pre_holdings = []
         pre_positions = report_data.get("pre_rebalance_positions", {})
         for stock_id, pos in pre_positions.items():
-                sub = raw_df[raw_df["股票代码"] == stock_id]
-                tc_s = sub.loc[sub["日期"] == latest_date, "收盘"]
-                price = float(tc_s.values[0]) if not tc_s.empty else 0
-                pre_holdings.append({
-                    "stock_id": stock_id,
-                    "name": etf_names.get(stock_id, ""),
-                    "price": price,
-                    "price_display": price,
-                    "shares": pos["shares"],
-                    "cost": pos.get("cost", 0),
-                })
+            price = close_pivot.loc[latest_date, stock_id] if stock_id in close_pivot.columns else 0
+            price = 0 if pd.isna(price) else float(price)
+            pre_holdings.append({
+                "stock_id": stock_id,
+                "name": etf_names.get(stock_id, ""),
+                "price": price,
+                "price_display": price,
+                "shares": pos["shares"],
+                "cost": pos.get("cost", 0),
+            })
 
         # 构建 sequences_summary
         sequences_summary = {}

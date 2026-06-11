@@ -28,37 +28,64 @@ HS300_CODE = "510300.XSHG"
 def load_etf_data():
     df = pd.read_csv(DATA_PATH)
     df["日期"] = pd.to_datetime(df["日期"])
-    df["股票代码"] = df["股票代码"].astype(str).str.zfill(6)
+    df["股票代码"] = df["股票代码"].astype(object).str.zfill(6)
     return df
 
 
-def compute_ranks_at_date(raw_df, target_date, window=5):
-    """Compute window-day return ranking at target_date."""
+def compute_ranks_at_date(raw_df, target_date, window=5, close_pivot=None):
+    """Compute window-day return ranking at target_date.
+
+    If close_pivot (index=日期, columns=股票代码) is provided, use it directly
+    to avoid redundant pivot_table construction.
+    """
     target_dt = pd.Timestamp(target_date)
-    sub = raw_df[raw_df["日期"] <= target_dt]
-    dates = sorted(sub["日期"].unique())
-    if len(dates) < window + 1:
-        return {}
-    end_date = dates[-1]
-    start_date = dates[-(window + 1)]
-    period = sub[sub["日期"].between(start_date, end_date)].copy()
-    pivot = period.pivot_table(index="股票代码", columns="日期", values="收盘")
-    if len(pivot.columns) < 2:
-        return {}
-    ret = (pivot.iloc[:, -1] / pivot.iloc[:, 0] - 1) * 100
-    ret = ret.dropna().sort_values(ascending=False)
-    return {code: i + 1 for i, code in enumerate(ret.index)}, ret
+    if close_pivot is not None:
+        pivot_trunc = close_pivot[close_pivot.index <= target_dt]
+        if len(pivot_trunc) < window + 1:
+            return {}
+        p = pivot_trunc.iloc[-(window + 1):]
+        if len(p) < 2:
+            return {}
+        ret = (p.iloc[-1] / p.iloc[0] - 1) * 100
+        ret = ret.dropna().sort_values(ascending=False)
+        return {code: i + 1 for i, code in enumerate(ret.index)}, ret
+    else:
+        sub = raw_df[raw_df["日期"] <= target_dt]
+        dates = sorted(sub["日期"].unique())
+        if len(dates) < window + 1:
+            return {}
+        end_date = dates[-1]
+        start_date = dates[-(window + 1)]
+        period = sub[sub["日期"].between(start_date, end_date)].copy()
+        pivot = period.pivot_table(index="股票代码", columns="日期", values="收盘")
+        if len(pivot.columns) < 2:
+            return {}
+        ret = (pivot.iloc[:, -1] / pivot.iloc[:, 0] - 1) * 100
+        ret = ret.dropna().sort_values(ascending=False)
+        return {code: i + 1 for i, code in enumerate(ret.index)}, ret
 
 
-def build_market_monitor_section(raw_df, seq, target_date, holdings_at_date, etf_names):
-    """Build regime table + ETF rankings for a historical date."""
+def build_market_monitor_section(raw_df, seq, target_date, holdings_at_date, etf_names, close_pivot=None):
+    """Build regime table + ETF rankings for a historical date.
+
+    close_pivot (index=日期, columns=股票代码, values=收盘) — if provided,
+    used for vectorized market breadth and ranking computation.
+    """
     target_dt = pd.Timestamp(target_date)
-    hs_raw = raw_df[raw_df["股票代码"] == HS300_CODE].sort_values("日期")
-    hs_period = hs_raw[hs_raw["日期"] <= target_dt].copy()
-    if len(hs_period) < 21:
-        return ""
 
-    # HS300 regime
+    # HS300 regime — use close_pivot if available
+    if close_pivot is not None and HS300_CODE in close_pivot.columns:
+        hs_series = close_pivot[HS300_CODE]
+        hs_trunc = hs_series[hs_series.index <= target_dt]
+        if len(hs_trunc) < 21:
+            return ""
+        hs_period = pd.DataFrame({"收盘": hs_trunc, "日期": hs_trunc.index})
+    else:
+        hs_raw = raw_df[raw_df["股票代码"] == HS300_CODE].sort_values("日期")
+        hs_period = hs_raw[hs_raw["日期"] <= target_dt].copy()
+        if len(hs_period) < 21:
+            return ""
+
     hs_period["return_pct"] = hs_period["收盘"].pct_change() * 100
     hs_period["rolling_20d"] = hs_period["收盘"].pct_change(20) * 100
     hs_period["rolling_vol"] = hs_period["return_pct"].rolling(20).std() * np.sqrt(252)
@@ -75,29 +102,45 @@ def build_market_monitor_section(raw_df, seq, target_date, holdings_at_date, etf
         regime = "sideways"
         regime_cn = "震荡 →"
 
-    # Market breadth
-    all_codes = raw_df["股票代码"].unique()
-    bull_count = sideways_count = bear_count = total_valid = 0
-    for code in all_codes:
-        sub = raw_df[raw_df["股票代码"] == code].sort_values("日期")
-        sub = sub[sub["日期"] <= target_dt]
-        if len(sub) < 21:
-            continue
-        total_valid += 1
-        ret20 = (sub["收盘"].iloc[-1] / sub["收盘"].iloc[-21] - 1) * 100
-        vol20 = sub["收盘"].pct_change().rolling(20).std().iloc[-1] * np.sqrt(252)
-        if ret20 > 5 and vol20 < 30:
-            bull_count += 1
-        elif ret20 < -5:
-            bear_count += 1
+    # Market breadth — vectorized with close_pivot
+    if close_pivot is not None:
+        pivot_trunc = close_pivot[close_pivot.index <= target_dt]
+        if len(pivot_trunc) >= 21:
+            ret20_series = (pivot_trunc.iloc[-1] / pivot_trunc.iloc[-21] - 1) * 100
+            vol20_series = pivot_trunc.pct_change().rolling(20).std().iloc[-1] * np.sqrt(252)
+            valid_mask = ret20_series.notna() & vol20_series.notna()
+            ret20_v = ret20_series[valid_mask]
+            vol20_v = vol20_series[valid_mask]
+            total_valid = len(ret20_v)
+            bull_count = ((ret20_v > 5) & (vol20_v < 30)).sum()
+            bear_count = (ret20_v < -5).sum()
+            sideways_count = total_valid - bull_count - bear_count
         else:
-            sideways_count += 1
+            total_valid = 0
+            bull_count = sideways_count = bear_count = 0
+    else:
+        all_codes = raw_df["股票代码"].unique()
+        bull_count = sideways_count = bear_count = total_valid = 0
+        for code in all_codes:
+            sub = raw_df[raw_df["股票代码"] == code].sort_values("日期")
+            sub = sub[sub["日期"] <= target_dt]
+            if len(sub) < 21:
+                continue
+            total_valid += 1
+            ret20 = (sub["收盘"].iloc[-1] / sub["收盘"].iloc[-21] - 1) * 100
+            vol20 = sub["收盘"].pct_change().rolling(20).std().iloc[-1] * np.sqrt(252)
+            if ret20 > 5 and vol20 < 30:
+                bull_count += 1
+            elif ret20 < -5:
+                bear_count += 1
+            else:
+                sideways_count += 1
     breadth_str = f"🔴牛市 {bull_count/total_valid*100:.0f}% / 🟡震荡 {sideways_count/total_valid*100:.0f}% / 🟢熊市 {bear_count/total_valid*100:.0f}% (共{total_valid}只ETF)" if total_valid > 0 else ""
 
     regime_labels_display = {"bull": "牛市 ↑", "bear": "熊市 ↓", "sideways": "震荡 →"}
 
     # ETF rankings
-    rank_map, ret_series = compute_ranks_at_date(raw_df, target_date, 5)
+    rank_map, ret_series = compute_ranks_at_date(raw_df, target_date, 5, close_pivot=close_pivot)
     all_codes_list = list(ret_series.index) if ret_series is not None else []
 
     top10 = []
@@ -136,7 +179,7 @@ def build_market_monitor_section(raw_df, seq, target_date, holdings_at_date, etf
     # 调仓日排名（用调仓当日的5日收益排名）
     rebalance_rank_map = {}
     if current_rebalance_date:
-        rebalance_rank_map, _ = compute_ranks_at_date(raw_df, current_rebalance_date, 5)
+        rebalance_rank_map, _ = compute_ranks_at_date(raw_df, current_rebalance_date, 5, close_pivot=close_pivot)
 
     # Holdings data
     holdings_data = []
@@ -159,7 +202,7 @@ def build_market_monitor_section(raw_df, seq, target_date, holdings_at_date, etf
     # Previous holdings
     prev_holdings_data = []
     if prev_rebalance_date and rank_map:
-        prev_rank_map, _ = compute_ranks_at_date(raw_df, prev_rebalance_date, 5)
+        prev_rank_map, _ = compute_ranks_at_date(raw_df, prev_rebalance_date, 5, close_pivot=close_pivot)
         prev_held = set()
         for t in seq.get("trades", []):
             if t["date"] > prev_rebalance_date:
