@@ -3,7 +3,7 @@
 mode: "full"                  # full | update-only | predictions-only | from-predictions | from-juejin
 update_data: false            # 仅 mode=full 时有效
 start_date: "2026-04-01"
-rebalance_days: 10            # 调仓间隔（交易日）
+rebalance_days: 5            # 调仓间隔（交易日）
 trade_mode: "open"            # open=次日开盘调仓, close=当日收盘调仓
 initial_capital: 100000
 position_pct: 0.90            # 默认总仓位比例
@@ -91,8 +91,8 @@ avg_score_sub:
   position_pct: 0.50
 
 # Sharpe加权子集成 — 仅 3 个全 fold SR > 2.0 稳健实验
-# 系统搜索验证：top3_only/score_power_3 最优 40.26%/4.76SR
-# 添加更多实验（exp_19/33.23%, exp_49/22.02%）反而稀释融合信号
+#   rebalance_days=5 验证：top3(43,22,5)/score_power_3 最优 45.74%/4.81SR
+#   添加更多实验（tcn_19_3 单模型 40.66%）反而稀释融合信号(41.03% < 45.74%)
 sharpe_weighted_sub:
   enabled: true
   models: ["tcn_43_3", "tcn_22_3", "tcn_5_3"]
@@ -114,7 +114,7 @@ master: "sharpe_weighted_sub"
 # ---- 掘金策略 ----
 juejin:
   start_date: "2026-01-01"
-  rebalance_days: 10
+  rebalance_days: 5
   trade_mode: "open"
   top_k: 3
   weight_strategy: "score_power_3"
