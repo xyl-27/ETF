@@ -387,6 +387,8 @@ def load_full_config(config_path=None) -> dict:
         "voting": True,
         "wvoting_sr": False,
         "avg_rank_sub": {"enabled": False, "models": [], "weight_strategy": "dynamic_gap", "position_pct": 0.90},
+        "avg_score_sub": {"enabled": False, "models": [], "weight_strategy": "kelly", "position_pct": 0.50},
+        "sharpe_weighted_sub": {"enabled": False, "models": [], "weight_strategy": "score_power_3", "position_pct": 0.90},
         "master": "first",
         "juejin": {},
         "risk_manager": {"enabled": False, "strategy": "none", "params": {}},
@@ -506,6 +508,8 @@ def run_backtest_sequence(
             trade["score"] = t["score"]
         if "advantage" in t:
             trade["advantage"] = t["advantage"]
+        if "weight" in t:
+            trade["weight"] = t["weight"]
         if "trade_cost" in t:
             trade["trade_cost"] = t["trade_cost"]
         trades.append(trade)
@@ -1570,10 +1574,10 @@ def _resolve_report_key(sequences):
             return master
         # master 指定了但不存在（如 juejin 但回测尚未运行），取第一个真实模型
         for key in sequences:
-            if key not in ("juejin", "average", "voting", "wvoting_sr", "avg_rank_sub"):
+            if key not in ("juejin", "average", "voting", "wvoting_sr", "avg_rank_sub", "avg_score_sub", "sharpe_weighted_sub"):
                 return key
-    # 未指定 master: 兜底优先级 juejin → average → voting → wvoting_sr → avg_rank_sub → 第一个
-    for pref in ["juejin", "average", "voting", "wvoting_sr", "avg_rank_sub"]:
+    # 未指定 master: 兜底优先级 juejin → average → voting → wvoting_sr → avg_rank_sub → avg_score_sub → 第一个
+    for pref in ["juejin", "average", "voting", "wvoting_sr", "sharpe_weighted_sub", "avg_rank_sub", "avg_score_sub"]:
         if pref in sequences:
             return pref
     return list(sequences.keys())[0] if sequences else None
@@ -1669,12 +1673,16 @@ def daily_eval(
         voting_enabled = False
         wvoting_sr_enabled = False
         avg_rank_sub_cfg = {"enabled": False, "models": [], "weight_strategy": "dynamic_gap", "position_pct": 0.90}
+        avg_score_sub_cfg = {"enabled": False, "models": [], "weight_strategy": "kelly", "position_pct": 0.50}
+        sharpe_weighted_sub_cfg = {"enabled": False, "models": [], "weight_strategy": "score_power_3", "position_pct": 0.90}
         config = {"slippage": 0.001, "commission": 0.0003}
         if CONFIG_PATH.exists():
             cfg_dict = load_full_config()
             single_models, master, average_enabled, voting_enabled = load_model_selection(cfg_dict=cfg_dict)
             wvoting_sr_enabled = cfg_dict.get("wvoting_sr", False)
             avg_rank_sub_cfg = cfg_dict.get("avg_rank_sub", avg_rank_sub_cfg)
+            avg_score_sub_cfg = cfg_dict.get("avg_score_sub", avg_score_sub_cfg)
+            sharpe_weighted_sub_cfg = cfg_dict.get("sharpe_weighted_sub", sharpe_weighted_sub_cfg)
         elif os.path.exists(str(MODEL_SELECTION_PATH)):
             single_models, master, average_enabled, voting_enabled = load_model_selection(path=str(MODEL_SELECTION_PATH))
         if single_models:
@@ -1959,6 +1967,112 @@ def daily_eval(
             sequences["avg_rank_sub"] = result
             if verbose:
                 print(f"    ✓ ({time.time()-_t_ars:.0f}s)")
+
+        # avg_score sub-ensemble
+        _avg_score_sub_keys = set(avg_score_sub_cfg.get("models", []))
+        _avg_score_sub_ws = avg_score_sub_cfg.get("weight_strategy", "kelly")
+        _avg_score_sub_pp = avg_score_sub_cfg.get("position_pct", 0.50)
+        _avg_score_sub_enabled = avg_score_sub_cfg.get("enabled", False) and len(_avg_score_sub_keys) >= 2
+        _avg_score_sub_bts = [(m, bt) for m, bt in single_backtesters
+                               if _make_model_key(m) in _avg_score_sub_keys] if _avg_score_sub_enabled else []
+        if _avg_score_sub_enabled and len(_avg_score_sub_bts) >= 2:
+            _t_ass = time.time()
+            if verbose:
+                print(f"  回测 avg_score sub-ensemble ({len(_avg_score_sub_bts)}个模型, {_avg_score_sub_ws} pp={_avg_score_sub_pp})...")
+
+            def avg_score_sub_pred_func(date):
+                all_preds = []
+                for _, bt in _avg_score_sub_bts:
+                    preds = bt._get_predictions(date)
+                    if preds is None:
+                        return None
+                    all_preds.append(preds)
+                n = len(all_preds[0])
+                all_s = {}
+                for preds in all_preds:
+                    for i, p in enumerate(preds):
+                        all_s.setdefault(p["stock_id"], []).append(p["score"])
+                avg = {s: float(np.mean(v)) for s, v in all_s.items()}
+                ranked = sorted(avg.items(), key=lambda x: x[1], reverse=True)
+                return [{"rank": i+1, "stock_id": s, "score": float(avg[s])} for i, (s, _) in enumerate(ranked)]
+
+            result = run_backtest_sequence(
+                predictions_func=avg_score_sub_pred_func,
+                data_file=str(DATA_FILE),
+                start_date=start_date,
+                end_date=end_date,
+                top_k=top_k,
+                rebalance_days=rebalance_days,
+                position_pct=_avg_score_sub_pp,
+                weight_strategy=_avg_score_sub_ws,
+                strategy_params=strategy_params,
+                initial_capital=initial_capital,
+                commission=config.get("commission", 0.0003),
+                slippage=config.get("slippage", 0.001),
+                trade_mode=trade_mode,
+                risk_manager_config=config.get("risk_manager", {}),
+            )
+            sequences["avg_score_sub"] = result
+            if verbose:
+                print(f"    ✓ ({time.time()-_t_ass:.0f}s)")
+
+        # sharpe_weighted sub-ensemble (weighted score average)
+        _sharpe_weighted_sub_keys = set(sharpe_weighted_sub_cfg.get("models", []))
+        _sharpe_weighted_sub_ws = sharpe_weighted_sub_cfg.get("weight_strategy", "score_power_3")
+        _sharpe_weighted_sub_pp = sharpe_weighted_sub_cfg.get("position_pct", 0.90)
+        _sharpe_weighted_sub_enabled = sharpe_weighted_sub_cfg.get("enabled", False) and len(_sharpe_weighted_sub_keys) >= 2
+        _sharpe_weighted_sub_bts = [(m, bt) for m, bt in single_backtesters
+                                     if _make_model_key(m) in _sharpe_weighted_sub_keys] if _sharpe_weighted_sub_enabled else []
+        if _sharpe_weighted_sub_enabled and len(_sharpe_weighted_sub_bts) >= 2:
+            _t_sws = time.time()
+            if verbose:
+                print(f"  回测 sharpe_weighted sub-ensemble ({len(_sharpe_weighted_sub_bts)}个模型, {_sharpe_weighted_sub_ws} pp={_sharpe_weighted_sub_pp})...")
+
+            def sharpe_weighted_sub_pred_func(date):
+                all_preds = []
+                model_weights = []
+                for m, bt in _sharpe_weighted_sub_bts:
+                    preds = bt._get_predictions(date)
+                    if preds is None:
+                        if verbose:
+                            print(f"    ⚠ sharpe_weighted_sub: {_make_model_key(m)} 在 {date} 返回 None，跳过")
+                        continue
+                    all_preds.append(preds)
+                    model_weights.append(m.get("weight", 1.0))
+                if len(all_preds) < 1:
+                    return None
+                n = len(all_preds[0])
+                all_s = {}
+                all_w = {}
+                for mi, preds in enumerate(all_preds):
+                    w = model_weights[mi]
+                    for p in preds:
+                        sid = p["stock_id"]
+                        all_s.setdefault(sid, []).append(p["score"])
+                        all_w.setdefault(sid, []).append(w)
+                weighted = {s: float(np.average(all_s[s], weights=all_w[s])) for s in all_s}
+                ranked = sorted(weighted.items(), key=lambda x: x[1], reverse=True)
+                return [{"rank": i+1, "stock_id": s, "score": float(weighted[s])} for i, (s, _) in enumerate(ranked)]
+
+            result = run_backtest_sequence(
+                predictions_func=sharpe_weighted_sub_pred_func,
+                data_file=str(DATA_FILE),
+                start_date=start_date,
+                end_date=end_date,
+                top_k=top_k,
+                rebalance_days=rebalance_days,
+                position_pct=_sharpe_weighted_sub_pp,
+                weight_strategy=_sharpe_weighted_sub_ws,
+                strategy_params=strategy_params,
+                initial_capital=initial_capital,
+                commission=config.get("commission", 0.0003),
+                slippage=config.get("slippage", 0.001),
+                trade_mode=trade_mode,
+                risk_manager_config=config.get("risk_manager", {}),
+            )
+            sequences["sharpe_weighted_sub"] = result
+            if verbose:
+                print(f"    ✓ ({time.time()-_t_sws:.0f}s)")
 
         if wvoting_sr_enabled and len(single_backtesters) >= 2:
             _t_wv = time.time()
@@ -2920,6 +3034,45 @@ def generate_predictions_only(
             if verbose:
                 print(f"    → {len(wv_preds)} 个交易日")
 
+        # Sharpe加权子集成预测 (按Sharpe比率加权Score平均)
+        _sws_cfg_pred = cfg_dict.get("sharpe_weighted_sub", {})
+        _sws_keys_pred = set(_sws_cfg_pred.get("models", []))
+        _sws_preds_pred = {k: v for k, v in all_predictions.items() if k in _sws_keys_pred}
+        if _sws_cfg_pred.get("enabled", False) and len(_sws_preds_pred) >= 2:
+            if verbose:
+                print(f"  预测: sharpe_weighted_sub ({'+'.join(_sws_keys_pred)})...")
+            _sws_keys_list_pred = sorted(_sws_preds_pred.keys())
+            _sws_all_dates_pred = sorted(set(d for p in _sws_preds_pred.values() for d in p))
+            _sws_weights_pred = {}
+            for m in cfg_dict.get("models", []):
+                mk = _make_model_key(m)
+                if mk in _sws_keys_pred:
+                    _sws_weights_pred[mk] = m.get("weight", 1.0)
+            if not _sws_weights_pred:
+                _sws_weights_pred = {k: 1.0 for k in _sws_keys_pred}
+            _sws_fused_pred = {}
+            for d in _sws_all_dates_pred:
+                _dp = {k: _sws_preds_pred[k].get(d) for k in _sws_keys_list_pred}
+                _dp = {k: v for k, v in _dp.items() if v is not None}
+                if len(_dp) < 1:
+                    continue
+                all_s = {}
+                all_w = {}
+                for k in _dp:
+                    w = _sws_weights_pred.get(k, 1.0)
+                    for p in _dp[k]:
+                        sid = p["stock_id"]
+                        all_s.setdefault(sid, []).append(p["score"])
+                        all_w.setdefault(sid, []).append(w)
+                weighted = {}
+                for s in all_s:
+                    weighted[s] = float(np.average(all_s[s], weights=all_w[s]))
+                ranked = sorted(weighted.items(), key=lambda x: x[1], reverse=True)
+                _sws_fused_pred[d] = [{"rank": i+1, "stock_id": s, "score": float(weighted[s])} for i, (s, _) in enumerate(ranked)]
+            all_predictions["sharpe_weighted_sub"] = _sws_fused_pred
+            if verbose:
+                print(f"    → {len(_sws_fused_pred)} 个交易日")
+
         # Fold 集成平均预测
         if ensemble_models:
             for m in ensemble_models:
@@ -3132,6 +3285,111 @@ def run_from_predictions(
             if verbose:
                 print(f"    ✓ ({_time.time()-_t_model:.2f}s)")
 
+        # avg_score sub-ensemble
+        _asc_cfg = config.get("avg_score_sub", {"enabled": False, "models": [], "weight_strategy": "kelly", "position_pct": 0.50})
+        _asc_enabled = _asc_cfg.get("enabled", False)
+        _asc_keys = set(_asc_cfg.get("models", []))
+        _asc_pp = _asc_cfg.get("position_pct", 0.50)
+        _asc_ws = _asc_cfg.get("weight_strategy", "kelly")
+        _asc_preds = {k: v for k, v in all_predictions.items() if k in _asc_keys}
+        if _asc_enabled and len(_asc_preds) >= 2:
+            if verbose:
+                print(f"  回测: avg_score_sub ({'+'.join(_asc_keys)}, {_asc_ws} pp={_asc_pp})...")
+            _asc_keys_list = sorted(_asc_preds.keys())
+            _asc_all_dates = sorted(set(d for p in _asc_preds.values() for d in p))
+            _asc_fused = {}
+            for d in _asc_all_dates:
+                _dp = {k: _asc_preds[k].get(d) for k in _asc_keys_list}
+                if any(v is None for v in _dp.values()):
+                    continue
+                all_s = {}
+                for k in _asc_keys_list:
+                    for p in _dp[k]:
+                        all_s.setdefault(p["stock_id"], []).append(p["score"])
+                avg = {s: float(np.mean(v)) for s, v in all_s.items()}
+                ranked = sorted(avg.items(), key=lambda x: x[1], reverse=True)
+                _asc_fused[d] = [{"rank": i+1, "stock_id": s, "score": float(avg[s])} for i, (s, _) in enumerate(ranked)]
+            _asc_pred_func = _make_predictions_func_from_saved(_asc_fused)
+            _asc_result = run_backtest_sequence(
+                predictions_func=_asc_pred_func,
+                data_file=str(DATA_FILE),
+                start_date=start_date,
+                end_date=end_date,
+                top_k=top_k,
+                rebalance_days=rebalance_days,
+                position_pct=_asc_pp,
+                weight_strategy=_asc_ws,
+                strategy_params=strategy_params,
+                initial_capital=initial_capital,
+                commission=config.get("commission", 0.0003),
+                slippage=config.get("slippage", 0.001),
+                trade_mode=trade_mode,
+                risk_manager_config=config.get("risk_manager", {}),
+            )
+            sequences["avg_score_sub"] = _asc_result
+            if verbose:
+                print(f"    ✓ ({_time.time()-_t_model:.2f}s)")
+
+        # sharpe_weighted sub-ensemble (from saved predictions)
+        _sws_cfg = config.get("sharpe_weighted_sub", {"enabled": False, "models": [], "weight_strategy": "score_power_3", "position_pct": 0.90})
+        _sws_enabled = _sws_cfg.get("enabled", False)
+        _sws_keys = set(_sws_cfg.get("models", []))
+        _sws_pp = _sws_cfg.get("position_pct", 0.90)
+        _sws_ws = _sws_cfg.get("weight_strategy", "score_power_3")
+        _sws_preds = {k: v for k, v in all_predictions.items() if k in _sws_keys}
+        if _sws_enabled and len(_sws_preds) >= 2:
+            if verbose:
+                print(f"  回测: sharpe_weighted_sub ({'+'.join(_sws_keys)}, {_sws_ws} pp={_sws_pp})...")
+            _sws_keys_list = sorted(_sws_preds.keys())
+            _sws_all_dates = sorted(set(d for p in _sws_preds.values() for d in p))
+            _sws_weights = {}
+            for m in config.get("models", []):
+                mk = _make_model_key(m)
+                if mk in _sws_keys:
+                    _sws_weights[mk] = m.get("weight", 1.0)
+            if not _sws_weights:
+                _sws_weights = {k: 1.0 for k in _sws_keys}
+            _sws_fused = {}
+            for d in _sws_all_dates:
+                _dp = {k: _sws_preds[k].get(d) for k in _sws_keys_list}
+                _dp = {k: v for k, v in _dp.items() if v is not None}
+                if len(_dp) < 1:
+                    continue
+                all_s = {}
+                all_w = {}
+                for k in _dp:
+                    w = _sws_weights.get(k, 1.0)
+                    for p in _dp[k]:
+                        sid = p["stock_id"]
+                        all_s.setdefault(sid, []).append(p["score"])
+                        all_w.setdefault(sid, []).append(w)
+                weighted = {}
+                for s in all_s:
+                    weighted[s] = float(np.average(all_s[s], weights=all_w[s]))
+                ranked = sorted(weighted.items(), key=lambda x: x[1], reverse=True)
+                _sws_fused[d] = [{"rank": i+1, "stock_id": s, "score": float(weighted[s])} for i, (s, _) in enumerate(ranked)]
+            all_predictions["sharpe_weighted_sub"] = _sws_fused
+            _sws_pred_func = _make_predictions_func_from_saved(_sws_fused)
+            _sws_result = run_backtest_sequence(
+                predictions_func=_sws_pred_func,
+                data_file=str(DATA_FILE),
+                start_date=start_date,
+                end_date=end_date,
+                top_k=top_k,
+                rebalance_days=rebalance_days,
+                position_pct=_sws_pp,
+                weight_strategy=_sws_ws,
+                strategy_params=strategy_params,
+                initial_capital=initial_capital,
+                commission=config.get("commission", 0.0003),
+                slippage=config.get("slippage", 0.001),
+                trade_mode=trade_mode,
+                risk_manager_config=config.get("risk_manager", {}),
+            )
+            sequences["sharpe_weighted_sub"] = _sws_result
+            if verbose:
+                print(f"    ✓ ({_time.time()-_t_model:.2f}s)")
+
         _t_backtest = _time.time()
         if verbose:
             print(f"  [TIMING] 全部回测完成: {_t_backtest - _t_data:.2f}s")
@@ -3178,7 +3436,7 @@ def run_from_predictions(
         # 在从预测信号模式中计算投票总模型数
         _voting_n = None
         if "voting" in sequences:
-            _special = {"average", "voting", "juejin", "wvoting_sr", "avg_rank_sub"}
+            _special = {"average", "voting", "juejin", "wvoting_sr", "avg_rank_sub", "avg_score_sub", "sharpe_weighted_sub"}
             _voting_n = len([k for k in all_predictions if k not in _special])
             for ph in sequences["voting"].get("predictions_history", []):
                 ph["voting_total_models"] = _voting_n
@@ -3379,9 +3637,9 @@ def run_from_predictions(
         # 发送邮件
         try:
             if verbose:
-                _dn = {"average": "平均", "voting": "投票", "wvoting_sr": "加权投票", "avg_rank_sub": "Rank子集成"}
+                _dn = {"average": "平均", "voting": "投票", "wvoting_sr": "加权投票", "avg_rank_sub": "Rank子集成", "avg_score_sub": "Score子集成", "sharpe_weighted_sub": "Sharpe加权子集成"}
                 if report_key == "juejin":
-                    _rk = next((k for k in sequences if k not in ("juejin", "average", "voting", "wvoting_sr", "avg_rank_sub")), report_key)
+                    _rk = next((k for k in sequences if k not in ("juejin", "average", "voting", "wvoting_sr", "avg_rank_sub", "avg_score_sub", "sharpe_weighted_sub")), report_key)
                     model_display = _dn.get(_rk, _rk.replace("search_", "").replace("_exp_", " ").replace("_full", " (full)"))
                 else:
                     model_display = _dn.get(report_key, report_key.replace("search_", "").replace("_exp_", " ").replace("_full", " (full)"))

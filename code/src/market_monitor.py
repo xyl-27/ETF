@@ -575,6 +575,8 @@ def plot_market_analysis(dates, values, df_regime, breadth_df, output_path):
     hs_full = load_hs300_data().set_index("日期")["收盘"]
     hs_roll = hs_full.pct_change(window).dropna() * 100
     hs_roll = hs_roll.reindex(plot_dates)
+    hs_roll_5 = hs_full.pct_change(5).dropna() * 100
+    hs_roll_5 = hs_roll_5.reindex(plot_dates)
     pool_df = _load_pool_prices()
     pool_has_data = len(pool_df) > window
     if pool_has_data:
@@ -586,6 +588,7 @@ def plot_market_analysis(dates, values, df_regime, breadth_df, output_path):
     pool_vw = pool_vw.reindex(plot_dates)
     ax_roll.plot(model_roll.index, model_roll.values, color="#2980b9", lw=1.5, label=f"策略 {window}d 滚动收益")
     ax_roll.plot(plot_dates, hs_roll.values, color="#7f8c8d", lw=1.5, ls="--", label=f"HS300 {window}d 滚动收益")
+    ax_roll.plot(plot_dates, hs_roll_5.values, color="#95a5a6", lw=1.5, ls="--", label="HS300 5d 滚动收益")
     if pool_has_data:
         ax_roll.plot(plot_dates, pool_roll.values, color="#e67e22", lw=1.5, ls=":", label=f"全池等权 {window}d 滚动收益")
     ax_roll.plot(plot_dates, pool_vw.values, color="#2ecc71", lw=1.5, ls="-.", label=f"全池加权 {window}d 滚动收益")
@@ -661,6 +664,8 @@ def plot_rolling_20d(dates, values, output_path):
     hs_full = load_hs300_data().set_index("日期")["收盘"]
     hs_roll = hs_full.pct_change(window).dropna() * 100
     hs_roll = hs_roll.reindex(plot_dates)
+    hs_roll_5 = hs_full.pct_change(5).dropna() * 100
+    hs_roll_5 = hs_roll_5.reindex(plot_dates)
     pool_df = _load_pool_prices()
     pool_has_data = len(pool_df) > window
     if pool_has_data:
@@ -673,6 +678,7 @@ def plot_rolling_20d(dates, values, output_path):
 
     fig, ax = plt.subplots(figsize=(12, 3))
     ax.plot(plot_dates, hs_roll.values, color="#7f8c8d", lw=1.5, ls="--", label=f"HS300 {window}d 滚动收益")
+    ax.plot(plot_dates, hs_roll_5.values, color="#95a5a6", lw=1.5, ls="--", label="HS300 5d 滚动收益")
     if pool_has_data:
         ax.plot(plot_dates, pool_roll.values, color="#e67e22", lw=1.5, ls=":", label=f"全池等权 {window}d 滚动收益")
     ax.plot(plot_dates, pool_vw.values, color="#2ecc71", lw=1.5, ls="-.", label=f"全池加权 {window}d 滚动收益")

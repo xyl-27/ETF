@@ -581,15 +581,17 @@ def _build_trade_history_table(seq_data):
     trades = seq_data.get("trades", [])
     predictions_history = seq_data.get("predictions_history", [])
     equity_curve = seq_data.get("equity_curve", [])
-    if not trades:
-        return ""
     trades_by_date = {}
     for t in trades:
         trades_by_date.setdefault(t["date"], []).append(t)
-    rb_dates = sorted(trades_by_date.keys())
-    if len(rb_dates) < 1:
+    if predictions_history:
+        rb_dates = sorted(set(p["date"] for p in predictions_history))
+    else:
+        rb_dates = sorted(trades_by_date.keys())
+    if not rb_dates:
         return ""
     ec_map = {e["date"]: e["total_value"] for e in equity_curve}
+    exposure_map = {e["date"]: e.get("stock_exposure", 0) for e in equity_curve}
     pred_map = {}
     for p in predictions_history:
         pd_ = {pp["stock_id"]: pp.get("score", 0) for pp in p.get("predictions", [])}
@@ -602,7 +604,7 @@ def _build_trade_history_table(seq_data):
     rows = ""
     prev_value = None
     for rb_date in rb_dates:
-        day_trades = trades_by_date[rb_date]
+        day_trades = trades_by_date.get(rb_date, [])
         buys = [t for t in day_trades if t["action"] == "买入"]
         sells = [t for t in day_trades if t["action"] == "卖出"]
         scores_map, rank_map = pred_map.get(rb_date, ({}, {}))
@@ -633,6 +635,12 @@ def _build_trade_history_table(seq_data):
                 if e["date"] <= rb_date:
                     cur_value = e["total_value"]
                     break
+        stock_exposure = exposure_map.get(rb_date)
+        if stock_exposure is None:
+            for e in reversed(equity_curve):
+                if e["date"] <= rb_date:
+                    stock_exposure = e.get("stock_exposure", 0)
+                    break
         prv_val = prev_value or cur_value
         if prev_value is not None and cur_value:
             period_ret = (cur_value / prev_value - 1) * 100
@@ -642,17 +650,19 @@ def _build_trade_history_table(seq_data):
         val_str = f"¥{cur_value:,.0f}" if cur_value else "-"
         period_str = f"{period_ret:+.2f}%" if period_ret is not None else "-"
         cum_str = f"{cum_ret:+.2f}%"
+        exposure_str = f"{stock_exposure * 100:.0f}%" if stock_exposure is not None else "-"
         rows += f"""<tr>
             <td style="font-weight:bold;white-space:nowrap;">{rb_date[-5:]}</td>
             <td style="font-size:11px;">{"".join(buy_cells) if buy_cells else '<span style="color:#ccc;">-</span>'}</td>
             <td style="font-size:11px;">{"".join(sell_cells) if sell_cells else '<span style="color:#ccc;">-</span>'}</td>
             <td style="text-align:right;font-family:monospace;font-weight:bold;">{val_str}</td>
+            <td style="text-align:right;font-family:monospace;font-weight:bold;">{exposure_str}</td>
             <td style="text-align:right;font-family:monospace;font-weight:bold;color:{"#cc0000" if period_ret is not None and period_ret >= 0 else "#009900"};">{period_str}</td>
             <td style="text-align:right;font-family:monospace;font-weight:bold;color:{"#cc0000" if cum_ret >= 0 else "#009900"};">{cum_str}</td>
         </tr>"""
         prev_value = cur_value
     return f"""<h3>交易记录 (完整调仓历史)</h3><table>
-        <thead><tr><th>调仓日</th><th>买入</th><th>卖出</th><th style="text-align:right;">总资产</th><th style="text-align:right;">区间收益</th><th style="text-align:right;">累计收益</th></tr></thead>
+        <thead><tr><th>调仓日</th><th>买入</th><th>卖出</th><th style="text-align:right;">总资产</th><th style="text-align:right;">仓位</th><th style="text-align:right;">区间收益</th><th style="text-align:right;">累计收益</th></tr></thead>
         <tbody>{rows}</tbody></table>"""
 
 
@@ -790,14 +800,18 @@ def build_report_html(*, date, model_display, total_value, cash, holdings,
             else:
                 reb_style = "color: #999;"
                 reb_display = "-"
-            # 当前仓位（调仓后）
+            # 当前持仓市值
             hp = holdings_map.get(t['stock'], {})
             cur_shares = hp.get("shares", 0)
             cur_price = hp.get("price", 0)
             cur_mkt_val = cur_shares * cur_price
-            cur_weight = (cur_mkt_val / total_value * 100) if total_value > 0 and cur_mkt_val > 0 else 0
             pos_display = f"{cur_mkt_val:,.0f}" if cur_mkt_val > 0 else "-"
-            weight_display = f"{cur_weight:.2f}%" if cur_weight > 0 else "-"
+            # 目标仓位（策略分配权重）
+            target_weight = t.get("weight")
+            if target_weight is not None and target_weight > 0:
+                weight_display = f"{target_weight*100:.2f}%"
+            else:
+                weight_display = "-"
             trades_rows += f"""<tr><td><span style="color:{action_color};font-weight:bold;">{t['action']}</span></td><td><a href="{_xueqiu_url(t['stock'])}" target="_blank" style="text-decoration:none;color:inherit;">{t['stock']}</a></td><td>{name_display}</td><td style="text-align:right;color:{hl_color};">{hl_str}</td><td style="text-align:right;color:{ll_color};">{ll_str}</td><td style="text-align:right;">{shares_display}</td><td style="text-align:right;">{price_display}</td><td style="text-align:right;{tc_style}">{tc_display}</td><td style="text-align:right;{reb_style}">{reb_display}</td><td style="text-align:right;{adv_style}">{adv_display}</td><td style="text-align:right;">{pos_display}</td><td style="text-align:right;">{weight_display}</td></tr>"""
         trades_section = f"""<h3>本期交易记录</h3><table><thead><tr><th>操作</th><th>代码</th><th>名称</th><th style="text-align:right;">涨停价</th><th style="text-align:right;">跌停价</th><th style="text-align:right;">数量</th><th style="text-align:right;">价格</th><th style="text-align:right;">交易成本</th><th style="text-align:right;">盈亏</th><th style="text-align:right;">优势</th><th style="text-align:right;">市值</th><th style="text-align:right;">仓位</th></tr></thead><tbody>{trades_rows}</tbody></table>"""
 

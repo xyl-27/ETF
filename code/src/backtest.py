@@ -791,6 +791,7 @@ class BacktestEngine:
                             s = score_map[stock]
                             self.trades[-1]["score"] = float(s)
                             self.trades[-1]["advantage"] = round((s - score_cutoff) / score_std, 4)
+                            self.trades[-1]["weight"] = round(weights.get(stock, 0), 4)
                         if self.log:
                             new_shares = self.positions[stock]["shares"]
                             actual_value = new_shares * price
