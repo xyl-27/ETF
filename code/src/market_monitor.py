@@ -650,21 +650,15 @@ def plot_market_analysis(dates, values, df_regime, breadth_df, output_path):
     hs_roll = hs_roll.reindex(plot_dates)
     hs_roll_5 = hs_full.pct_change(5).dropna() * 100
     hs_roll_5 = hs_roll_5.reindex(plot_dates)
-    pool_df = _load_pool_prices()
-    pool_has_data = len(pool_df) > window
-    if pool_has_data:
-        pool_full_rets = pool_df.pct_change().dropna()
-        pool_eq = pool_full_rets.mean(axis=1) * 100
-        pool_roll = pool_eq.rolling(window).sum()
-        pool_roll = pool_roll.reindex(plot_dates)
     pool_vw = _load_pool_value_weighted_roll(window)
     pool_vw = pool_vw.reindex(plot_dates)
+    pool_vw_5 = _load_pool_value_weighted_roll(5)
+    pool_vw_5 = pool_vw_5.reindex(plot_dates)
     ax_roll.plot(model_roll.index, model_roll.values, color="#2980b9", lw=1.5, label=f"策略 {window}d 滚动收益")
     ax_roll.plot(plot_dates, hs_roll.values, color="#7f8c8d", lw=1.5, ls="--", label=f"HS300 {window}d 滚动收益")
     ax_roll.plot(plot_dates, hs_roll_5.values, color="#95a5a6", lw=1.5, ls="--", label="HS300 5d 滚动收益")
-    if pool_has_data:
-        ax_roll.plot(plot_dates, pool_roll.values, color="#e67e22", lw=1.5, ls=":", label=f"全池等权 {window}d 滚动收益")
     ax_roll.plot(plot_dates, pool_vw.values, color="#2ecc71", lw=1.5, ls="-.", label=f"全池加权 {window}d 滚动收益")
+    ax_roll.plot(plot_dates, pool_vw_5.values, color="#e67e22", lw=1.5, ls=":", label="全池加权 5d 滚动收益")
     ax_roll.axhline(0, color="gray", ls=":", lw=0.5)
     ax_roll.set_ylabel(f"{window}d 滚动收益 (%)", fontsize=11)
     ax_roll.legend(loc="upper left", fontsize=7)
@@ -727,7 +721,7 @@ def plot_breadth_backtest(dates, breadth_df, output_path):
 
 
 def plot_rolling_20d(dates, values, output_path):
-    """保存滚动 20 日收益对比（去掉策略曲线）为独立 PNG"""
+    """保存滚动收益对比（去掉策略曲线）为独立 PNG"""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -739,22 +733,16 @@ def plot_rolling_20d(dates, values, output_path):
     hs_roll = hs_roll.reindex(plot_dates)
     hs_roll_5 = hs_full.pct_change(5).dropna() * 100
     hs_roll_5 = hs_roll_5.reindex(plot_dates)
-    pool_df = _load_pool_prices()
-    pool_has_data = len(pool_df) > window
-    if pool_has_data:
-        pool_full_rets = pool_df.pct_change().dropna()
-        pool_eq = pool_full_rets.mean(axis=1) * 100
-        pool_roll = pool_eq.rolling(window).sum()
-        pool_roll = pool_roll.reindex(plot_dates)
     pool_vw = _load_pool_value_weighted_roll(window)
     pool_vw = pool_vw.reindex(plot_dates)
+    pool_vw_5 = _load_pool_value_weighted_roll(5)
+    pool_vw_5 = pool_vw_5.reindex(plot_dates)
 
     fig, ax = plt.subplots(figsize=(12, 3))
     ax.plot(plot_dates, hs_roll.values, color="#7f8c8d", lw=1.5, ls="--", label=f"HS300 {window}d 滚动收益")
     ax.plot(plot_dates, hs_roll_5.values, color="#95a5a6", lw=1.5, ls="--", label="HS300 5d 滚动收益")
-    if pool_has_data:
-        ax.plot(plot_dates, pool_roll.values, color="#e67e22", lw=1.5, ls=":", label=f"全池等权 {window}d 滚动收益")
     ax.plot(plot_dates, pool_vw.values, color="#2ecc71", lw=1.5, ls="-.", label=f"全池加权 {window}d 滚动收益")
+    ax.plot(plot_dates, pool_vw_5.values, color="#e67e22", lw=1.5, ls=":", label="全池加权 5d 滚动收益")
     ax.axhline(0, color="gray", ls=":", lw=0.5)
     ax.set_ylabel(f"{window}d 滚动收益 (%)", fontsize=11)
     ax.set_title("滚动 20 日收益对比", fontsize=11, fontweight="bold")
@@ -1224,16 +1212,20 @@ def run_market_monitor(seq_key=None, verbose=False, current_holdings_set=None, p
             for item in prev_holdings_data:
                 print(f"    {item['code']}: {item['return']:+.2f}% (rank {item['rank']}/{item['total']})")
 
-    # 生成子图（市场宽度回测期 + 20d滚动收益）嵌入日报
+    # 生成子图（市场宽度 20d+5d + 滚动收益）嵌入日报
     subplot_html = ""
     try:
-        breadth_chart = OUTPUT_DIR / "market_breadth.png"
-        plot_breadth_backtest(dates, breadth_df, breadth_chart)
+        breadth_5d_df, _ = compute_market_breadth(window=5)
+        breadth_20d_chart = OUTPUT_DIR / "market_breadth_20d.png"
+        plot_breadth_backtest(dates, breadth_df, breadth_20d_chart)
+        breadth_5d_chart = OUTPUT_DIR / "market_breadth_5d.png"
+        plot_breadth_backtest(dates, breadth_5d_df, breadth_5d_chart)
         rolling_chart = OUTPUT_DIR / "market_rolling_20d.png"
         plot_rolling_20d(dates, values, rolling_chart)
         subplot_html = f"""
         <div style="margin-top:10px;">
-            <div style="margin-bottom:10px;"><img src="{_img_to_b64(breadth_chart)}" style="width:100%;border:1px solid #ddd;border-radius:5px;"></div>
+            <div style="margin-bottom:10px;"><img src="{_img_to_b64(breadth_20d_chart)}" style="width:100%;border:1px solid #ddd;border-radius:5px;"></div>
+            <div style="margin-bottom:10px;"><img src="{_img_to_b64(breadth_5d_chart)}" style="width:100%;border:1px solid #ddd;border-radius:5px;"></div>
             <div><img src="{_img_to_b64(rolling_chart)}" style="width:100%;border:1px solid #ddd;border-radius:5px;"></div>
         </div>"""
     except Exception as e:
