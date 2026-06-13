@@ -1683,6 +1683,7 @@ def daily_eval(
             avg_rank_sub_cfg = cfg_dict.get("avg_rank_sub", avg_rank_sub_cfg)
             avg_score_sub_cfg = cfg_dict.get("avg_score_sub", avg_score_sub_cfg)
             sharpe_weighted_sub_cfg = cfg_dict.get("sharpe_weighted_sub", sharpe_weighted_sub_cfg)
+            config["risk_manager"] = cfg_dict.get("risk_manager", {"enabled": False})
         elif os.path.exists(str(MODEL_SELECTION_PATH)):
             single_models, master, average_enabled, voting_enabled = load_model_selection(path=str(MODEL_SELECTION_PATH))
         if single_models:

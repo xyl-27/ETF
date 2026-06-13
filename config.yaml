@@ -1,7 +1,7 @@
 # ---- 核心模式 ----
 
 mode: "full"                  # full | update-only | predictions-only | from-predictions | from-juejin
-update_data: false            # 仅 mode=full 时有效
+update_data: true            # 仅 mode=full 时有效
 start_date: "2026-04-01"
 rebalance_days: 5            # 调仓间隔（交易日）
 trade_mode: "open"            # open=次日开盘调仓, close=当日收盘调仓
@@ -28,15 +28,22 @@ models:
 
   - dir: model/TSCV/bayes_tcn_74_3/exp_22/fold_3
     file: best_model_sharpe.pth
-    enabled: true
+    enabled: false
     name: tcn_22_3
     weight: 2.420
 
   - dir: model/TSCV/bayes_tcn_74_3/exp_5/fold_3
     file: best_model_sharpe.pth
-    enabled: true
+    enabled: false
     name: tcn_5_3
     weight: 2.376
+
+  # TSCV 最佳 GRU 模型（与 tcn_43 互补，pair 集成最优）
+  - dir: model/TSCV/bayes_gru_74_3/exp_14/fold_3
+    file: best_model_sharpe.pth
+    enabled: true
+    name: gru_14_3
+    weight: 2.074
 
   # 以下搜索候选（min_SR > 1.8），回测发现融合稀释信号，保持 disabled
   - dir: model/TSCV/bayes_tcn_74_3/exp_54/fold_3
@@ -83,18 +90,18 @@ avg_rank_sub:
   weight_strategy: "score_power_3"
   position_pct: 0.90
 
-# 子集成 (Score平均融合)
+# 子集成 (Score平均融合) — pair(tcn_43+gru_14) 为 TSCV 长窗口最优: ret+205% sr=2.89 dd=10.2%
 avg_score_sub:
-  enabled: false
-  models: ["tcn_43_3", "tcn_22_3", "tcn_5_3"]
+  enabled: true
+  models: ["tcn_43_3", "gru_14_3"]
   weight_strategy: "score_power_3"
-  position_pct: 0.50
+  position_pct: 0.90
 
 # Sharpe加权子集成 — 仅 3 个全 fold SR > 2.0 稳健实验
 #   rebalance_days=5 验证：top3(43,22,5)/score_power_3 最优 45.74%/4.81SR
 #   添加更多实验（tcn_19_3 单模型 40.66%）反而稀释融合信号(41.03% < 45.74%)
 sharpe_weighted_sub:
-  enabled: true
+  enabled: false
   models: ["tcn_43_3", "tcn_22_3", "tcn_5_3"]
   weight_strategy: "score_power_3"
   position_pct: 0.90
@@ -109,7 +116,7 @@ sharpe_weighted_sub:
 #   avg_score_sub      → Score平均子集成
 #   sharpe_weighted_sub → Sharpe加权子集成
 #   <model_key>        → 指定模型
-master: "sharpe_weighted_sub"
+master: "avg_score_sub"
 
 # ---- 掘金策略 ----
 juejin:
@@ -127,8 +134,8 @@ risk_manager:
   enabled: true
   strategy: "market_breadth"
   params:
-    lookback_days: 11
-    high_threshold: 0.16
+    lookback_days: 5
+    high_threshold: 0.2
     low_threshold: 0.07
 
 # ---- 邮件 ----

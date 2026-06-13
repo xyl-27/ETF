@@ -429,6 +429,7 @@ class BacktestEngine:
         self.predictions_history = []
         self.skipped_trades = []
         self._prev_total_value = initial_capital
+        self._active_risk_mult = 1.0
 
         self._log_fh = None
         if self.log_file:
@@ -583,7 +584,7 @@ class BacktestEngine:
             low_limit_dict = dict(zip(date_data["股票代码"], date_data["跌停价"]))
             paused_dict = dict(zip(date_data["股票代码"], date_data["停牌"]))
             total_value = self.get_total_value(price_dict)
-            risk_mult = 1.0
+            risk_mult = self._active_risk_mult
             self.equity_curve.append({"date": current_date, "total_value": total_value, "risk_multiplier": risk_mult, "stock_exposure": (total_value - self.cash) / total_value if total_value > 0 else 0})
             if self.log:
                 position_pct = (
@@ -753,7 +754,9 @@ class BacktestEngine:
                         )
                 else:
                     risk_mult = 1.0
+                    self._active_risk_mult = risk_mult
                 self.equity_curve[-1]["risk_multiplier"] = risk_mult
+                self._active_risk_mult = risk_mult
                 effective_pct = self.position_pct * risk_mult
 
                 for pred in predictions[: self.top_k]:
