@@ -433,6 +433,79 @@ def compute_model_vs_market(dates, values, hs_data):
     return df, stats
 
 
+def compute_breadth_regime_stats(dates, values, hs_data, raw_df=None,
+                                 lookback_days=5, high_threshold=0.2, low_threshold=0.07):
+    """按正收益ETF占比(回看N天)划分市场状态, 分段统计模型表现"""
+    if raw_df is None:
+        raw_df = pd.read_csv(DATA_PATH)
+        raw_df["日期"] = pd.to_datetime(raw_df["日期"])
+
+    hs_dict = dict(zip(hs_data["日期"].dt.strftime("%Y-%m-%d"), hs_data["return_pct"]))
+    all_prices = raw_df.pivot_table(index="日期", columns="股票代码", values="收盘")
+    all_dates = sorted(all_prices.index)
+
+    records = []
+    for i, d in enumerate(dates):
+        dt = pd.Timestamp(d) if not isinstance(d, pd.Timestamp) else d
+        avail = [pd for pd in all_dates if pd <= dt]
+        if len(avail) < lookback_days + 1:
+            continue
+        start_dt = avail[-(lookback_days + 1)]
+        start_prices = all_prices.loc[start_dt]
+        end_prices = all_prices.loc[dt]
+        returns = (end_prices - start_prices) / start_prices
+        pos_ratio = (returns > 0).mean()
+
+        if pos_ratio >= high_threshold:
+            regime = "active"
+        elif pos_ratio <= low_threshold:
+            regime = "risky"
+        else:
+            regime = "mixed"
+
+        d_str = dt.strftime("%Y-%m-%d")
+        if d_str in hs_dict:
+            model_ret = (values[i] / values[i - 1] - 1) * 100 if i > 0 else 0
+            records.append({
+                "date": d_str, "model_return": model_ret,
+                "hs300_return": hs_dict[d_str], "regime": regime,
+                "pos_ratio": pos_ratio, "model_value": values[i],
+            })
+
+    df = pd.DataFrame(records)
+    stats = {}
+    if len(df) < 3:
+        stats["all"] = None
+        return df, stats
+
+    for regime_key in ["active", "mixed", "risky"]:
+        sub = df[df["regime"] == regime_key]
+        if len(sub) < 3:
+            continue
+        model_total = ((1 + sub["model_return"] / 100).prod() - 1) * 100
+        hs_total = ((1 + sub["hs300_return"] / 100).prod() - 1) * 100
+        excess = model_total - hs_total
+        beat_rate = (sub["model_return"] > sub["hs300_return"]).mean()
+        model_win_rate = (sub["model_return"] > 0).mean()
+        stats[regime_key] = {
+            "days": len(sub), "model_return": round(model_total, 2),
+            "hs300_return": round(hs_total, 2), "excess_return": round(excess, 2),
+            "beat_rate": round(beat_rate, 4), "model_win_rate": round(model_win_rate, 4),
+        }
+
+    model_total = (values[-1] / values[0] - 1) * 100
+    hs_total = ((1 + df["hs300_return"] / 100).prod() - 1) * 100
+    beat_all = (df["model_return"] > df["hs300_return"]).mean()
+    model_win_all = (df["model_return"] > 0).mean()
+    stats["all"] = {
+        "days": len(df), "model_return": round(model_total, 2),
+        "hs300_return": round(hs_total, 2),
+        "excess_return": round(model_total - hs_total, 2),
+        "beat_rate": round(beat_all, 4), "model_win_rate": round(model_win_all, 4),
+    }
+    return df, stats
+
+
 def compute_recent_performance(dates, values, hs_data, windows=[5, 10, 20]):
     """计算近期滚动表现"""
     hs_prices = hs_data.set_index("日期")["收盘"]
@@ -751,6 +824,57 @@ def build_regime_table_html(stats, current_regime=None, breadth_last=None):
     <p style="font-size:10px;color:#999;">市场状态判定: 以HS300滚动20日收益+波动率为基准。牛: >+5%且波动&lt;30%; 熊: &lt;-5%; 震荡: 其余。市场宽度: 同方法对全ETF池子逐只判定后统计占比。</p>"""
 
 
+def build_breadth_regime_table_html(stats, current_pos_ratio,
+                                    high_threshold=0.2, low_threshold=0.07):
+    """生成正收益ETF占比状态子板块 HTML"""
+    if not stats or not stats.get("all"):
+        return ""
+
+    regime_labels = {
+        "all": "全周期",
+        "active": f"活跃 ≥{high_threshold*100:.0f}%",
+        "mixed": f"分化 {low_threshold*100:.0f}-{high_threshold*100:.0f}%",
+        "risky": f"低迷 ≤{low_threshold*100:.0f}%",
+    }
+
+    if current_pos_ratio >= high_threshold:
+        current_regime = "active"
+    elif current_pos_ratio <= low_threshold:
+        current_regime = "risky"
+    else:
+        current_regime = "mixed"
+
+    rows = ""
+    for regime in ["all", "active", "mixed", "risky"]:
+        s = stats.get(regime)
+        if not s:
+            continue
+        m_ret = s["model_return"]
+        h_ret = s.get("hs300_return", 0)
+        e_ret = s.get("excess_return", 0)
+        mwr = s.get("model_win_rate", s.get("beat_rate", 0))
+        m_clr = "#cc0000" if m_ret >= 0 else "#009900"
+        h_clr = "#cc0000" if h_ret >= 0 else "#009900"
+        e_clr = "#cc0000" if e_ret >= 0 else "#009900"
+        cur_tag = " ★ 当前" if regime == current_regime else ""
+        rows += f"""<tr>
+            <td style="font-weight:bold;">{regime_labels.get(regime, regime)}{cur_tag}</td>
+            <td style="text-align:right;">{s['days']}天</td>
+            <td style="text-align:right;color:{m_clr};">{m_ret:+.2f}%</td>
+            <td style="text-align:right;color:{h_clr};">{h_ret:+.2f}%</td>
+            <td style="text-align:right;color:{e_clr};font-weight:bold;">{e_ret:+.2f}%</td>
+            <td style="text-align:right;">{mwr*100:.1f}%</td>
+        </tr>"""
+
+    return f"""<h3 style="margin-top:16px;">市场广度状态</h3>
+    <p style="font-size:11px;color:#666;">正收益ETF占比(回看5天): <b>{current_pos_ratio*100:.1f}%</b> (阈值: {high_threshold*100:.0f}%/{low_threshold*100:.0f}%)</p>
+    <table>
+        <thead><tr><th>正收益占比状态</th><th style="text-align:right;">天数</th><th style="text-align:right;">模型收益</th><th style="text-align:right;">HS300</th><th style="text-align:right;">超额收益</th><th style="text-align:right;">调仓胜率</th></tr></thead>
+        <tbody>{rows}</tbody>
+    </table>
+    <p style="font-size:10px;color:#999;">正收益ETF占比状态判定: 回看5天, 计算全池正收益ETF占比。活跃: ≥{high_threshold*100:.0f}%; 分化: {low_threshold*100:.0f}-{high_threshold*100:.0f}%; 低迷: ≤{low_threshold*100:.0f}%</p>"""
+
+
 def compute_virtual_equity_curve(equity_curve):
     """回算虚拟无风控组合的权益曲线。
 
@@ -1057,6 +1181,25 @@ def run_market_monitor(seq_key=None, verbose=False, current_holdings_set=None, p
 
     risk_state_html = build_risk_state_html(risk_state)
 
+    # 市场广度状态子板块
+    breadth_regime_html = ""
+    try:
+        raw_pool = pd.read_csv(DATA_PATH)
+        raw_pool["日期"] = pd.to_datetime(raw_pool["日期"])
+        breadth_regime_df, breadth_regime_stats = compute_breadth_regime_stats(
+            dates, values, hs_data, raw_df=raw_pool,
+            lookback_days=5, high_threshold=0.2, low_threshold=0.07,
+        )
+        if breadth_regime_stats and breadth_regime_stats.get("all"):
+            current_pos_ratio = breadth_regime_df.iloc[-1]["pos_ratio"] if len(breadth_regime_df) > 0 else 0.0
+            breadth_regime_html = build_breadth_regime_table_html(
+                breadth_regime_stats, current_pos_ratio,
+                high_threshold=0.2, low_threshold=0.07,
+            )
+    except Exception as e:
+        if verbose:
+            print(f"  [市场广度状态] 生成失败: {e}")
+
     top, bot, holdings_data, prev_holdings_data, rank_start, rank_end = compute_top_etf_rankings(
         current_holdings_set=current_holdings_set, prev_holdings_set=prev_holdings_set,
         current_rebalance_date=current_rebalance_date, prev_rebalance_date=prev_rebalance_date,
@@ -1096,7 +1239,7 @@ def run_market_monitor(seq_key=None, verbose=False, current_holdings_set=None, p
     except Exception as e:
         print(f"  [子图] 生成失败: {e}")
 
-    html_section = regime_html + risk_state_html + subplot_html + "<br>" + (rank_html if rank_html else "")
+    html_section = regime_html + risk_state_html + breadth_regime_html + subplot_html + "<br>" + (rank_html if rank_html else "")
 
     json_path = OUTPUT_DIR / "market_monitor.json"
     with open(json_path, "w") as f:
@@ -1105,6 +1248,7 @@ def run_market_monitor(seq_key=None, verbose=False, current_holdings_set=None, p
             "current_regime": current_regime,
             "breadth": breadth_last,
             "risk_manager": risk_state,
+            "breadth_regime_stats": breadth_regime_stats if 'breadth_regime_stats' in dir() else None,
             "etf_rankings": {
                 "period": rank_date,
                 "top": top,

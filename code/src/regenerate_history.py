@@ -273,7 +273,7 @@ def build_market_monitor_section(raw_df, seq, target_date, holdings_at_date, etf
             }
 
     # Build HTML
-    from market_monitor import build_regime_table_html, build_etf_rankings_html
+    from market_monitor import build_regime_table_html, build_etf_rankings_html, build_breadth_regime_table_html, compute_breadth_regime_stats
     regime_html = build_regime_table_html(stats, {
         "regime": regime,
         "rolling_20d_return": r20 if not pd.isna(r20) else 0,
@@ -294,7 +294,27 @@ def build_market_monitor_section(raw_df, seq, target_date, holdings_at_date, etf
     if top10:
         rank_html = build_etf_rankings_html(top10, bot10, holdings_data, prev_holdings_data, rank_date)
 
-    return regime_html + "<br>" + rank_html if rank_html else regime_html
+    # 市场广度状态子板块
+    breadth_regime_html = ""
+    try:
+        if len(ec_trunc) >= 3:
+            br_df, br_stats = compute_breadth_regime_stats(
+                ec_dates, ec_values, hs_period, raw_df=raw_df,
+                lookback_days=5, high_threshold=0.2, low_threshold=0.07,
+            )
+            if br_stats and br_stats.get("all"):
+                current_pos_ratio = br_df.iloc[-1]["pos_ratio"] if len(br_df) > 0 else 0.0
+                breadth_regime_html = build_breadth_regime_table_html(
+                    br_stats, current_pos_ratio,
+                    high_threshold=0.2, low_threshold=0.07,
+                )
+    except Exception:
+        pass
+
+    result = regime_html + breadth_regime_html
+    if rank_html:
+        result += "<br>" + rank_html
+    return result
 
 
 def simulate_state_at_date(seq, target_date, raw_df, initial_capital=100000):
